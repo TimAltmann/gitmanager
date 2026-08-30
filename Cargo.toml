@@ -1,0 +1,46 @@
+[package]
+name = "gitmanager"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight Git repository manager for Windows - shows folders, branches and dirty status, opens in VS Code"
+authors = ["gitmanager"]
+license = "MIT"
+repository = "https://github.com/gitmanager/gitmanager"
+keywords = ["git", "manager", "gui", "windows"]
+categories = ["development-tools"]
+
+[dependencies]
+eframe = { version = "0.32", features = ["default_fonts", "glow"] }
+egui = "0.32"
+egui_extras = { version = "0.32", features = ["svg"] }
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+directories = "6.0"
+rfd = "0.15"
+walkdir = "2.5"
+rayon = "1.11"
+anyhow = "1.0"
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+
+[dev-dependencies]
+tempfile = "3.15"
+
+[build-dependencies]
+winres = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+# Windows subsystem: console in debug, windows in release (kein Konsolenfenster)
+[[bin]]
+name = "gitmanager"
+path = "src/main.rs"

@@ -1,0 +1,11 @@
+Phosphor Icons - MIT License (https://github.com/phosphor-icons/core/blob/main/LICENSE)
+Simple Icons - CC0 1.0 Universal (https://github.com/simple-icons/simple-icons/blob/develop/LICENSE.md)
+- Simple Icons collection is CC0, but individual brand icons (Visual Studio Code, Visual Studio, Rider, Claude) are trademarks of their respective owners (Microsoft, JetBrains, Anthropic).
+- Use is nominative fair use: icons are used to identify the target application when opening files ("Open in VS Code", etc.), not to imply endorsement.
+- If you redistribute this project, keep this notice and respect trademark guidelines:
+  * VS Code: https://code.visualstudio.com/brand
+  * Visual Studio: https://visualstudio.microsoft.com/license-terms/
+  * JetBrains Rider: https://www.jetbrains.com/company/brand/
+  * Claude: https://www.anthropic.com/brand
+
+This project is not affiliated with Microsoft, JetBrains, or Anthropic.

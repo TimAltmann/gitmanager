@@ -1,0 +1,28 @@
+# Rust
+/target/
+# Keep Cargo.lock for reproducible builds (binary crate)
+# /Cargo.lock
+**/*.rs.bk
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker volumes
+.cargo-cache/
+
+# Build artifacts
+*.exe
+*.pdb
+*.ilk
+
+# Config (lokal, nicht im Repo)
+config.json
