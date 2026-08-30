@@ -412,7 +412,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     for (idx, profile) in state.draft.profiles.iter().enumerate() {
         let is_selected = Some(idx) == state.selected_profile_idx;
         let is_active = profile.id == state.draft.active_profile_id;
-        let visuals = &ui.ctx().style().visuals;
+        let visuals = ui.visuals();
         let frame = egui::Frame::new()
             .fill(visuals.widgets.inactive.bg_fill)
             .stroke(egui::Stroke::new(
@@ -611,7 +611,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
 
             let mut to_remove_ide: Option<usize> = None;
             for (ide_idx, ide) in profile.ides.iter_mut().enumerate() {
-                let visuals = &ui.ctx().style().visuals;
+                let visuals = ui.visuals();
                 egui::Frame::new()
                     .fill(visuals.widgets.inactive.bg_fill)
                     .stroke(egui::Stroke::new(
@@ -815,7 +815,7 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     for (idx, agent) in state.draft.agents.iter().enumerate() {
         let is_selected = Some(idx) == state.selected_agent_idx;
         let is_active = Some(&agent.id) == state.draft.active_agent_id.as_ref();
-        let visuals = &ui.ctx().style().visuals;
+        let visuals = ui.visuals();
         let frame = egui::Frame::new()
             .fill(visuals.widgets.inactive.bg_fill)
             .stroke(egui::Stroke::new(
@@ -1177,7 +1177,7 @@ fn show_language_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
 
     for l in Language::all() {
         let is_active = state.draft.language == l;
-        let visuals = &ui.ctx().style().visuals;
+        let visuals = ui.visuals();
         let frame = egui::Frame::new()
             .fill(visuals.widgets.inactive.bg_fill)
             .stroke(egui::Stroke::new(
@@ -1263,7 +1263,7 @@ fn show_appearance_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             crate::config::Theme::Dracula => "Dracula — dunkles Lila/Grün",
             crate::config::Theme::Solarized => "Solarized Light — warmes Beige",
         };
-        let visuals = &ui.ctx().style().visuals;
+        let visuals = ui.visuals();
         let frame = egui::Frame::new()
             .fill(visuals.widgets.inactive.bg_fill)
             .stroke(egui::Stroke::new(

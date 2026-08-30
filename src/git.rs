@@ -55,7 +55,7 @@ pub fn get_branch(repo: &Repository) -> (String, bool) {
     match repo.head() {
         Ok(head) => {
             if head.is_branch() {
-                if let Some(name) = head.shorthand() {
+                if let Ok(name) = head.shorthand() {
                     return (name.to_string(), false);
                 }
             }
@@ -124,7 +124,7 @@ pub fn get_detailed_status(repo: &Repository) -> Vec<String> {
     let mut files = Vec::new();
     if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
         for entry in statuses.iter() {
-            if let Some(path) = entry.path() {
+            if let Ok(path) = entry.path() {
                 let status = entry.status();
                 let flag = if status.is_wt_new() {
                     "untracked"
@@ -159,7 +159,7 @@ pub fn list_branches(path: &Path) -> Vec<String> {
         for b in iter.flatten() {
             if let Ok(Some(name)) = b.0.name() {
                 branches.push(name.to_string());
-            } else if let Some(sh) = b.0.get().shorthand() {
+            } else if let Ok(sh) = b.0.get().shorthand() {
                 branches.push(sh.to_string());
             }
         }
@@ -168,7 +168,7 @@ pub fn list_branches(path: &Path) -> Vec<String> {
     if let Ok(iter) = repo.branches(Some(BranchType::Remote)) {
         for b in iter.flatten() {
             // Remote branches kommen als "origin/main" oder "origin/HEAD"
-            let shorthand = b.0.get().shorthand().unwrap_or_default().to_string();
+            let shorthand = b.0.get().shorthand().unwrap_or("").to_string();
             // Ignoriere HEAD
             if shorthand.ends_with("/HEAD") {
                 continue;
@@ -194,7 +194,15 @@ pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
         .remotes()
         .map_err(|e| anyhow::anyhow!("Remotes lesen fehlgeschlagen: {e}"))?;
     let mut last_err = None;
-    for remote_name in remotes.iter().flatten() {
+    for remote_res in remotes.iter() {
+        let remote_name = match remote_res {
+            Ok(Some(name)) => name,
+            Ok(None) => continue,
+            Err(e) => {
+                eprintln!("Remote name invalid: {e}");
+                continue;
+            }
+        };
         match repo.find_remote(remote_name) {
             Ok(mut remote) => {
                 // Fetch ohne Specs = default fetchspec des Remotes
@@ -303,7 +311,7 @@ pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
         Some(gref) => {
             let name = gref
                 .name()
-                .ok_or_else(|| anyhow::anyhow!("Ungültige Referenz"))?;
+                .map_err(|e| anyhow::anyhow!("Ungültige Referenz: {e}"))?;
             // Wenn es ein Remote-Branch ist (refs/remotes/...), erstelle lokalen Tracking-Branch
             if name.starts_with("refs/remotes/") {
                 // Extrahiere kurzen Namen ohne remote prefix
@@ -365,7 +373,7 @@ pub fn checkout_branch_force(path: &Path, branch_name: &str) -> anyhow::Result<(
         Some(gref) => {
             let name = gref
                 .name()
-                .ok_or_else(|| anyhow::anyhow!("Ungültige Referenz"))?;
+                .map_err(|e| anyhow::anyhow!("Ungültige Referenz: {e}"))?;
             repo.set_head(name)
                 .map_err(|e| anyhow::anyhow!("HEAD setzen fehlgeschlagen: {e}"))?;
         }

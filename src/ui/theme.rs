@@ -1,11 +1,6 @@
 use crate::config::Theme;
 use egui::{Color32, Visuals};
 
-#[allow(dead_code)]
-pub fn apply_minimal_theme(ctx: &egui::Context) {
-    apply_theme(ctx, &Theme::Light);
-}
-
 pub fn apply_theme(ctx: &egui::Context, theme: &Theme) {
     let mut visuals = match theme {
         Theme::Light => {
@@ -75,7 +70,7 @@ pub fn apply_theme(ctx: &egui::Context, theme: &Theme) {
     visuals.window_corner_radius = egui::CornerRadius::same(8);
     ctx.set_visuals(visuals);
 
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style.text_styles.insert(
         egui::TextStyle::Heading,
         egui::FontId::new(18.0, egui::FontFamily::Proportional),
@@ -92,7 +87,7 @@ pub fn apply_theme(ctx: &egui::Context, theme: &Theme) {
         egui::TextStyle::Small,
         egui::FontId::new(11.0, egui::FontFamily::Proportional),
     );
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
 
 pub const COLOR_DIRTY: Color32 = Color32::from_rgb(220, 70, 40);
@@ -108,7 +103,7 @@ mod tests {
         for theme in Theme::all() {
             let ctx = egui::Context::default();
             apply_theme(&ctx, &theme);
-            let visuals = ctx.style().visuals.clone();
+            let visuals = ctx.global_style().visuals.clone();
             match theme {
                 Theme::Light => {
                     assert_eq!(visuals.panel_fill, Color32::from_rgb(250, 250, 250));
@@ -148,7 +143,7 @@ mod tests {
     fn apply_theme_corner_radius_and_text_styles() {
         let ctx = egui::Context::default();
         apply_theme(&ctx, &Theme::Light);
-        let visuals = ctx.style().visuals.clone();
+        let visuals = ctx.global_style().visuals.clone();
         assert_eq!(
             visuals.widgets.noninteractive.corner_radius,
             egui::CornerRadius::same(6)
@@ -166,23 +161,11 @@ mod tests {
             egui::CornerRadius::same(6)
         );
         assert_eq!(visuals.window_corner_radius, egui::CornerRadius::same(8));
-        let style = ctx.style();
+        let style = ctx.global_style();
         assert_eq!(style.text_styles[&egui::TextStyle::Heading].size, 18.0);
         assert_eq!(style.text_styles[&egui::TextStyle::Body].size, 13.0);
         assert_eq!(style.text_styles[&egui::TextStyle::Button].size, 13.0);
         assert_eq!(style.text_styles[&egui::TextStyle::Small].size, 11.0);
-    }
-
-    #[test]
-    fn apply_minimal_theme_delegates_to_light() {
-        let ctx = egui::Context::default();
-        apply_minimal_theme(&ctx);
-        let visuals = ctx.style().visuals.clone();
-        // should equal Light theme
-        let ctx2 = egui::Context::default();
-        apply_theme(&ctx2, &Theme::Light);
-        assert_eq!(visuals.panel_fill, ctx2.style().visuals.panel_fill);
-        assert_eq!(visuals.window_fill, ctx2.style().visuals.window_fill);
     }
 
     #[test]
@@ -200,7 +183,7 @@ mod tests {
             // should not panic
             apply_theme(&ctx, &theme);
             // style should be set
-            assert!(ctx.style().visuals.panel_fill != Color32::TRANSPARENT);
+            assert!(ctx.global_style().visuals.panel_fill != Color32::TRANSPARENT);
         }
     }
 }
