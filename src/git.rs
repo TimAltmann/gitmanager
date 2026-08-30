@@ -216,7 +216,7 @@ pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
         // Für UI: zeige Fehler nur wenn alle fehlgeschlagen
         // Hier geben wir den letzten Fehler zurück, UI kann entscheiden
         // Wenn gar keine Remotes, ist das ok
-        if remotes.len() == 0 {
+        if remotes.is_empty() {
             return Ok(());
         }
         // Wenn nur ein Remote und der fehlgeschlagen, Fehler zurück
@@ -307,7 +307,7 @@ pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
             // Wenn es ein Remote-Branch ist (refs/remotes/...), erstelle lokalen Tracking-Branch
             if name.starts_with("refs/remotes/") {
                 // Extrahiere kurzen Namen ohne remote prefix
-                let short = branch_name.split('/').last().unwrap_or(branch_name);
+                let short = branch_name.split('/').next_back().unwrap_or(branch_name);
                 let commit = object
                     .peel_to_commit()
                     .map_err(|e| anyhow::anyhow!("Commit nicht gefunden: {e}"))?;
@@ -337,10 +337,23 @@ pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Force Checkout (überschreibt lokale Änderungen) – nur nach Bestätigung
+/// Force Checkout (überschreibt lokale Änderungen) – nur nach Bestätigung via Dialog nach Dirty-Check.
+/// Verhindert versehentliches Zerstören eines laufenden Merge/Rebase-States.
 pub fn checkout_branch_force(path: &Path, branch_name: &str) -> anyhow::Result<()> {
     let repo =
         Repository::open(path).map_err(|e| anyhow::anyhow!("Repo öffnen fehlgeschlagen: {e}"))?;
+    if repo.is_bare() {
+        anyhow::bail!("Bare Repository – Checkout nicht möglich");
+    }
+    if is_merge_in_progress(&repo) {
+        anyhow::bail!(
+            "Merge/Rebase läuft noch ({:?}) – Force Checkout blockiert",
+            repo.state()
+        );
+    }
+    if has_merge_conflicts(&repo) {
+        anyhow::bail!("Merge-Konflikte vorhanden – bitte erst lösen, Force nicht erlaubt");
+    }
     let (object, reference) = repo
         .revparse_ext(branch_name)
         .map_err(|e| anyhow::anyhow!("Branch '{branch_name}' nicht gefunden: {e}"))?;
@@ -415,6 +428,33 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<()> 
 /// Convenience: RepoInfo für einen Pfad ermitteln, falls es ein Repo ist
 pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
     let repo = open_repo(&path)?;
+    if repo.is_bare() {
+        return None;
+    }
+    // Verhindere Discovery-Bug: Repository::open() macht Discovery und öffnet Parent-Repos.
+    // Nur wenn workdir == path, ist path selbst ein Repo-Root.
+    {
+        let workdir = repo.workdir()?;
+        let candidate_canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let workdir_canon = workdir
+            .canonicalize()
+            .unwrap_or_else(|_| workdir.to_path_buf());
+        // Auf Windows case-insensitiv vergleichen
+        #[cfg(windows)]
+        {
+            if candidate_canon.to_string_lossy().to_lowercase()
+                != workdir_canon.to_string_lossy().to_lowercase()
+            {
+                return None;
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            if candidate_canon != workdir_canon {
+                return None;
+            }
+        }
+    }
     let (branch, is_detached) = get_branch(&repo);
     let dirty = is_dirty(&repo);
     let branches = list_branches(&path);
@@ -445,11 +485,145 @@ fn quote_if_needed(s: &str) -> String {
     }
 }
 
+fn escape_for_powershell(s: &str) -> String {
+    // PowerShell single-quoted string: ' escapes as ''
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+fn escape_for_cmd(s: &str) -> String {
+    // Für cmd /K: wrap in double quotes if contains space or shell meta, escape inner quotes
+    let needs_quote = s.contains(' ')
+        || s.contains('&')
+        || s.contains('|')
+        || s.contains('<')
+        || s.contains('>')
+        || s.contains('^')
+        || s.contains('"');
+    if needs_quote {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn build_agent_cmd_raw(agent: &AgentProfile, repo_path: &Path) -> String {
+    if !agent.args.is_empty() {
+        let args_str = agent
+            .args
+            .iter()
+            .map(|a| quote_if_needed(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{} {}", agent.program, args_str)
+    } else if let Some(cmd) = &agent.command {
+        if cmd.contains("{file}") || cmd.contains("{dir}") || cmd.contains("{repo}") {
+            substitute_placeholders(cmd, repo_path)
+        } else {
+            cmd.clone()
+        }
+    } else {
+        agent.program.clone()
+    }
+}
+
+fn build_powershell_script(agent: &AgentProfile, repo_path: &Path) -> String {
+    if !agent.args.is_empty() {
+        let escaped_program = escape_for_powershell(&agent.program);
+        let escaped_args = agent
+            .args
+            .iter()
+            .map(|a| {
+                let substituted = substitute_placeholders(a, repo_path);
+                escape_for_powershell(&substituted)
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if escaped_args.is_empty() {
+            format!("& {}", escaped_program)
+        } else {
+            format!("& {} {}", escaped_program, escaped_args)
+        }
+    } else if let Some(cmd) = &agent.command {
+        let substituted =
+            if cmd.contains("{file}") || cmd.contains("{dir}") || cmd.contains("{repo}") {
+                substitute_placeholders(cmd, repo_path)
+            } else {
+                cmd.clone()
+            };
+        // Für command als raw string: direkt ausführen, aber nicht zusätzlich mit & wrappen wenn es bereits komplex ist
+        substituted
+    } else {
+        escape_for_powershell(&agent.program)
+    }
+}
+
+fn build_cmd_agent_string(agent: &AgentProfile, repo_path: &Path) -> String {
+    if !agent.args.is_empty() {
+        let args_str = agent
+            .args
+            .iter()
+            .map(|a| {
+                let substituted = substitute_placeholders(a, repo_path);
+                escape_for_cmd(&substituted)
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{} {}", escape_for_cmd(&agent.program), args_str)
+    } else if let Some(cmd) = &agent.command {
+        if cmd.contains("{file}") || cmd.contains("{dir}") || cmd.contains("{repo}") {
+            substitute_placeholders(cmd, repo_path)
+        } else {
+            cmd.clone()
+        }
+    } else {
+        escape_for_cmd(&agent.program)
+    }
+}
+
 pub fn is_program_available(program: &str) -> bool {
-    // Versuche `where` (Windows) bzw. `which` (Unix)
+    // Blocke Shell-Metazeichen im Programmnamen selbst (verhindert Injection über Config)
+    if program.is_empty() || program.chars().any(|c| "&|;><`$\"'".contains(c)) {
+        return false;
+    }
+    // Direkter Pfad? Prüfe Existenz ohne PATH-Suche
+    if program.contains('/') || program.contains('\\') {
+        return Path::new(program).exists();
+    }
+    // Manuelle PATH-Suche (vermeidet Hijacking von `where`/`which` selbst)
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            #[cfg(windows)]
+            {
+                let candidates = [
+                    dir.join(program),
+                    dir.join(format!("{}.exe", program)),
+                    dir.join(format!("{}.cmd", program)),
+                    dir.join(format!("{}.bat", program)),
+                ];
+                if candidates.iter().any(|p| p.exists()) {
+                    return true;
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let candidate = dir.join(program);
+                if candidate.exists() {
+                    // Auf Unix: prüfe ob ausführbar (existenz reicht für Desktop-App)
+                    return true;
+                }
+            }
+        }
+    }
+    // Fallback: versuche `where` (Windows) bzw. `which` (Unix) mit absoluten Pfaden
     #[cfg(windows)]
     {
-        std::process::Command::new("where")
+        let system_where = PathBuf::from(r"C:\Windows\System32\where.exe");
+        let where_cmd = if system_where.exists() {
+            system_where
+        } else {
+            PathBuf::from("where")
+        };
+        std::process::Command::new(where_cmd)
             .arg(program)
             .output()
             .map(|o| o.status.success())
@@ -457,7 +631,13 @@ pub fn is_program_available(program: &str) -> bool {
     }
     #[cfg(not(windows))]
     {
-        std::process::Command::new("which")
+        let which_path = PathBuf::from("/usr/bin/which");
+        let which_cmd = if which_path.exists() {
+            which_path
+        } else {
+            PathBuf::from("which")
+        };
+        std::process::Command::new(which_cmd)
             .arg(program)
             .output()
             .map(|o| o.status.success())
@@ -515,17 +695,22 @@ pub fn launch_ide(ide: &IdeConfig, file: &Path) -> anyhow::Result<()> {
         cmd.spawn()
     };
 
-    // Validierung: wenn nicht allow_unsafe, blockiere gefährliche Zeichen
-    if !ide.allow_unsafe {
+    // Validierung: nur wenn Shell verwendet wird (use_shell) und nicht allow_unsafe, blockiere gefährliche Zeichen
+    // Bei use_shell=false werden args via Command::args ohne Shell-Parsing übergeben – Zeichen wie '&' in Pfaden
+    // wie "C:\Users\Tom & Jerry\app.sln" sind dann harmlos und dürfen nicht blockiert werden.
+    // Bei use_shell=true wird via cmd /C gestartet und Shell-Zeichen müssen blockiert werden.
+    let shell_chars = ['&', '|', ';', '>', '<'];
+    if ide.use_shell && !ide.allow_unsafe {
         for a in &args {
-            if a.contains('&')
-                || a.contains('|')
-                || a.contains(';')
-                || a.contains('>')
-                || a.contains('<')
-            {
+            if a.chars().any(|c| shell_chars.contains(&c)) {
                 anyhow::bail!("Ungültige Zeichen in IDE-Args (shell-Zeichen) – aktiviere allow_unsafe wenn beabsichtigt: {a}");
             }
+        }
+        if effective_program.chars().any(|c| shell_chars.contains(&c)) {
+            anyhow::bail!(
+                "Ungültige Zeichen in IDE-Programm (shell-Zeichen) – aktiviere allow_unsafe wenn beabsichtigt: {}",
+                effective_program
+            );
         }
     }
 
@@ -544,7 +729,21 @@ pub fn launch_ide(ide: &IdeConfig, file: &Path) -> anyhow::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             #[cfg(windows)]
             {
-                // Fallback via cmd /C (shell)
+                // Fallback via cmd /C verwendet eine Shell – daher bei !allow_unsafe Shell-Zeichen blockieren,
+                // unabhängig von use_shell, da hier immer eine Shell involviert ist.
+                if !ide.allow_unsafe {
+                    for a in &args {
+                        if a.chars().any(|c| shell_chars.contains(&c)) {
+                            anyhow::bail!("Ungültige Zeichen in IDE-Args für Shell-Fallback (allow_unsafe erforderlich): {a}");
+                        }
+                    }
+                    if effective_program.chars().any(|c| shell_chars.contains(&c)) {
+                        anyhow::bail!(
+                            "Ungültige Zeichen in IDE-Programm für Shell-Fallback (allow_unsafe erforderlich): {}",
+                            effective_program
+                        );
+                    }
+                }
                 let mut shell_args = vec!["/C".to_string(), effective_program.clone()];
                 shell_args.extend(args.clone());
                 let mut cmd = std::process::Command::new("cmd");
@@ -586,31 +785,23 @@ pub fn launch_agent(
     repo_path: &Path,
     terminal_pref: &TerminalPreference,
 ) -> anyhow::Result<()> {
-    let agent_cmd = if !agent.args.is_empty() {
-        let args_str = agent
-            .args
-            .iter()
-            .map(|a| quote_if_needed(a))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("{} {}", agent.program, args_str)
-    } else if let Some(cmd) = &agent.command {
-        if cmd.contains("{file}") || cmd.contains("{dir}") || cmd.contains("{repo}") {
-            substitute_placeholders(cmd, repo_path)
-        } else {
-            cmd.clone()
-        }
-    } else {
-        agent.program.clone()
-    };
-
-    let repo_str = repo_path.display().to_string();
     let pref = agent.terminal_override.as_ref().unwrap_or(terminal_pref);
+    // Baue sichere Kommandos für jeweilige Shell (PowerShell single-quoted, cmd double-quoted)
+    let ps_script = build_powershell_script(agent, repo_path);
+    let cmd_agent_string = build_cmd_agent_string(agent, repo_path);
+    let agent_cmd_raw = build_agent_cmd_raw(agent, repo_path);
+    let repo_str = repo_path.display().to_string();
 
     #[cfg(test)]
     {
         // In tests: don't spawn terminal windows that stay open
-        let _ = (&agent_cmd, &repo_str, &pref);
+        let _ = (
+            &ps_script,
+            &cmd_agent_string,
+            &agent_cmd_raw,
+            &repo_str,
+            &pref,
+        );
         return Ok(());
     }
 
@@ -621,10 +812,11 @@ pub fn launch_agent(
 
     match pref {
         TerminalPreference::WindowsTerminal if has_wt => {
-            // wt -d <dir> -- cmd /k <agent_cmd>  OR powershell -NoExit
-            // Verwende cmd /k um Terminal offen zu halten
+            // wt -d <dir> -- cmd /k <agent>  – repo_str als einzelnes Arg via Command::args (kein Shell-Parsing)
+            // Zusätzlich current_dir setzen als Härtung
             let mut cmd = std::process::Command::new("wt");
-            cmd.args(["-d", &repo_str, "--", "cmd", "/k", &agent_cmd]);
+            cmd.args(["-d", &repo_str, "--", "cmd", "/k", &cmd_agent_string]);
+            cmd.current_dir(repo_path);
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -636,13 +828,9 @@ pub fn launch_agent(
         }
         TerminalPreference::Powershell => {
             let ps = if has_pwsh { "pwsh" } else { "powershell" };
-            let script = format!(
-                "Set-Location -Path '{}'; & {}",
-                repo_str.replace('\'', "''"),
-                agent_cmd
-            );
             let mut cmd = std::process::Command::new(ps);
-            cmd.args(["-NoExit", "-Command", &script]);
+            cmd.args(["-NoExit", "-Command", &ps_script]);
+            cmd.current_dir(repo_path);
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -654,7 +842,17 @@ pub fn launch_agent(
         }
         TerminalPreference::Cmd => {
             let mut cmd = std::process::Command::new("cmd");
-            cmd.args(["/C", "start", "", "/D", &repo_str, "cmd", "/K", &agent_cmd]);
+            cmd.args([
+                "/C",
+                "start",
+                "",
+                "/D",
+                &repo_str,
+                "cmd",
+                "/K",
+                &cmd_agent_string,
+            ]);
+            cmd.current_dir(repo_path);
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -666,7 +864,16 @@ pub fn launch_agent(
         }
         TerminalPreference::Custom(custom) => {
             let mut cmd = std::process::Command::new(custom);
-            cmd.arg(&agent_cmd);
+            // Für Custom Terminal: versuche program+args direkt, sonst raw string
+            if !agent.args.is_empty() {
+                cmd.arg(&agent.program);
+                for a in &agent.args {
+                    let substituted = substitute_placeholders(a, repo_path);
+                    cmd.arg(substituted);
+                }
+            } else {
+                cmd.arg(&agent_cmd_raw);
+            }
             cmd.current_dir(repo_path);
             #[cfg(windows)]
             {
@@ -681,37 +888,44 @@ pub fn launch_agent(
             // Auto: wt -> powershell -> cmd
             if has_wt {
                 let mut cmd = std::process::Command::new("wt");
-                cmd.args(["-d", &repo_str, "--", "cmd", "/k", &agent_cmd]);
+                cmd.args(["-d", &repo_str, "--", "cmd", "/k", &cmd_agent_string]);
+                cmd.current_dir(repo_path);
                 #[cfg(windows)]
                 {
                     use std::os::windows::process::CommandExt;
                     cmd.creation_flags(0x00000010);
                 }
-                if let Ok(_) = cmd.spawn() {
+                if cmd.spawn().is_ok() {
                     return Ok(());
                 }
             }
             if has_pwsh || has_powershell {
                 let ps = if has_pwsh { "pwsh" } else { "powershell" };
-                let script = format!(
-                    "Set-Location -Path '{}'; & {}",
-                    repo_str.replace('\'', "''"),
-                    agent_cmd
-                );
                 let mut cmd = std::process::Command::new(ps);
-                cmd.args(["-NoExit", "-Command", &script]);
+                cmd.args(["-NoExit", "-Command", &ps_script]);
+                cmd.current_dir(repo_path);
                 #[cfg(windows)]
                 {
                     use std::os::windows::process::CommandExt;
                     cmd.creation_flags(0x00000010);
                 }
-                if let Ok(_) = cmd.spawn() {
+                if cmd.spawn().is_ok() {
                     return Ok(());
                 }
             }
             // Fallback cmd
             let mut cmd = std::process::Command::new("cmd");
-            cmd.args(["/C", "start", "", "/D", &repo_str, "cmd", "/K", &agent_cmd]);
+            cmd.args([
+                "/C",
+                "start",
+                "",
+                "/D",
+                &repo_str,
+                "cmd",
+                "/K",
+                &cmd_agent_string,
+            ]);
+            cmd.current_dir(repo_path);
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -724,7 +938,17 @@ pub fn launch_agent(
         _ => {
             // Fallback für Auto wenn wt nicht verfügbar etc., behandele wie Auto
             let mut cmd = std::process::Command::new("cmd");
-            cmd.args(["/C", "start", "", "/D", &repo_str, "cmd", "/K", &agent_cmd]);
+            cmd.args([
+                "/C",
+                "start",
+                "",
+                "/D",
+                &repo_str,
+                "cmd",
+                "/K",
+                &cmd_agent_string,
+            ]);
+            cmd.current_dir(repo_path);
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -1418,21 +1642,39 @@ mod tests {
 
     #[test]
     fn launch_ide_blocks_shell_chars_when_not_unsafe() {
+        // Nur wenn use_shell=true und allow_unsafe=false soll blockiert werden.
+        // Bei use_shell=false ist Command::args sicher (kein Shell-Parsing), daher sind '&' etc in Pfaden erlaubt.
         let ide = IdeConfig {
             id: "test".to_string(),
             display_name: "Test".to_string(),
             program: "code".to_string(),
             args: vec!["a & b".to_string()],
             command: None,
-            use_shell: false,
+            use_shell: true,
             allow_unsafe: false,
         };
         let res = launch_ide(&ide, Path::new("/tmp/foo.sln"));
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Ungültige Zeichen"));
 
+        // Bei use_shell=false soll gleicher Arg nicht blockiert werden (harmlos)
+        let ide_no_shell = IdeConfig {
+            use_shell: false,
+            ..ide.clone()
+        };
+        let res_no_shell = launch_ide(&ide_no_shell, Path::new("/tmp/foo.sln"));
+        // In tests wird spawn für "code" gemockt -> Ok, aber nicht wegen Shell-Chars fehlgeschlagen
+        assert!(
+            res_no_shell.is_ok()
+                || !res_no_shell
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Ungültige Zeichen")
+        );
+
         let mut ide2 = IdeConfig {
             allow_unsafe: true,
+            use_shell: true,
             ..ide.clone()
         };
         // Use harmless program for test to avoid opening VS Code window
@@ -1445,6 +1687,19 @@ mod tests {
         if let Err(e) = res2 {
             assert!(!e.to_string().contains("Ungültige Zeichen"));
         }
+
+        // Pfad mit '&' bei use_shell=false soll erlaubt sein (z.B. "C:\Users\Tom & Jerry\app.sln")
+        let ide_path = IdeConfig {
+            id: "test".to_string(),
+            display_name: "Test".to_string(),
+            program: "true".to_string(),
+            args: vec!["{file}".to_string()],
+            command: None,
+            use_shell: false,
+            allow_unsafe: false,
+        };
+        let res_path = launch_ide(&ide_path, Path::new("/tmp/Tom & Jerry/app.sln"));
+        assert!(res_path.is_ok());
     }
 
     #[test]
@@ -1456,10 +1711,28 @@ mod tests {
                 program: "code".to_string(),
                 args: vec![format!("a {} b", ch)],
                 command: None,
-                use_shell: false,
+                use_shell: true,
                 allow_unsafe: false,
             };
             assert!(launch_ide(&ide, Path::new("/tmp/f")).is_err());
+        }
+        // Bei use_shell=false sollen gleiche Zeichen nicht blockiert werden
+        for ch in ["&", "|", ";", ">", "<"] {
+            let ide = IdeConfig {
+                id: "test".to_string(),
+                display_name: "Test".to_string(),
+                program: "true".to_string(),
+                args: vec![format!("a {} b", ch)],
+                command: None,
+                use_shell: false,
+                allow_unsafe: false,
+            };
+            let res = launch_ide(&ide, Path::new("/tmp/f"));
+            assert!(
+                res.is_ok() || !res.unwrap_err().to_string().contains("Ungültige Zeichen"),
+                "should not block shell chars when use_shell=false for '{}'",
+                ch
+            );
         }
     }
 

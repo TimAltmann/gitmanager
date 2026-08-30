@@ -5,12 +5,20 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-blue.svg)
-![Build](https://img.shields.io/github/actions/workflow/status/gitmanager/gitmanager/ci.yml?branch=main&label=build)
+[![Build](https://img.shields.io/github/actions/workflow/status/TimAltmann/gitmanager/ci.yml?branch=main&label=build)](https://github.com/TimAltmann/gitmanager/actions)
 
 **Language / Sprache:** English | [Deutsch](#-spracheinstellung) — the app itself supports **English and German** (switch in the top bar or `Settings → Language`). This README is in English.
 
-![GitManager screenshot placeholder](assets/screenshot-placeholder.png)
-*Placeholder — add a screenshot of the main window (repo list, branch & solution dropdowns, IDE/agent buttons).*
+## 🎬 Demo
+
+![GitManager Demo](assets/demo.png)
+*Main window – repo list, branch & solution dropdowns, IDE/agent buttons (dirty indicator, profile override, one-click open in VS / VS Code / Rider & AI agents).*
+
+**Demo-Video:** [▶ assets/demo.mp4](assets/demo.mp4) · Direkt-Link: https://github.com/TimAltmann/gitmanager/blob/main/assets/demo.mp4
+
+<video src="assets/demo.mp4" controls width="800" poster="assets/demo.png">
+  Your browser does not support the video tag. <a href="https://github.com/TimAltmann/gitmanager/blob/main/assets/demo.mp4">Watch demo.mp4</a>
+</video>
 
 ---
 
@@ -20,7 +28,7 @@
 
 ### Option 1 — GitHub Releases (recommended)
 
-1. Go to **Releases** → https://github.com/gitmanager/gitmanager/releases
+1. Go to **Releases** → https://github.com/TimAltmann/gitmanager/releases
 2. Download `gitmanager.exe` (or `gitmanager-msvc.exe` for MSVC build)
 3. Double-click to run — portable, no installer, no admin rights.
 
@@ -170,6 +178,7 @@ src/
     theme.rs      # Light/Dark/Nord/Dracula/Solarized themes
 assets/
   icon.ico/icon.png (6 sizes, winres)
+  demo.png / demo.mp4 (Demo screenshot & screencast)
   icons/*.svg (Simple Icons CC0 + Phosphor MIT)
 scripts/
   build.sh / build.ps1 (Docker → gitmanager.exe)

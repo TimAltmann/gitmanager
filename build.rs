@@ -60,14 +60,14 @@ fn main() {
                 // da .rsrc keine Symbole enthält. Objekt-Dateien werden immer gelinkt.
                 if let Ok(out_dir) = std::env::var("OUT_DIR") {
                     let resource_o = format!("{}/resource.o", out_dir);
-                    // Auch als static lib mit whole-archive als Fallback
-                    println!("cargo:rustc-link-arg=-Wl,--whole-archive");
-                    println!("cargo:rustc-link-search=native={}", out_dir);
-                    println!("cargo:rustc-link-lib=static=resource");
-                    println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
-                    // Direktes Objekt als sicherer Fallback (wird immer gelinkt)
+                    // Direkt als Objekt linken (vermeidet duplicate-object Warnung von whole-archive + Objekt)
+                    // Objekt-Dateien werden vom Linker immer berücksichtigt, auch ohne Symbole
                     if std::path::Path::new(&resource_o).exists() {
                         println!("cargo:rustc-link-arg={}", resource_o);
+                    } else {
+                        // Fallback: als static lib (sollte nicht nötig sein, aber sicherheitshalber)
+                        println!("cargo:rustc-link-search=native={}", out_dir);
+                        println!("cargo:rustc-link-lib=static=resource");
                     }
                 }
             }

@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::git::{launch_agent, launch_ide, RepoInfo};
-use crate::i18n::{tr, Language};
+use crate::i18n::{tr, tr_fmt, Language};
 use crate::scanner::scan_repos;
 use crate::ui::{
     repo_list::{show_repo_list, RepoListActions},
@@ -97,7 +97,7 @@ impl MyApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if let Some(t) = self.status_message_time {
-            if t.elapsed().as_secs() > 3 {
+            if t.elapsed() > std::time::Duration::from_secs(3) {
                 self.status_message = None;
                 self.status_message_time = None;
             } else {
@@ -187,24 +187,8 @@ impl MyApp {
 
     fn show_top_bar(&mut self, ctx: &egui::Context) {
         let lang = self.config.language;
-        // Determine if top bar should be collapsed based on available height
-        let collapse_if_smaller_than = 400.0;
-
-        // Check current available height from context
-        let available_height = ctx.screen_rect().height();
-        let should_collapse = available_height < collapse_if_smaller_than;
-
-        // If size tracking says we should collapse
-        let effective_collapse = if should_collapse {
-            true
-        } else if self.last_window_size[1] > 0.0
-            && self.last_window_size[1] < collapse_if_smaller_than
-        {
-            // Was previously small, keep collapsed until window grows
-            self.top_bar_collapsed
-        } else {
-            self.top_bar_collapsed
-        };
+        // Hysterese wird in `update()` gepflegt ( <400 collapsed, >=500 expanded )
+        let effective_collapse = self.top_bar_collapsed;
 
         egui::TopBottomPanel::top("top_bar")
             .frame(
@@ -251,13 +235,17 @@ impl MyApp {
                         });
                     if new_profile != self.config.active_profile_id {
                         self.config.active_profile_id = new_profile;
-                        let _ = self.config.save();
-                        self.status_message = Some(format!(
-                            "Profil gewechselt zu '{}' – scanne Solutions neu...",
-                            self.config.get_active_profile().display_name
-                        ));
-                        self.status_message_time = Some(std::time::Instant::now());
-                        self.start_scan();
+                        if let Err(e) = self.config.save() {
+                            self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                        } else {
+                            self.status_message = Some(tr_fmt(
+                                lang,
+                                "profile_switched",
+                                &[&self.config.get_active_profile().display_name],
+                            ));
+                            self.status_message_time = Some(std::time::Instant::now());
+                            self.start_scan();
+                        }
                     }
 
                     // Agent Multi-Select wenn mehrere
@@ -279,6 +267,7 @@ impl MyApp {
                             } else {
                                 format!("{} aktiv", active_agents.len())
                             };
+                            let mut save_err: Option<String> = None;
                             egui::ComboBox::from_id_salt("active_agent_top")
                                 .selected_text(current_text)
                                 .width(120.0)
@@ -288,7 +277,9 @@ impl MyApp {
                                         let mut is_active = self.config.is_agent_active(&a.id);
                                         if ui.checkbox(&mut is_active, &a.display_name).clicked() {
                                             self.config.toggle_agent_active(&a.id);
-                                            let _ = self.config.save();
+                                            if let Err(e) = self.config.save() {
+                                                save_err = Some(format!("{e:#}"));
+                                            }
                                         }
                                     }
                                     ui.separator();
@@ -298,14 +289,21 @@ impl MyApp {
                                                 self.config.toggle_agent_active(&a.id);
                                             }
                                         }
-                                        let _ = self.config.save();
+                                        if let Err(e) = self.config.save() {
+                                            save_err = Some(format!("{e:#}"));
+                                        }
                                     }
                                     if ui.button("Alle deaktivieren").clicked() {
                                         self.config.active_agent_ids.clear();
                                         self.config.active_agent_id = None;
-                                        let _ = self.config.save();
+                                        if let Err(e) = self.config.save() {
+                                            save_err = Some(format!("{e:#}"));
+                                        }
                                     }
                                 });
+                            if let Some(e) = save_err {
+                                self.error = Some(tr_fmt(lang, "save_failed", &[&e]));
+                            }
                         } else if let Some(agent) = self.config.get_active_agent() {
                             ui.add_space(8.0);
                             ui.label(
@@ -337,7 +335,9 @@ impl MyApp {
                         });
                     if new_lang != lang {
                         self.config.language = new_lang;
-                        let _ = self.config.save();
+                        if let Err(e) = self.config.save() {
+                            self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                        }
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -574,23 +574,17 @@ impl eframe::App for MyApp {
         let lang = self.config.language;
         self.poll_scan(ctx);
 
-        // Track window size for collapsing logic using ctx screen rect
+        // Track window size for collapsing logic using ctx screen rect (Hysterese: <400 collapsed, >=500 expanded)
         let screen_rect = ctx.screen_rect();
         let current_size = [screen_rect.width(), screen_rect.height()];
-        if self.last_window_size != current_size {
-            self.last_window_size = current_size;
-            // If window got smaller and we were above collapse threshold,
-            // check if we should collapse top bar
-            if current_size[1] < self.last_window_size[1] && current_size[1] < 500.0 {
-                // Window shrunk - could trigger collapse if still small enough
-                if current_size[1] < 400.0 {
-                    self.top_bar_collapsed = true;
-                }
-            }
-            // If window grew again and was collapsed, check if we should expand
-            if current_size[1] >= 500.0 && self.top_bar_collapsed {
+        let prev_size = self.last_window_size;
+        if prev_size != current_size {
+            if current_size[1] < 400.0 {
+                self.top_bar_collapsed = true;
+            } else if current_size[1] >= 500.0 {
                 self.top_bar_collapsed = false;
             }
+            self.last_window_size = current_size;
         }
 
         self.show_top_bar(ctx);
@@ -674,31 +668,39 @@ impl eframe::App for MyApp {
                     // Speichere Auswahl in config
                     let state = self.config.get_repo_state_mut(&repo_path);
                     state.selected_solution = Some(sln_path.clone());
-                    let _ = self.config.save();
-                    // Update auch im RepoInfo direkt
-                    if let Some(repo) = self.repos.iter_mut().find(|r| r.path == repo_path) {
-                        repo.selected_solution = Some(sln_path);
+                    if let Err(e) = self.config.save() {
+                        self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                    } else {
+                        // Update auch im RepoInfo direkt
+                        if let Some(repo) = self.repos.iter_mut().find(|r| r.path == repo_path) {
+                            repo.selected_solution = Some(sln_path);
+                        }
+                        self.status_message = Some(tr_fmt(
+                            lang,
+                            "solution_selected",
+                            &[&repo_path.display().to_string()],
+                        ));
+                        self.status_message_time = Some(std::time::Instant::now());
                     }
-                    self.status_message =
-                        Some(format!("Solution ausgewählt: {}", repo_path.display()));
-                    self.status_message_time = Some(std::time::Instant::now());
                 }
                 if let Some((repo_path, ide_id, file_path)) = actions.ide_open {
                     // Speichere letzte IDE Wahl
                     {
                         let state = self.config.get_repo_state_mut(&repo_path);
                         state.selected_ide = Some(ide_id.clone());
-                        let _ = self.config.save();
+                        if let Err(e) = self.config.save() {
+                            self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                        }
                     }
                     // Finde IdeConfig
                     let profile = self.config.get_effective_profile_for_repo(&repo_path);
                     if let Some(ide) = profile.ides.iter().find(|i| i.id == ide_id) {
                         match launch_ide(ide, &file_path) {
                             Ok(()) => {
-                                self.status_message = Some(format!(
-                                    "Öffne {} mit {}...",
-                                    file_path.display(),
-                                    ide.display_name
+                                self.status_message = Some(tr_fmt(
+                                    lang,
+                                    "opening_with",
+                                    &[&file_path.display().to_string(), &ide.display_name],
                                 ));
                                 self.status_message_time = Some(std::time::Instant::now());
                             }
@@ -710,9 +712,10 @@ impl eframe::App for MyApp {
                             }
                         }
                     } else {
-                        self.error = Some(format!(
-                            "IDE '{}' nicht in Profil '{}' gefunden",
-                            ide_id, profile.display_name
+                        self.error = Some(tr_fmt(
+                            lang,
+                            "ide_not_found",
+                            &[&ide_id, &profile.display_name],
                         ));
                     }
                 }
@@ -731,10 +734,10 @@ impl eframe::App for MyApp {
                             .unwrap_or_else(|| self.config.terminal.preference.clone());
                         match launch_agent(&agent, &repo_path, &term_pref) {
                             Ok(()) => {
-                                self.status_message = Some(format!(
-                                    "Starte {} in {}...",
-                                    agent.display_name,
-                                    repo_path.display()
+                                self.status_message = Some(tr_fmt(
+                                    lang,
+                                    "starting_agent_in",
+                                    &[&agent.display_name, &repo_path.display().to_string()],
                                 ));
                                 self.status_message_time = Some(std::time::Instant::now());
                             }
@@ -746,27 +749,34 @@ impl eframe::App for MyApp {
                             }
                         }
                     } else {
-                        self.error = Some(format!("AI-Agent '{}' nicht gefunden", agent_id));
+                        self.error = Some(tr_fmt(lang, "agent_not_found", &[&agent_id]));
                     }
                 }
                 if let Some((repo_path, profile_opt)) = actions.profile_override {
                     self.config
                         .set_repo_profile_override(&repo_path, profile_opt.clone());
-                    let _ = self.config.save();
-                    self.status_message = Some(format!(
-                        "Profil für {} geändert – scanne neu...",
-                        repo_path.display()
-                    ));
-                    self.status_message_time = Some(std::time::Instant::now());
-                    self.start_scan();
+                    if let Err(e) = self.config.save() {
+                        self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                    } else {
+                        self.status_message = Some(tr_fmt(
+                            lang,
+                            "profile_changed_for",
+                            &[&repo_path.display().to_string()],
+                        ));
+                        self.status_message_time = Some(std::time::Instant::now());
+                        self.start_scan();
+                    }
                 }
                 if let Some(repo_path) = actions.fetch_branches {
                     let path_clone = repo_path.clone();
                     let cfg = self.config.clone();
                     let tx = self.scan_tx.clone();
                     self.scanning = true;
-                    self.status_message =
-                        Some(format!("Fetche Branches für {}...", repo_path.display()));
+                    self.status_message = Some(tr_fmt(
+                        lang,
+                        "fetching_branches",
+                        &[&repo_path.display().to_string()],
+                    ));
                     self.status_message_time = Some(std::time::Instant::now());
                     std::thread::spawn(move || {
                         let fetch_res = crate::git::fetch_all(&path_clone);
@@ -780,8 +790,11 @@ impl eframe::App for MyApp {
                 if let Some(repo_path) = actions.explorer_open {
                     match crate::git::open_in_explorer(&repo_path) {
                         Ok(()) => {
-                            self.status_message =
-                                Some(format!("Explorer geöffnet: {}", repo_path.display()));
+                            self.status_message = Some(tr_fmt(
+                                lang,
+                                "explorer_opened",
+                                &[&repo_path.display().to_string()],
+                            ));
                             self.status_message_time = Some(std::time::Instant::now());
                         }
                         Err(e) => {
@@ -805,11 +818,11 @@ impl eframe::App for MyApp {
             if let Some(new_cfg) = save {
                 // Theme sofort anwenden
                 crate::ui::theme::apply_theme(ctx, &new_cfg.theme);
+                let lang = new_cfg.language;
                 self.config = new_cfg;
                 self.settings_state = Some(SettingsState::from_config(&self.config));
                 self.show_settings = false;
-                self.status_message =
-                    Some("Einstellungen gespeichert. Starte neuen Scan...".to_string());
+                self.status_message = Some(tr(lang, "saved_scan_restart"));
                 self.status_message_time = Some(std::time::Instant::now());
                 self.start_scan();
             } else {

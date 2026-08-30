@@ -1,5 +1,5 @@
 use crate::config::{AgentProfile, AppConfig, IdeConfig, LanguageProfile, TerminalPreference};
-use crate::i18n::{tr, Language};
+use crate::i18n::{tr, tr_fmt, Language};
 use egui::{Color32, RichText};
 use std::path::PathBuf;
 
@@ -143,13 +143,12 @@ pub fn show_settings_window(
                             )
                             .clicked()
                         {
+                            let lang = state.draft.language;
                             if state.draft.roots.is_empty() {
-                                state.error =
-                                    Some("Bitte mindestens einen Pfad angeben.".to_string());
+                                state.error = Some(tr(lang, "error_need_path"));
                                 state.success = None;
                             } else if state.draft.profiles.is_empty() {
-                                state.error =
-                                    Some("Mindestens ein Sprach-Profil erforderlich.".to_string());
+                                state.error = Some(tr(lang, "error_need_profile"));
                                 state.success = None;
                             } else {
                                 // Validierung Profile
@@ -157,14 +156,15 @@ pub fn show_settings_window(
                                 for p in &state.draft.profiles {
                                     if p.id.trim().is_empty() || p.display_name.trim().is_empty() {
                                         state.error =
-                                            Some(format!("Profil '{}' hat leere ID/Name", p.id));
+                                            Some(tr_fmt(lang, "error_profile_empty", &[&p.id]));
                                         valid = false;
                                         break;
                                     }
                                     if p.file_extension.trim().is_empty() {
-                                        state.error = Some(format!(
-                                            "Profil '{}' braucht Dateiendung",
-                                            p.display_name
+                                        state.error = Some(tr_fmt(
+                                            lang,
+                                            "error_profile_ext",
+                                            &[&p.display_name],
                                         ));
                                         valid = false;
                                         break;
@@ -174,14 +174,15 @@ pub fn show_settings_window(
                                     match state.draft.clone().save() {
                                         Ok(()) => {
                                             state.error = None;
-                                            state.success = Some(
-                                                "Gespeichert. Scan wird neu gestartet.".to_string(),
-                                            );
+                                            state.success = Some(tr(lang, "saved_scan_restart"));
                                             *on_save = Some(state.draft.clone());
                                         }
                                         Err(e) => {
-                                            state.error =
-                                                Some(format!("Speichern fehlgeschlagen: {e:#}"));
+                                            state.error = Some(tr_fmt(
+                                                lang,
+                                                "save_failed",
+                                                &[&format!("{e:#}")],
+                                            ));
                                             state.success = None;
                                         }
                                     }
@@ -296,7 +297,7 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.horizontal(|ui| {
         ui.label("Tiefe:");
         let mut depth = state.draft.max_depth as u8;
-        let slider = egui::Slider::new(&mut depth, 1..=5).text("Ebenen");
+        let slider = egui::Slider::new(&mut depth, 1..=10).text("Ebenen");
         if ui.add(slider).changed() {
             state.draft.max_depth = depth as usize;
         }
@@ -368,10 +369,21 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("＋ Neues Profil").clicked() {
-                let new_id = format!("custom{}", state.draft.profiles.len() + 1);
+                let mut max_n = 0;
+                for p in &state.draft.profiles {
+                    if let Some(suffix) = p.id.strip_prefix("custom") {
+                        if let Ok(n) = suffix.parse::<usize>() {
+                            if n > max_n {
+                                max_n = n;
+                            }
+                        }
+                    }
+                }
+                let new_id = format!("custom{}", max_n + 1);
+                let display_n = max_n + 1;
                 state.draft.profiles.push(LanguageProfile {
                     id: new_id.clone(),
-                    display_name: format!("Custom {}", state.draft.profiles.len() + 1),
+                    display_name: format!("Custom {}", display_n),
                     file_extension: ".txt".to_string(),
                     file_pattern: None,
                     max_scan_depth: 3,
@@ -673,7 +685,16 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                 }
                                 ui.end_row();
                                 ui.label("Shell:");
-                                ui.checkbox(&mut ide.use_shell, "via cmd /C (unsicher)");
+                                {
+                                    let mut allow_unsafe = ide.allow_unsafe || ide.use_shell;
+                                    if ui
+                                        .checkbox(&mut allow_unsafe, "via cmd /C (unsicher)")
+                                        .changed()
+                                    {
+                                        ide.allow_unsafe = allow_unsafe;
+                                        ide.use_shell = allow_unsafe;
+                                    }
+                                }
                                 ui.end_row();
                             });
                         // Preview
@@ -697,8 +718,18 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             }
 
             if ui.button("＋ IDE hinzufügen").clicked() {
+                let mut max_n = 0;
+                for ide in &profile.ides {
+                    if let Some(suffix) = ide.id.strip_prefix("ide") {
+                        if let Ok(n) = suffix.parse::<usize>() {
+                            if n > max_n {
+                                max_n = n;
+                            }
+                        }
+                    }
+                }
                 profile.ides.push(IdeConfig {
-                    id: format!("ide{}", profile.ides.len() + 1),
+                    id: format!("ide{}", max_n + 1),
                     display_name: "Neue IDE".to_string(),
                     program: "code".to_string(),
                     args: vec!["{file}".to_string()],
@@ -752,8 +783,18 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("＋ Neuer Agent").clicked() {
+                let mut max_n = 0;
+                for a in &state.draft.agents {
+                    if let Some(suffix) = a.id.strip_prefix("agent") {
+                        if let Ok(n) = suffix.parse::<usize>() {
+                            if n > max_n {
+                                max_n = n;
+                            }
+                        }
+                    }
+                }
                 state.draft.agents.push(AgentProfile {
-                    id: format!("agent{}", state.draft.agents.len() + 1),
+                    id: format!("agent{}", max_n + 1),
                     display_name: "Neuer Agent".to_string(),
                     program: "claude".to_string(),
                     args: vec![],

@@ -49,7 +49,7 @@ pub fn scan_repos(config: &AppConfig) -> Vec<RepoInfo> {
         }
     }
 
-    all_repos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    all_repos.sort_by_key(|a| a.name.to_lowercase());
 
     // Zweite Stufe: Solution-Dateien pro Repo scannen (parallel)
     all_repos.par_iter_mut().for_each(|repo| {
@@ -172,9 +172,15 @@ fn scan_single_root(root: &Path, max_depth: usize) -> Vec<RepoInfo> {
     }
 
     // Parallel prüfen welche Kandidaten Git-Repos sind
+    // Prefilter: nur Verzeichnisse mit .git Eintrag können Repos sein (Performance + verhindert Discovery-Bug)
     candidates
         .par_iter()
-        .filter_map(|p| get_repo_info(p.clone()))
+        .filter_map(|p| {
+            if !p.join(".git").exists() {
+                return None;
+            }
+            get_repo_info(p.clone())
+        })
         .collect()
 }
 
@@ -672,11 +678,12 @@ mod tests {
             ides: vec![],
             default_ide_id: None,
         };
-        // Note: implementation checks normalized_extension for wildcard patterns, so *.csproj will not match because ext is .sln
-        // Therefore this test expects only .sln matches - demonstrates wildcard logic limitation
         let sols = scan_solutions_for_repo(&repo, &profile);
         assert!(sols.iter().any(|s| s.relative.ends_with("a.sln")));
-        // For multiple exact patterns like pom.xml,build.gradle it works; for mixed wildcard with different ext, only ext of profile matches
+        assert!(
+            sols.iter().any(|s| s.relative.ends_with("b.csproj")),
+            "wildcard pattern should match each extension from pattern, not only profile extension"
+        );
     }
 
     #[test]
@@ -699,12 +706,22 @@ mod tests {
         assert_eq!(profile.normalized_extension(), ".sln");
         let sols = scan_solutions_for_repo(&repo, &profile);
         assert_eq!(sols.len(), 1);
-        // .SOL should NOT match FOO.SLN (extension mismatch)
+        // Bei file_pattern="*.sln" zählt die Extension aus dem Pattern, nicht aus file_extension.
+        // Daher sollte .SOL als file_extension keinen Einfluss haben solange Pattern *.sln bleibt – matcht weiter.
         profile.file_extension = ".SOL".to_string();
         assert_eq!(profile.normalized_extension(), ".sol");
         let sols2 = scan_solutions_for_repo(&repo, &profile);
-        assert_eq!(sols2.len(), 0);
-        // .sln should match again case-insensitive
+        assert_eq!(
+            sols2.len(),
+            1,
+            "pattern *.sln should still match regardless of file_extension .SOL"
+        );
+        // Pattern auf *.sol ändern -> sollte nicht mehr matchen
+        profile.file_pattern = Some("*.sol".to_string());
+        let sols2b = scan_solutions_for_repo(&repo, &profile);
+        assert_eq!(sols2b.len(), 0, "*.sol should not match FOO.SLN");
+        // .sln via extension (ohne pattern) sollte wieder matchen
+        profile.file_pattern = None;
         profile.file_extension = "sln".to_string();
         let sols3 = scan_solutions_for_repo(&repo, &profile);
         assert_eq!(sols3.len(), 1);

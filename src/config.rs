@@ -22,18 +22,14 @@ fn default_language() -> Language {
 // --- Terminal ---
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TerminalPreference {
+    #[default]
     Auto,
     WindowsTerminal,
     Cmd,
     Powershell,
     Custom(String),
-}
-
-impl Default for TerminalPreference {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,18 +52,14 @@ impl Default for TerminalConfig {
 // --- Theme ---
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Theme {
+    #[default]
     Light,
     Dark,
     Nord,
     Dracula,
     Solarized,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Self::Light
-    }
 }
 
 impl Theme {
@@ -166,17 +158,63 @@ impl LanguageProfile {
     }
     pub fn matches_file(&self, path: &Path) -> bool {
         if let Some(pat) = &self.file_pattern {
-            // Unterstütze mehrere Muster getrennt durch Komma, z.B. "pom.xml,build.gradle"
+            // Unterstütze mehrere Muster getrennt durch Komma, z.B. "pom.xml,build.gradle" oder "*.sln,*.csproj"
             for single_pat in pat.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
                 if single_pat.contains('*') {
-                    // "*.sln" → ext check
-                    let ext = self.normalized_extension();
-                    let file_ext = path
-                        .extension()
-                        .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
-                        .unwrap_or_default();
-                    if file_ext == ext {
+                    // Wildcard-Pattern: z.B. "*.sln" → Extension aus Pattern extrahieren, nicht aus self.file_extension
+                    // "*" oder "*.*" → matcht jede Datei mit Extension bzw. jede Datei
+                    if single_pat == "*" {
                         return true;
+                    }
+                    if single_pat == "*.*" {
+                        if path.extension().is_some() {
+                            return true;
+                        } else {
+                            continue;
+                        }
+                    }
+                    if single_pat.starts_with("*.") {
+                        // "*.sln" → ".sln"
+                        let pattern_ext = single_pat[1..].trim().to_lowercase(); // ab "." inkl. Punkt
+                        let mut pat_ext = pattern_ext;
+                        if !pat_ext.starts_with('.') {
+                            pat_ext = format!(".{}", pat_ext);
+                        }
+                        let file_ext = path
+                            .extension()
+                            .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+                            .unwrap_or_default();
+                        if file_ext == pat_ext {
+                            return true;
+                        }
+                    } else {
+                        // Generisches Wildcard wie "*foo" oder "foo*": suffix/prefix check auf Dateiname (case-insensitiv)
+                        let pat_lower = single_pat.to_lowercase();
+                        let pat_clean = pat_lower.replace('*', "");
+                        if pat_clean.is_empty() {
+                            return true;
+                        }
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            let name_lower = name.to_lowercase();
+                            // "*foo" → ends_with, "foo*" → starts_with, "*foo*" → contains
+                            let starts_with_star = single_pat.starts_with('*');
+                            let ends_with_star = single_pat.ends_with('*');
+                            if starts_with_star && ends_with_star {
+                                if name_lower.contains(&pat_clean) {
+                                    return true;
+                                }
+                            } else if starts_with_star {
+                                if name_lower.ends_with(&pat_clean) {
+                                    return true;
+                                }
+                            } else if ends_with_star {
+                                if name_lower.starts_with(&pat_clean) {
+                                    return true;
+                                }
+                            } else if name_lower == pat_lower {
+                                return true;
+                            }
+                        }
                     }
                 } else {
                     // exakter Name wie "Cargo.toml"
@@ -245,15 +283,11 @@ fn default_profiles() -> Vec<LanguageProfile> {
 // --- Agent ---
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AgentLaunchMode {
+    #[default]
     Terminal,
     Detached,
-}
-
-impl Default for AgentLaunchMode {
-    fn default() -> Self {
-        Self::Terminal
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -531,7 +565,7 @@ impl AppConfig {
         if cfg.config_version < 4 {
             // v4: Nur noch .NET als Default-Profil, andere Presets entfernen (Custom bleiben)
             // Entferne die 6 zuvor auto-hinzugefügten Profile, behalte nur dotnet + custom
-            let keep_dotnet_only = vec!["dotnet"];
+            let keep_dotnet_only = ["dotnet"];
             // Behalte nur dotnet und alle die nicht zu den alten Defaults gehören
             let old_auto_ids = ["rust", "node", "python", "java", "go", "cpp"];
             cfg.profiles.retain(|p| {
@@ -582,9 +616,34 @@ impl AppConfig {
         cfg.roots.sort();
         cfg.roots.dedup();
 
+        // RepoState Keys auf Windows normalisieren (case-insensitiv) – verhindert doppelte Einträge
+        #[cfg(windows)]
+        {
+            let mut normalized: HashMap<String, RepoUiState> = HashMap::new();
+            for (k, v) in cfg.repo_state.drain() {
+                let nk = k.to_lowercase();
+                normalized.entry(nk).or_insert(v);
+            }
+            cfg.repo_state = normalized;
+        }
+
         // Profile validieren
         for p in &mut cfg.profiles {
             p.file_extension = p.normalized_extension();
+            // file_pattern normalisieren: trimme jedes Pattern, leere entfernen
+            if let Some(pat) = p.file_pattern.clone() {
+                let trimmed = pat
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if trimmed.is_empty() {
+                    p.file_pattern = None;
+                } else {
+                    p.file_pattern = Some(trimmed);
+                }
+            }
             if p.max_scan_depth == 0 {
                 p.max_scan_depth = 3;
             }
@@ -594,6 +653,12 @@ impl AppConfig {
             p.id = p.id.trim().to_lowercase();
             if p.id.is_empty() {
                 p.id = "custom".to_string();
+            }
+            // IDEs: synchronisiere use_shell / allow_unsafe (historisch getrennte Flags)
+            for ide in &mut p.ides {
+                let unsafe_enabled = ide.allow_unsafe || ide.use_shell;
+                ide.allow_unsafe = unsafe_enabled;
+                ide.use_shell = unsafe_enabled;
             }
             // Default IDE validieren
             if let Some(def) = &p.default_ide_id {
@@ -667,10 +732,26 @@ impl AppConfig {
         let data =
             serde_json::to_string_pretty(self).context("Config serialisieren fehlgeschlagen")?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, data)
-            .with_context(|| format!("Konnte Config nicht schreiben: {}", tmp.display()))?;
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp)
+                .with_context(|| format!("Konnte Config nicht schreiben: {}", tmp.display()))?;
+            file.write_all(data.as_bytes())
+                .with_context(|| format!("Konnte Config nicht schreiben: {}", tmp.display()))?;
+            file.sync_all()
+                .with_context(|| format!("Konnte Config nicht syncen: {}", tmp.display()))?;
+        }
         std::fs::rename(&tmp, &path)
             .with_context(|| format!("Konnte Config nicht finalisieren: {}", path.display()))?;
+        // Best effort: sync parent dir (auf Unix)
+        #[cfg(unix)]
+        {
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+        }
         Ok(())
     }
 
@@ -755,13 +836,27 @@ impl AppConfig {
         self.active_agent_id = self.active_agent_ids.first().cloned();
     }
 
+    fn repo_state_key(path: &Path) -> String {
+        // Auf Windows ist das Dateisystem case-insensitiv – Keys normalisieren, sonst gehen
+        // Selections verloren wenn Pfade mal "C:\Dev\MyApp" und mal "c:\dev\myapp" lauten (Explorer, Symlink, canonicalize)
+        let s = path.to_string_lossy().to_string();
+        #[cfg(windows)]
+        {
+            s.to_lowercase()
+        }
+        #[cfg(not(windows))]
+        {
+            s
+        }
+    }
+
     pub fn get_repo_state(&self, repo_path: &Path) -> Option<&RepoUiState> {
-        let key = repo_path.to_string_lossy().to_string();
+        let key = Self::repo_state_key(repo_path);
         self.repo_state.get(&key)
     }
 
     pub fn get_repo_state_mut(&mut self, repo_path: &Path) -> &mut RepoUiState {
-        let key = repo_path.to_string_lossy().to_string();
+        let key = Self::repo_state_key(repo_path);
         self.repo_state.entry(key).or_default()
     }
 

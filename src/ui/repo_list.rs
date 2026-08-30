@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::git::RepoInfo;
-use crate::i18n::{tr, Language};
+use crate::i18n::tr;
 use egui::{Color32, RichText, Ui, Vec2};
 
 // Icons via egui include_image! (Simple Icons CC0 + Phosphor for folder)
@@ -310,7 +310,7 @@ fn show_repo_row(
                             );
                         } else if sln_selected.is_none()
                             && has_solutions
-                            && sln_filter.is_empty() == false
+                            && !sln_filter.is_empty()
                             && shown == 0
                         {
                             ui.label(
@@ -342,7 +342,7 @@ fn show_repo_row(
                 // Profile Override Combo (klein, rechts)
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let current_profile = config.get_effective_profile_for_repo(&repo.path);
-                    let override_text = format!("{}", current_profile.display_name);
+                    let override_text = current_profile.display_name.to_string();
                     egui::ComboBox::from_id_salt(format!("profile_{}", repo.path.display()))
                         .selected_text(override_text)
                         .width(90.0)
