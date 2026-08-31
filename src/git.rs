@@ -346,9 +346,9 @@ pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
                 .peel_to_commit()
                 .map_err(|e| anyhow::anyhow!("Commit nicht gefunden: {e}"))?;
             if repo.find_branch(short, BranchType::Local).is_err() {
-                let mut local_branch = repo.branch(short, &commit, false).map_err(|e| {
-                    anyhow::anyhow!("Lokalen Branch erstellen fehlgeschlagen: {e}")
-                })?;
+                let mut local_branch = repo
+                    .branch(short, &commit, false)
+                    .map_err(|e| anyhow::anyhow!("Lokalen Branch erstellen fehlgeschlagen: {e}"))?;
                 let _ = local_branch.set_upstream(Some(name));
             }
             repo.set_head(&format!("refs/heads/{short}"))
@@ -828,7 +828,13 @@ pub fn launch_agent(
 
     #[cfg(test)]
     {
-        let _ = (&ps_script, &cmd_agent_string, &agent_cmd_raw, &repo_str, &pref);
+        let _ = (
+            &ps_script,
+            &cmd_agent_string,
+            &agent_cmd_raw,
+            &repo_str,
+            &pref,
+        );
         return Ok(());
     }
 
@@ -842,15 +848,11 @@ pub fn launch_agent(
             }
             TerminalPreference::Powershell => spawn_powershell(&ps_script, repo_path),
             TerminalPreference::Cmd => spawn_cmd(&cmd_agent_string, &repo_str, repo_path),
-            TerminalPreference::Auto if !has_wt => {
-                spawn_powershell(&ps_script, repo_path)
-                    .or_else(|_| spawn_cmd(&cmd_agent_string, &repo_str, repo_path))
-            }
-            TerminalPreference::Auto => {
-                spawn_wt(&repo_str, &cmd_agent_string, repo_path)
-                    .or_else(|_| spawn_powershell(&ps_script, repo_path))
-                    .or_else(|_| spawn_cmd(&cmd_agent_string, &repo_str, repo_path))
-            }
+            TerminalPreference::Auto if !has_wt => spawn_powershell(&ps_script, repo_path)
+                .or_else(|_| spawn_cmd(&cmd_agent_string, &repo_str, repo_path)),
+            TerminalPreference::Auto => spawn_wt(&repo_str, &cmd_agent_string, repo_path)
+                .or_else(|_| spawn_powershell(&ps_script, repo_path))
+                .or_else(|_| spawn_cmd(&cmd_agent_string, &repo_str, repo_path)),
             TerminalPreference::Custom(custom) => {
                 let mut cmd = std::process::Command::new(custom);
                 if !agent.args.is_empty() {
