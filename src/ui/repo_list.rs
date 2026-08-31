@@ -90,7 +90,7 @@ fn show_repo_row(
     config: &AppConfig,
     actions: &mut RepoListActions,
 ) {
-    let visuals = &ui.ctx().style().visuals;
+    let visuals = ui.visuals();
     let frame = egui::Frame::new()
         .fill(visuals.widgets.inactive.bg_fill)
         .stroke(egui::Stroke::new(
@@ -406,7 +406,7 @@ fn show_repo_row(
                     for agent in agents_to_show.iter().rev() {
                         // reverse wegen right_to-left
                         let icon = agent_icon_for(&agent.id);
-                        let btn = egui::ImageButton::new(
+                        let btn = egui::Button::image(
                             egui::Image::new(icon).fit_to_exact_size(Vec2::splat(18.0)),
                         ); //.corner_radius(6);
                         let resp = ui.add(btn).on_hover_text(
@@ -452,7 +452,7 @@ fn show_repo_row(
                     }
                     for ide in ides_to_show.iter().take(4) {
                         let icon = ide_icon_for(&ide.id);
-                        let btn = egui::ImageButton::new(
+                        let btn = egui::Button::image(
                             egui::Image::new(icon).fit_to_exact_size(Vec2::splat(18.0)),
                         );
                         let resp = ui.add(btn).on_hover_text(format!(
@@ -499,7 +499,7 @@ fn show_repo_row(
                     }
 
                     // Explorer Button
-                    let explorer_btn = egui::ImageButton::new(
+                    let explorer_btn = egui::Button::image(
                         egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(18.0)),
                     );
                     let resp = ui
@@ -544,7 +544,7 @@ fn show_repo_row(
 mod tests {
     use super::*;
     use crate::config::AppConfig;
-    use crate::i18n::tr;
+
     use std::path::{Path, PathBuf};
 
     #[test]

@@ -20,9 +20,8 @@ fn default_language() -> Language {
 }
 
 // --- Terminal ---
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default)]
 pub enum TerminalPreference {
     #[default]
     Auto,
@@ -50,9 +49,8 @@ impl Default for TerminalConfig {
 }
 
 // --- Theme ---
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default)]
 pub enum Theme {
     #[default]
     Light,
@@ -63,7 +61,6 @@ pub enum Theme {
 }
 
 impl Theme {
-    #[allow(dead_code)]
     pub fn display_name(&self) -> &'static str {
         match self {
             Theme::Light => "Light",
@@ -74,7 +71,6 @@ impl Theme {
         }
     }
 
-    #[allow(dead_code)]
     pub fn all() -> Vec<Theme> {
         vec![
             Theme::Light,
@@ -281,9 +277,8 @@ fn default_profiles() -> Vec<LanguageProfile> {
 }
 
 // --- Agent ---
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default)]
 pub enum AgentLaunchMode {
     #[default]
     Terminal,
@@ -794,7 +789,6 @@ impl AppConfig {
         self.agents.first()
     }
 
-    #[allow(dead_code)]
     pub fn get_active_agents(&self) -> Vec<&AgentProfile> {
         if !self.active_agent_ids.is_empty() {
             self.active_agent_ids
@@ -811,7 +805,6 @@ impl AppConfig {
         }
     }
 
-    #[allow(dead_code)]
     pub fn is_agent_active(&self, agent_id: &str) -> bool {
         if !self.active_agent_ids.is_empty() {
             self.active_agent_ids.contains(&agent_id.to_string())
@@ -822,7 +815,6 @@ impl AppConfig {
         }
     }
 
-    #[allow(dead_code)]
     pub fn toggle_agent_active(&mut self, agent_id: &str) {
         if self.is_agent_active(agent_id) {
             self.active_agent_ids.retain(|id| id != agent_id);

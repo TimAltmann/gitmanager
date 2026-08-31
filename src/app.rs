@@ -185,22 +185,23 @@ impl MyApp {
         }
     }
 
-    fn show_top_bar(&mut self, ctx: &egui::Context) {
+    fn show_top_bar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let lang = self.config.language;
         // Hysterese wird in `update()` gepflegt ( <400 collapsed, >=500 expanded )
         let effective_collapse = self.top_bar_collapsed;
 
-        egui::TopBottomPanel::top("top_bar")
+        egui::Panel::top("top_bar")
             .frame(
                 egui::Frame::new()
-                    .fill(ctx.style().visuals.widgets.inactive.bg_fill)
+                    .fill(ctx.global_style().visuals.widgets.inactive.bg_fill)
                     .inner_margin(egui::Margin::symmetric(12, 8))
                     .stroke(egui::Stroke::new(
                         1.0_f32,
-                        ctx.style().visuals.widgets.inactive.fg_stroke.color,
+                        ctx.global_style().visuals.widgets.inactive.fg_stroke.color,
                     )),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(format!("📦 {}", tr(lang, "app_title")))
@@ -418,19 +419,20 @@ impl MyApp {
             });
     }
 
-    fn show_status_bar(&self, ctx: &egui::Context) {
+    fn show_status_bar(&self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let lang = self.config.language;
-        egui::TopBottomPanel::bottom("status_bar")
+        egui::Panel::bottom("status_bar")
             .frame(
                 egui::Frame::new()
-                    .fill(ctx.style().visuals.widgets.inactive.bg_fill)
+                    .fill(ctx.global_style().visuals.widgets.inactive.bg_fill)
                     .inner_margin(egui::Margin::symmetric(10, 6))
                     .stroke(egui::Stroke::new(
                         1.0_f32,
-                        ctx.style().visuals.widgets.inactive.fg_stroke.color,
+                        ctx.global_style().visuals.widgets.inactive.fg_stroke.color,
                     )),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(msg) = &self.status_message {
                         ui.label(
@@ -570,12 +572,13 @@ impl MyApp {
 }
 
 impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         let lang = self.config.language;
-        self.poll_scan(ctx);
+        self.poll_scan(&ctx);
 
         // Track window size for collapsing logic using ctx screen rect (Hysterese: <400 collapsed, >=500 expanded)
-        let screen_rect = ctx.screen_rect();
+        let screen_rect = ctx.viewport_rect();
         let current_size = [screen_rect.width(), screen_rect.height()];
         let prev_size = self.last_window_size;
         if prev_size != current_size {
@@ -587,17 +590,17 @@ impl eframe::App for MyApp {
             self.last_window_size = current_size;
         }
 
-        self.show_top_bar(ctx);
-        self.show_status_bar(ctx);
-        self.show_branch_dialog(ctx);
+        self.show_top_bar(ui);
+        self.show_status_bar(ui);
+        self.show_branch_dialog(&ctx);
 
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(ctx.style().visuals.widgets.inactive.bg_fill)
+                    .fill(ctx.global_style().visuals.widgets.inactive.bg_fill)
                     .inner_margin(egui::Margin::same(12)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 if let Some(err) = &self.error {
                     let frame = egui::Frame::new()
                         .fill(Color32::from_rgb(255, 235, 235))
@@ -812,12 +815,12 @@ impl eframe::App for MyApp {
             let mut save: Option<AppConfig> = None;
             let mut state = self.settings_state.take().unwrap();
             let mut open = self.show_settings;
-            crate::ui::settings::show_settings_window(ctx, &mut state, &mut open, &mut save);
+            crate::ui::settings::show_settings_window(&ctx, &mut state, &mut open, &mut save);
             self.show_settings = open;
 
             if let Some(new_cfg) = save {
                 // Theme sofort anwenden
-                crate::ui::theme::apply_theme(ctx, &new_cfg.theme);
+                crate::ui::theme::apply_theme(&ctx, &new_cfg.theme);
                 let lang = new_cfg.language;
                 self.config = new_cfg;
                 self.settings_state = Some(SettingsState::from_config(&self.config));
@@ -843,7 +846,7 @@ impl eframe::App for MyApp {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
-    use crate::i18n::{tr, Language};
+
     use std::path::PathBuf;
     use tempfile::tempdir;
 

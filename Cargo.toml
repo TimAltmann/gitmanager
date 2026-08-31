@@ -10,24 +10,24 @@ keywords = ["git", "manager", "gui", "windows"]
 categories = ["development-tools"]
 
 [dependencies]
-eframe = { version = "0.32", features = ["default_fonts", "glow"] }
-egui = "0.32"
-egui_extras = { version = "0.32", features = ["svg"] }
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
+eframe = { version = "0.36", features = ["default_fonts", "glow"] }
+egui = "0.36"
+egui_extras = { version = "0.36", features = ["svg"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 directories = "6.0"
-rfd = "0.15"
+rfd = "0.17"
 walkdir = "2.5"
-rayon = "1.11"
+rayon = "1.12"
 anyhow = "1.0"
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 
 [dev-dependencies]
-tempfile = "3.15"
+tempfile = "3.27"
 
 [build-dependencies]
-winres = "0.1"
+winres = "0.1.12"
 
 [profile.release]
 opt-level = "z"
