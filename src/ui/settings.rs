@@ -1412,7 +1412,7 @@ mod tests {
 
     #[test]
     fn settings_validation_profile_fields_empty_error() {
-        let mut cfg = AppConfig::default();
+        let cfg = AppConfig::default();
         let mut state = SettingsState::from_config(&cfg);
         state.draft.profiles[0].id = "".to_string();
         // validation: id trim empty
@@ -1427,7 +1427,7 @@ mod tests {
         assert!(!valid);
         assert!(state.error.is_some());
         // file_extension empty
-        let mut cfg2 = AppConfig::default();
+        let cfg2 = AppConfig::default();
         let mut state2 = SettingsState::from_config(&cfg2);
         state2.draft.profiles[0].file_extension = "".to_string();
         valid = true;

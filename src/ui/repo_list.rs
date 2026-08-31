@@ -544,7 +544,7 @@ fn show_repo_row(
 mod tests {
     use super::*;
     use crate::config::AppConfig;
-    use crate::i18n::tr;
+
     use std::path::{Path, PathBuf};
 
     #[test]

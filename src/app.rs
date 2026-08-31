@@ -846,7 +846,7 @@ impl eframe::App for MyApp {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
-    use crate::i18n::{tr, Language};
+
     use std::path::PathBuf;
     use tempfile::tempdir;
 

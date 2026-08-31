@@ -244,34 +244,36 @@ pub fn open_in_explorer(path: &Path) -> anyhow::Result<()> {
         let _ = path;
         return Ok(());
     }
-    #[cfg(windows)]
+    #[cfg(not(test))]
     {
-        std::process::Command::new("explorer")
-            .arg(path)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| anyhow::anyhow!("Explorer konnte nicht geöffnet werden: {e}"))
-    }
-    #[cfg(not(windows))]
-    {
-        // Linux: xdg-open, WSL: explorer.exe, macOS: open – plus gio als Fallback
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .or_else(|_| std::process::Command::new("explorer.exe").arg(path).spawn())
-            .or_else(|_| std::process::Command::new("open").arg(path).spawn())
-            .or_else(|_| {
-                std::process::Command::new("gio")
-                    .args(["open", &path.display().to_string()])
-                    .spawn()
-            })
-            .map(|_| ())
-            .map_err(|e| anyhow::anyhow!("Dateimanager konnte nicht geöffnet werden: {e}"))
+        #[cfg(windows)]
+        {
+            std::process::Command::new("explorer")
+                .arg(path)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| anyhow::anyhow!("Explorer konnte nicht geöffnet werden: {e}"))
+        }
+        #[cfg(not(windows))]
+        {
+            // Linux: xdg-open, WSL: explorer.exe, macOS: open – plus gio als Fallback
+            std::process::Command::new("xdg-open")
+                .arg(path)
+                .spawn()
+                .or_else(|_| std::process::Command::new("explorer.exe").arg(path).spawn())
+                .or_else(|_| std::process::Command::new("open").arg(path).spawn())
+                .or_else(|_| {
+                    std::process::Command::new("gio")
+                        .args(["open", &path.display().to_string()])
+                        .spawn()
+                })
+                .map(|_| ())
+                .map_err(|e| anyhow::anyhow!("Dateimanager konnte nicht geöffnet werden: {e}"))
+        }
     }
 }
 
-/// Führt sicheren Branch-Wechsel durch (nur wenn keine Konflikte, sonst Fehler)
-pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
+fn preflight_checkout(path: &Path) -> anyhow::Result<Repository> {
     let repo =
         Repository::open(path).map_err(|e| anyhow::anyhow!("Repo öffnen fehlgeschlagen: {e}"))?;
     if repo.is_bare() {
@@ -283,7 +285,33 @@ pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
     if has_merge_conflicts(&repo) {
         anyhow::bail!("Merge-Konflikte vorhanden – bitte erst lösen");
     }
-    // Prüfe ob Branch existiert (lokal oder remote)
+    Ok(repo)
+}
+
+fn set_head_from_reference(
+    repo: &Repository,
+    reference: Option<&git2::Reference>,
+    object: &git2::Object,
+) -> anyhow::Result<()> {
+    match reference {
+        Some(gref) => {
+            let name = gref
+                .name()
+                .map_err(|e| anyhow::anyhow!("Ungültige Referenz: {e}"))?;
+            repo.set_head(name)
+                .map_err(|e| anyhow::anyhow!("HEAD setzen fehlgeschlagen: {e}"))?;
+        }
+        None => {
+            repo.set_head_detached(object.id())
+                .map_err(|e| anyhow::anyhow!("Detached HEAD setzen fehlgeschlagen: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Führt sicheren Branch-Wechsel durch (nur wenn keine Konflikte, sonst Fehler)
+pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
+    let repo = preflight_checkout(path)?;
     let (object, reference) = repo
         .revparse_ext(branch_name)
         .map_err(|e| anyhow::anyhow!("Branch '{branch_name}' nicht gefunden: {e}"))?;
@@ -307,61 +335,35 @@ pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
     repo.checkout_tree(&object, Some(&mut cb))
         .map_err(|e| anyhow::anyhow!("Checkout fehlgeschlagen: {e}"))?;
 
-    match reference {
-        Some(gref) => {
-            let name = gref
-                .name()
-                .map_err(|e| anyhow::anyhow!("Ungültige Referenz: {e}"))?;
-            // Wenn es ein Remote-Branch ist (refs/remotes/...), erstelle lokalen Tracking-Branch
-            if name.starts_with("refs/remotes/") {
-                // Extrahiere kurzen Namen ohne remote prefix
-                let short = branch_name.split('/').next_back().unwrap_or(branch_name);
-                let commit = object
-                    .peel_to_commit()
-                    .map_err(|e| anyhow::anyhow!("Commit nicht gefunden: {e}"))?;
-                // Prüfe ob lokaler Branch schon existiert
-                if repo.find_branch(short, BranchType::Local).is_err() {
-                    let mut local_branch = repo.branch(short, &commit, false).map_err(|e| {
-                        anyhow::anyhow!("Lokalen Branch erstellen fehlgeschlagen: {e}")
-                    })?;
-                    // Setze Upstream
-                    let _ = local_branch.set_upstream(Some(name));
-                    repo.set_head(&format!("refs/heads/{short}"))
-                        .map_err(|e| anyhow::anyhow!("HEAD setzen fehlgeschlagen: {e}"))?;
-                } else {
-                    repo.set_head(&format!("refs/heads/{short}"))
-                        .map_err(|e| anyhow::anyhow!("HEAD setzen fehlgeschlagen: {e}"))?;
-                }
-            } else {
-                repo.set_head(name)
-                    .map_err(|e| anyhow::anyhow!("HEAD setzen fehlgeschlagen: {e}"))?;
+    // Bei Remote-Branch: lokalen Tracking-Branch erstellen
+    if let Some(gref) = &reference {
+        let name = gref
+            .name()
+            .map_err(|e| anyhow::anyhow!("Ungültige Referenz: {e}"))?;
+        if name.starts_with("refs/remotes/") {
+            let short = branch_name.split('/').next_back().unwrap_or(branch_name);
+            let commit = object
+                .peel_to_commit()
+                .map_err(|e| anyhow::anyhow!("Commit nicht gefunden: {e}"))?;
+            if repo.find_branch(short, BranchType::Local).is_err() {
+                let mut local_branch = repo.branch(short, &commit, false).map_err(|e| {
+                    anyhow::anyhow!("Lokalen Branch erstellen fehlgeschlagen: {e}")
+                })?;
+                let _ = local_branch.set_upstream(Some(name));
             }
-        }
-        None => {
-            repo.set_head_detached(object.id())
-                .map_err(|e| anyhow::anyhow!("Detached HEAD setzen fehlgeschlagen: {e}"))?;
+            repo.set_head(&format!("refs/heads/{short}"))
+                .map_err(|e| anyhow::anyhow!("HEAD setzen fehlgeschlagen: {e}"))?;
+            return Ok(());
         }
     }
-    Ok(())
+
+    set_head_from_reference(&repo, reference.as_ref(), &object)
 }
 
 /// Force Checkout (überschreibt lokale Änderungen) – nur nach Bestätigung via Dialog nach Dirty-Check.
 /// Verhindert versehentliches Zerstören eines laufenden Merge/Rebase-States.
 pub fn checkout_branch_force(path: &Path, branch_name: &str) -> anyhow::Result<()> {
-    let repo =
-        Repository::open(path).map_err(|e| anyhow::anyhow!("Repo öffnen fehlgeschlagen: {e}"))?;
-    if repo.is_bare() {
-        anyhow::bail!("Bare Repository – Checkout nicht möglich");
-    }
-    if is_merge_in_progress(&repo) {
-        anyhow::bail!(
-            "Merge/Rebase läuft noch ({:?}) – Force Checkout blockiert",
-            repo.state()
-        );
-    }
-    if has_merge_conflicts(&repo) {
-        anyhow::bail!("Merge-Konflikte vorhanden – bitte erst lösen, Force nicht erlaubt");
-    }
+    let repo = preflight_checkout(path)?;
     let (object, reference) = repo
         .revparse_ext(branch_name)
         .map_err(|e| anyhow::anyhow!("Branch '{branch_name}' nicht gefunden: {e}"))?;
@@ -369,20 +371,7 @@ pub fn checkout_branch_force(path: &Path, branch_name: &str) -> anyhow::Result<(
     cb.force();
     repo.checkout_tree(&object, Some(&mut cb))
         .map_err(|e| anyhow::anyhow!("Force Checkout fehlgeschlagen: {e}"))?;
-    match reference {
-        Some(gref) => {
-            let name = gref
-                .name()
-                .map_err(|e| anyhow::anyhow!("Ungültige Referenz: {e}"))?;
-            repo.set_head(name)
-                .map_err(|e| anyhow::anyhow!("HEAD setzen fehlgeschlagen: {e}"))?;
-        }
-        None => {
-            repo.set_head_detached(object.id())
-                .map_err(|e| anyhow::anyhow!("Detached HEAD setzen fehlgeschlagen: {e}"))?;
-        }
-    }
-    Ok(())
+    set_head_from_reference(&repo, reference.as_ref(), &object)
 }
 
 /// Stash + Checkout (für Dirty-Dialog Option)
@@ -514,7 +503,56 @@ fn escape_for_cmd(s: &str) -> String {
     }
 }
 
+fn has_placeholders(s: &str) -> bool {
+    s.contains("{file}") || s.contains("{dir}") || s.contains("{repo}")
+}
+
+fn build_agent_command<F>(
+    agent: &AgentProfile,
+    repo_path: &Path,
+    escape_fn: F,
+    prefix: &str,
+    substitute_args: bool,
+) -> String
+where
+    F: Fn(&str) -> String,
+{
+    if !agent.args.is_empty() {
+        let escaped_program = escape_fn(&agent.program);
+        let args_str = agent
+            .args
+            .iter()
+            .map(|a| {
+                let substituted = if substitute_args {
+                    substitute_placeholders(a, repo_path)
+                } else {
+                    a.clone()
+                };
+                escape_fn(&substituted)
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if args_str.is_empty() {
+            format!("{prefix}{escaped_program}")
+        } else {
+            format!("{prefix}{escaped_program} {args_str}")
+        }
+    } else if let Some(cmd) = &agent.command {
+        if has_placeholders(cmd) {
+            substitute_placeholders(cmd, repo_path)
+        } else {
+            cmd.clone()
+        }
+    } else {
+        escape_fn(&agent.program)
+    }
+}
+
 fn build_agent_cmd_raw(agent: &AgentProfile, repo_path: &Path) -> String {
+    // Wird nur für TerminalPreference::Custom via `cmd.arg(&agent_cmd_raw)` verwendet
+    // (`src/git.rs:841`). `Command::arg` übergibt ohne Shell-Parsing – zusätzliche
+    // Quotes würden literal Teil des Arguments (z. B. `"C:\Program Files\..."`).
+    // Daher program NICHT quoten (ursprüngliches Verhalten: `program.clone()`).
     if !agent.args.is_empty() {
         let args_str = agent
             .args
@@ -524,7 +562,7 @@ fn build_agent_cmd_raw(agent: &AgentProfile, repo_path: &Path) -> String {
             .join(" ");
         format!("{} {}", agent.program, args_str)
     } else if let Some(cmd) = &agent.command {
-        if cmd.contains("{file}") || cmd.contains("{dir}") || cmd.contains("{repo}") {
+        if has_placeholders(cmd) {
             substitute_placeholders(cmd, repo_path)
         } else {
             cmd.clone()
@@ -535,57 +573,11 @@ fn build_agent_cmd_raw(agent: &AgentProfile, repo_path: &Path) -> String {
 }
 
 fn build_powershell_script(agent: &AgentProfile, repo_path: &Path) -> String {
-    if !agent.args.is_empty() {
-        let escaped_program = escape_for_powershell(&agent.program);
-        let escaped_args = agent
-            .args
-            .iter()
-            .map(|a| {
-                let substituted = substitute_placeholders(a, repo_path);
-                escape_for_powershell(&substituted)
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        if escaped_args.is_empty() {
-            format!("& {}", escaped_program)
-        } else {
-            format!("& {} {}", escaped_program, escaped_args)
-        }
-    } else if let Some(cmd) = &agent.command {
-        let substituted =
-            if cmd.contains("{file}") || cmd.contains("{dir}") || cmd.contains("{repo}") {
-                substitute_placeholders(cmd, repo_path)
-            } else {
-                cmd.clone()
-            };
-        // Für command als raw string: direkt ausführen, aber nicht zusätzlich mit & wrappen wenn es bereits komplex ist
-        substituted
-    } else {
-        escape_for_powershell(&agent.program)
-    }
+    build_agent_command(agent, repo_path, escape_for_powershell, "& ", true)
 }
 
 fn build_cmd_agent_string(agent: &AgentProfile, repo_path: &Path) -> String {
-    if !agent.args.is_empty() {
-        let args_str = agent
-            .args
-            .iter()
-            .map(|a| {
-                let substituted = substitute_placeholders(a, repo_path);
-                escape_for_cmd(&substituted)
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("{} {}", escape_for_cmd(&agent.program), args_str)
-    } else if let Some(cmd) = &agent.command {
-        if cmd.contains("{file}") || cmd.contains("{dir}") || cmd.contains("{repo}") {
-            substitute_placeholders(cmd, repo_path)
-        } else {
-            cmd.clone()
-        }
-    } else {
-        escape_for_cmd(&agent.program)
-    }
+    build_agent_command(agent, repo_path, escape_for_cmd, "", true)
 }
 
 pub fn is_program_available(program: &str) -> bool {
@@ -675,6 +667,14 @@ pub fn resolve_vs_path() -> Option<PathBuf> {
     }
 }
 
+fn set_creation_flags(_cmd: &mut std::process::Command, _flags: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        _cmd.creation_flags(_flags);
+    }
+}
+
 /// Öffnet eine Datei/Ordner mit einer IDE-Konfiguration
 pub fn launch_ide(ide: &IdeConfig, file: &Path) -> anyhow::Result<()> {
     let program = ide.effective_program();
@@ -695,11 +695,7 @@ pub fn launch_ide(ide: &IdeConfig, file: &Path) -> anyhow::Result<()> {
     let spawn = |prog: &str, args: &[String]| -> std::io::Result<std::process::Child> {
         let mut cmd = std::process::Command::new(prog);
         cmd.args(args);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW für IDEs (kein Konsolenfenster)
-        }
+        set_creation_flags(&mut cmd, 0x08000000);
         cmd.spawn()
     };
 
@@ -756,11 +752,7 @@ pub fn launch_ide(ide: &IdeConfig, file: &Path) -> anyhow::Result<()> {
                 shell_args.extend(args.clone());
                 let mut cmd = std::process::Command::new("cmd");
                 cmd.args(&shell_args);
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    cmd.creation_flags(0x08000000);
-                }
+                set_creation_flags(&mut cmd, 0x08000000);
                 cmd.spawn().map(|_| ()).map_err(|e2| {
                     anyhow::anyhow!(
                         "IDE nicht gefunden (weder '{}' noch 'cmd /C'): {} / {}",
@@ -787,6 +779,41 @@ pub fn launch_ide(ide: &IdeConfig, file: &Path) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(not(test))]
+fn spawn_wt(repo_str: &str, cmd_string: &str, repo_path: &Path) -> anyhow::Result<()> {
+    let mut cmd = std::process::Command::new("wt");
+    cmd.args(["-d", repo_str, "--", "cmd", "/k", cmd_string]);
+    cmd.current_dir(repo_path);
+    set_creation_flags(&mut cmd, 0x00000010);
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("Windows Terminal starten fehlgeschlagen: {e}"))
+}
+
+#[cfg(not(test))]
+fn spawn_powershell(ps_script: &str, repo_path: &Path) -> anyhow::Result<()> {
+    let has_pwsh = is_program_available("pwsh");
+    let ps = if has_pwsh { "pwsh" } else { "powershell" };
+    let mut cmd = std::process::Command::new(ps);
+    cmd.args(["-NoExit", "-Command", ps_script]);
+    cmd.current_dir(repo_path);
+    set_creation_flags(&mut cmd, 0x00000010);
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("Powershell starten fehlgeschlagen: {e}"))
+}
+
+#[cfg(not(test))]
+fn spawn_cmd(agent_string: &str, repo_str: &str, repo_path: &Path) -> anyhow::Result<()> {
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.args(["/C", "start", "", "/D", repo_str, "cmd", "/K", agent_string]);
+    cmd.current_dir(repo_path);
+    set_creation_flags(&mut cmd, 0x08000000);
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("cmd starten fehlgeschlagen: {e}"))
+}
+
 /// Öffnet ein Terminal und startet einen Agenten darin
 pub fn launch_agent(
     agent: &AgentProfile,
@@ -794,7 +821,6 @@ pub fn launch_agent(
     terminal_pref: &TerminalPreference,
 ) -> anyhow::Result<()> {
     let pref = agent.terminal_override.as_ref().unwrap_or(terminal_pref);
-    // Baue sichere Kommandos für jeweilige Shell (PowerShell single-quoted, cmd double-quoted)
     let ps_script = build_powershell_script(agent, repo_path);
     let cmd_agent_string = build_cmd_agent_string(agent, repo_path);
     let agent_cmd_raw = build_agent_cmd_raw(agent, repo_path);
@@ -802,169 +828,47 @@ pub fn launch_agent(
 
     #[cfg(test)]
     {
-        // In tests: don't spawn terminal windows that stay open
-        let _ = (
-            &ps_script,
-            &cmd_agent_string,
-            &agent_cmd_raw,
-            &repo_str,
-            &pref,
-        );
+        let _ = (&ps_script, &cmd_agent_string, &agent_cmd_raw, &repo_str, &pref);
         return Ok(());
     }
 
-    // Helper to check availability
-    let has_wt = is_program_available("wt");
-    let has_pwsh = is_program_available("pwsh");
-    let has_powershell = is_program_available("powershell");
+    #[cfg(not(test))]
+    {
+        let has_wt = is_program_available("wt");
 
-    match pref {
-        TerminalPreference::WindowsTerminal if has_wt => {
-            // wt -d <dir> -- cmd /k <agent>  – repo_str als einzelnes Arg via Command::args (kein Shell-Parsing)
-            // Zusätzlich current_dir setzen als Härtung
-            let mut cmd = std::process::Command::new("wt");
-            cmd.args(["-d", &repo_str, "--", "cmd", "/k", &cmd_agent_string]);
-            cmd.current_dir(repo_path);
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x00000010); // CREATE_NEW_CONSOLE
+        match pref {
+            TerminalPreference::WindowsTerminal if has_wt => {
+                spawn_wt(&repo_str, &cmd_agent_string, repo_path)
             }
-            cmd.spawn()
-                .map(|_| ())
-                .map_err(|e| anyhow::anyhow!("Windows Terminal starten fehlgeschlagen: {e}"))
-        }
-        TerminalPreference::Powershell => {
-            let ps = if has_pwsh { "pwsh" } else { "powershell" };
-            let mut cmd = std::process::Command::new(ps);
-            cmd.args(["-NoExit", "-Command", &ps_script]);
-            cmd.current_dir(repo_path);
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x00000010);
+            TerminalPreference::Powershell => spawn_powershell(&ps_script, repo_path),
+            TerminalPreference::Cmd => spawn_cmd(&cmd_agent_string, &repo_str, repo_path),
+            TerminalPreference::Auto if !has_wt => {
+                spawn_powershell(&ps_script, repo_path)
+                    .or_else(|_| spawn_cmd(&cmd_agent_string, &repo_str, repo_path))
             }
-            cmd.spawn()
-                .map(|_| ())
-                .map_err(|e| anyhow::anyhow!("Powershell starten fehlgeschlagen: {e}"))
-        }
-        TerminalPreference::Cmd => {
-            let mut cmd = std::process::Command::new("cmd");
-            cmd.args([
-                "/C",
-                "start",
-                "",
-                "/D",
-                &repo_str,
-                "cmd",
-                "/K",
-                &cmd_agent_string,
-            ]);
-            cmd.current_dir(repo_path);
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x08000000);
+            TerminalPreference::Auto => {
+                spawn_wt(&repo_str, &cmd_agent_string, repo_path)
+                    .or_else(|_| spawn_powershell(&ps_script, repo_path))
+                    .or_else(|_| spawn_cmd(&cmd_agent_string, &repo_str, repo_path))
             }
-            cmd.spawn()
-                .map(|_| ())
-                .map_err(|e| anyhow::anyhow!("cmd starten fehlgeschlagen: {e}"))
-        }
-        TerminalPreference::Custom(custom) => {
-            let mut cmd = std::process::Command::new(custom);
-            // Für Custom Terminal: versuche program+args direkt, sonst raw string
-            if !agent.args.is_empty() {
-                cmd.arg(&agent.program);
-                for a in &agent.args {
-                    let substituted = substitute_placeholders(a, repo_path);
-                    cmd.arg(substituted);
+            TerminalPreference::Custom(custom) => {
+                let mut cmd = std::process::Command::new(custom);
+                if !agent.args.is_empty() {
+                    cmd.arg(&agent.program);
+                    for a in &agent.args {
+                        let substituted = substitute_placeholders(a, repo_path);
+                        cmd.arg(substituted);
+                    }
+                } else {
+                    cmd.arg(&agent_cmd_raw);
                 }
-            } else {
-                cmd.arg(&agent_cmd_raw);
-            }
-            cmd.current_dir(repo_path);
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x00000010);
-            }
-            cmd.spawn().map(|_| ()).map_err(|e| {
-                anyhow::anyhow!("Custom Terminal '{}' starten fehlgeschlagen: {e}", custom)
-            })
-        }
-        TerminalPreference::Auto => {
-            // Auto: wt -> powershell -> cmd
-            if has_wt {
-                let mut cmd = std::process::Command::new("wt");
-                cmd.args(["-d", &repo_str, "--", "cmd", "/k", &cmd_agent_string]);
                 cmd.current_dir(repo_path);
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    cmd.creation_flags(0x00000010);
-                }
-                if cmd.spawn().is_ok() {
-                    return Ok(());
-                }
+                set_creation_flags(&mut cmd, 0x00000010);
+                cmd.spawn().map(|_| ()).map_err(|e| {
+                    anyhow::anyhow!("Custom Terminal '{}' starten fehlgeschlagen: {e}", custom)
+                })
             }
-            if has_pwsh || has_powershell {
-                let ps = if has_pwsh { "pwsh" } else { "powershell" };
-                let mut cmd = std::process::Command::new(ps);
-                cmd.args(["-NoExit", "-Command", &ps_script]);
-                cmd.current_dir(repo_path);
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    cmd.creation_flags(0x00000010);
-                }
-                if cmd.spawn().is_ok() {
-                    return Ok(());
-                }
-            }
-            // Fallback cmd
-            let mut cmd = std::process::Command::new("cmd");
-            cmd.args([
-                "/C",
-                "start",
-                "",
-                "/D",
-                &repo_str,
-                "cmd",
-                "/K",
-                &cmd_agent_string,
-            ]);
-            cmd.current_dir(repo_path);
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x08000000);
-            }
-            cmd.spawn()
-                .map(|_| ())
-                .map_err(|e| anyhow::anyhow!("Kein Terminal verfügbar, cmd fehlgeschlagen: {e}"))
-        }
-        _ => {
-            // Fallback für Auto wenn wt nicht verfügbar etc., behandele wie Auto
-            let mut cmd = std::process::Command::new("cmd");
-            cmd.args([
-                "/C",
-                "start",
-                "",
-                "/D",
-                &repo_str,
-                "cmd",
-                "/K",
-                &cmd_agent_string,
-            ]);
-            cmd.current_dir(repo_path);
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x08000000);
-            }
-            cmd.spawn()
-                .map(|_| ())
-                .map_err(|e| anyhow::anyhow!("Terminal starten fehlgeschlagen: {e}"))
+            _ => spawn_cmd(&cmd_agent_string, &repo_str, repo_path),
         }
     }
 }
@@ -1207,7 +1111,7 @@ mod tests {
     #[test]
     fn is_dirty_staged_true() {
         let dir = tempdir().unwrap();
-        let repo = init_repo_with_commit(dir.path(), "main");
+        let _repo = init_repo_with_commit(dir.path(), "main");
         fs::write(dir.path().join("staged.txt"), "hi").unwrap();
         let repo2 = Repository::open(dir.path()).unwrap();
         let mut idx = repo2.index().unwrap();
