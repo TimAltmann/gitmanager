@@ -9,11 +9,20 @@ const ICON_VS: egui::ImageSource = egui::include_image!("../../assets/icons/visu
 const ICON_RIDER: egui::ImageSource = egui::include_image!("../../assets/icons/rider.svg");
 const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
 const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
+const ICON_TERMINAL: egui::ImageSource = egui::include_image!("../../assets/icons/terminal.svg");
 const ICON_CODEX: egui::ImageSource = egui::include_image!("../../assets/icons/codex.svg");
 const ICON_GEMINI: egui::ImageSource = egui::include_image!("../../assets/icons/gemini.svg");
 const ICON_COPILOT: egui::ImageSource = egui::include_image!("../../assets/icons/copilot.svg");
 const ICON_CURSOR: egui::ImageSource = egui::include_image!("../../assets/icons/cursor.svg");
 const ICON_AIDER: egui::ImageSource = egui::include_image!("../../assets/icons/aider.svg");
+const ICON_CHEVRON_DOWN: egui::ImageSource =
+    egui::include_image!("../../assets/icons/chevron-down.svg");
+const ICON_CHEVRON_UP: egui::ImageSource =
+    egui::include_image!("../../assets/icons/chevron-up.svg");
+const ICON_GIT_BRANCH: egui::ImageSource =
+    egui::include_image!("../../assets/icons/git-branch.svg");
+const ICON_GIT_COMMIT: egui::ImageSource =
+    egui::include_image!("../../assets/icons/git-commit.svg");
 
 fn ide_icon_for(ide_id: &str) -> egui::ImageSource<'static> {
     match ide_id {
@@ -36,6 +45,48 @@ fn agent_icon_for(agent_id: &str) -> egui::ImageSource<'static> {
     }
 }
 
+/// Helper: Dropdown-Button mit rechtsbündigem Chevron *innerhalb* des Buttons.
+/// Nutzt `Button::right_text` (mit `Atom::grow`) damit der Pfeil immer am rechten
+/// Rand des Buttons liegt und der Text links getruncate wird.
+fn dropdown_button(
+    ui: &mut Ui,
+    text: &str,
+    chevron: egui::ImageSource<'static>,
+    width: f32,
+    selected: bool,
+    text_color: Option<Color32>,
+    font_size: f32,
+) -> egui::Response {
+    let tint = text_color.unwrap_or_else(|| ui.visuals().text_color());
+    let chevron_img = egui::Image::new(chevron)
+        .fit_to_exact_size(Vec2::splat(12.0))
+        .tint(tint);
+    let rich = match text_color {
+        Some(c) => RichText::new(text.to_owned()).size(font_size).color(c),
+        None => RichText::new(text.to_owned()).size(font_size),
+    };
+    let btn = egui::Button::new(rich)
+        .selected(selected)
+        .truncate()
+        .right_text(chevron_img);
+    ui.add_sized([width, 22.0], btn)
+}
+
+pub fn filter_branches(branches: &[String], filter: &str, limit: usize) -> Vec<String> {
+    let filter_lower = filter.to_lowercase();
+    let mut out = Vec::new();
+    for b in branches {
+        if !filter_lower.is_empty() && !b.to_lowercase().contains(&filter_lower) {
+            continue;
+        }
+        out.push(b.clone());
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
 pub struct RepoListActions {
     pub branch_switch: Option<(PathBuf, String)>,
     pub solution_select: Option<(PathBuf, PathBuf)>,
@@ -44,6 +95,7 @@ pub struct RepoListActions {
     pub profile_override: Option<(PathBuf, Option<String>)>,
     pub fetch_branches: Option<PathBuf>,
     pub explorer_open: Option<PathBuf>,
+    pub shell_open: Option<PathBuf>,
 }
 
 use std::path::PathBuf;
@@ -102,7 +154,7 @@ fn show_repo_row(
 
     frame.show(ui, |ui| {
         ui.vertical(|ui| {
-            // Zeile 1: Name + Dirty + Branch Dropdown + Solution Dropdown + Profile Override + Explorer
+            // Zeile 1: Name + Dirty + Branch Dropdown + Solution Dropdown + Profile Override
             ui.horizontal(|ui| {
                 ui.label(RichText::new("📁").size(14.0));
                 ui.label(RichText::new(&repo.name).size(13.0).strong());
@@ -124,116 +176,274 @@ fn show_repo_row(
 
                 ui.add_space(8.0);
 
-                // Branch Dropdown mit Suche + Refresh
-                let branch_text = if repo.is_detached {
-                    format!("⬡ {}", repo.branch)
-                } else {
-                    format!(" {}", repo.branch)
-                };
-                // Persistenter Filter pro Repo
-                let branch_filter_id =
-                    egui::Id::new(format!("branch_filter_{}", repo.path.display()));
+                // Branch Dropdown mit Suche + Refresh (custom popup statt ComboBox)
+                let branch_text = repo.branch.clone();
+                let branch_filter_id = egui::Id::new("branch_filter").with(&repo.path);
+                let branch_popup_id = egui::Id::new("branch_popup").with(&repo.path);
+                let branch_win_id = egui::Id::new("branch_win").with(&repo.path);
+                let branch_focus_id = egui::Id::new("branch_focus").with(&repo.path);
                 let mut branch_filter = ui
                     .ctx()
                     .data_mut(|d| d.get_temp::<String>(branch_filter_id).unwrap_or_default());
-                let mut branch_filter_changed = false;
+                let mut popup_open = ui
+                    .ctx()
+                    .data_mut(|d| d.get_temp::<bool>(branch_popup_id).unwrap_or(false));
 
                 let mut branch_selected: Option<String> = None;
                 let mut do_fetch = false;
 
-                egui::ComboBox::from_id_salt(format!("branch_{}", repo.path.display()))
-                    .selected_text(branch_text)
-                    .width(150.0)
-                    .show_ui(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(tr(config.language, "search_label")).size(11.0));
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut branch_filter)
-                                    .hint_text(tr(config.language, "filter_hint"))
-                                    .desired_width(100.0),
-                            );
-                            if resp.changed() {
-                                branch_filter_changed = true;
-                            }
-                            if ui
-                                .small_button("↻")
-                                .on_hover_text(tr(config.language, "branch_refresh_tooltip"))
-                                .clicked()
-                            {
-                                do_fetch = true;
-                            }
+                let chevron_icon = if popup_open {
+                    ICON_CHEVRON_UP
+                } else {
+                    ICON_CHEVRON_DOWN
+                };
+                let branch_icon = if repo.is_detached {
+                    ICON_GIT_COMMIT
+                } else {
+                    ICON_GIT_BRANCH
+                };
+                let branch_tooltip = if repo.is_detached {
+                    tr(config.language, "detached_tooltip")
+                } else {
+                    tr(config.language, "branch_switch_tooltip")
+                };
+                // Branch Dropdown: Chevron jetzt innerhalb des Buttons (rechtsbündig)
+                let btn_resp = ui
+                    .horizontal(|ui| {
+                        let icon_tint = if repo.is_detached {
+                            Color32::from_rgb(200, 120, 40)
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        ui.add(
+                            egui::Image::new(branch_icon)
+                                .fit_to_exact_size(Vec2::splat(14.0))
+                                .tint(icon_tint),
+                        )
+                        .on_hover_text(branch_tooltip.clone());
+                        let branch_color = if repo.is_detached {
+                            Color32::from_rgb(200, 120, 40)
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        dropdown_button(
+                            ui,
+                            &branch_text,
+                            chevron_icon,
+                            130.0,
+                            popup_open,
+                            Some(branch_color),
+                            12.0,
+                        )
+                        .on_hover_text(branch_tooltip.clone())
+                    })
+                    .inner;
+                let should_toggle = btn_resp.clicked();
+                if should_toggle {
+                    popup_open = !popup_open;
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(branch_popup_id, popup_open));
+                    if !popup_open {
+                        // Filter zurücksetzen beim Schließen
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(branch_filter_id, String::new());
+                            d.insert_temp(branch_focus_id, false);
                         });
-                        ui.separator();
-                        ui.label(
-                            RichText::new(format!(
-                                "{} {}",
-                                tr(config.language, "current"),
-                                repo.branch
-                            ))
-                            .weak()
-                            .size(11.0),
-                        );
-                        ui.separator();
-                        let filter_lower = branch_filter.to_lowercase();
-                        let mut shown = 0;
-                        for b in &repo.branches {
-                            if !filter_lower.is_empty() && !b.to_lowercase().contains(&filter_lower)
-                            {
-                                continue;
-                            }
-                            let is_current = b == &repo.branch;
-                            let label = if is_current {
-                                format!("● {}", b)
-                            } else {
-                                b.clone()
-                            };
-                            if ui.selectable_label(is_current, label).clicked() && !is_current {
-                                branch_selected = Some(b.clone());
-                            }
-                            shown += 1;
-                            if shown > 100 {
+                        branch_filter.clear();
+                    }
+                }
+
+                // Popup via Window (bleibt offen während Suche)
+                let mut close_popup = false;
+                let mut branch_filter_changed = false;
+                if popup_open {
+                    let win_resp =
+                        egui::Window::new(format!("branch_popup_win_{}", repo.path.display()))
+                            .id(branch_win_id)
+                            .collapsible(false)
+                            .resizable(false)
+                            .title_bar(false)
+                            .fixed_pos(btn_resp.rect.left_bottom())
+                            .pivot(egui::Align2::LEFT_TOP)
+                            .show(ui.ctx(), |ui| {
+                                ui.set_min_width(260.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(tr(config.language, "search_label"))
+                                            .size(11.0),
+                                    );
+                                    let edit_resp = ui.add(
+                                        egui::TextEdit::singleline(&mut branch_filter)
+                                            .hint_text(tr(config.language, "filter_hint"))
+                                            .desired_width(120.0),
+                                    );
+                                    // Fokus beim Öffnen direkt in Suche + Recovery falls Fokus verloren
+                                    let has_focused = ui.ctx().data_mut(|d| {
+                                        d.get_temp::<bool>(branch_focus_id).unwrap_or(false)
+                                    });
+                                    if !has_focused {
+                                        edit_resp.request_focus();
+                                        ui.ctx().data_mut(|d| d.insert_temp(branch_focus_id, true));
+                                    }
+                                    // Recovery: wenn kein Fokus mehr, erneut anfordern
+                                    if !edit_resp.has_focus()
+                                        && ui.ctx().memory(|m| m.focused().is_none())
+                                    {
+                                        edit_resp.request_focus();
+                                    }
+                                    if edit_resp.has_focus() && !has_focused {
+                                        ui.ctx().data_mut(|d| d.insert_temp(branch_focus_id, true));
+                                    }
+                                    if edit_resp.changed() {
+                                        branch_filter_changed = true;
+                                    }
+                                    if ui
+                                        .small_button("↻")
+                                        .on_hover_text(tr(
+                                            config.language,
+                                            "branch_refresh_tooltip",
+                                        ))
+                                        .clicked()
+                                    {
+                                        do_fetch = true;
+                                    }
+                                });
+                                ui.separator();
                                 ui.label(
                                     RichText::new(format!(
-                                        "... und {} mehr (filtere)",
-                                        repo.branches.len() - shown
+                                        "{} {}",
+                                        tr(config.language, "current"),
+                                        repo.branch
                                     ))
                                     .weak()
-                                    .size(10.0),
+                                    .size(11.0),
                                 );
-                                break;
+                                ui.separator();
+                                egui::ScrollArea::vertical()
+                                    .max_height(220.0)
+                                    .show(ui, |ui| {
+                                        let limit = config.branch_display_limit.max(50);
+                                        let filtered =
+                                            filter_branches(&repo.branches, &branch_filter, limit);
+                                        for b in &filtered {
+                                            let is_current = b == &repo.branch;
+                                            let label = if is_current {
+                                                format!("● {}", b)
+                                            } else {
+                                                b.clone()
+                                            };
+                                            if ui.selectable_label(is_current, label).clicked()
+                                                && !is_current
+                                            {
+                                                branch_selected = Some(b.clone());
+                                                close_popup = true;
+                                            }
+                                        }
+                                        if filtered.len() >= limit {
+                                            let total_matching = repo
+                                                .branches
+                                                .iter()
+                                                .filter(|b| {
+                                                    branch_filter.is_empty()
+                                                        || b.to_lowercase()
+                                                            .contains(&branch_filter.to_lowercase())
+                                                })
+                                                .count();
+                                            let remaining =
+                                                total_matching.saturating_sub(filtered.len());
+                                            if remaining > 0 {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "... und {} mehr (filtere)",
+                                                        remaining
+                                                    ))
+                                                    .weak()
+                                                    .size(10.0),
+                                                );
+                                            } else if repo.branches.len() > filtered.len() {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "... und {} mehr (filtere)",
+                                                        repo.branches.len() - filtered.len()
+                                                    ))
+                                                    .weak()
+                                                    .size(10.0),
+                                                );
+                                            }
+                                        }
+                                        if repo.branches.is_empty() {
+                                            ui.label(
+                                                RichText::new(tr(config.language, "no_branches"))
+                                                    .weak()
+                                                    .size(11.0),
+                                            );
+                                            if ui
+                                                .small_button(tr(config.language, "fetch_now"))
+                                                .clicked()
+                                            {
+                                                do_fetch = true;
+                                            }
+                                        } else if filtered.is_empty() {
+                                            ui.label(
+                                                RichText::new(tr(config.language, "no_matches"))
+                                                    .weak()
+                                                    .size(11.0),
+                                            );
+                                        }
+                                    });
+                            });
+                    // Außenklick schließt Popup
+                    if ui.ctx().input(|i| i.pointer.any_click()) {
+                        if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
+                            let btn_rect = btn_resp.rect;
+                            let win_rect = win_resp
+                                .as_ref()
+                                .map(|r| r.response.rect)
+                                .unwrap_or(egui::Rect::NOTHING);
+                            if !btn_rect.contains(pos) && !win_rect.contains(pos) {
+                                close_popup = true;
                             }
                         }
-                        if repo.branches.is_empty() {
-                            ui.label(
-                                RichText::new(tr(config.language, "no_branches"))
-                                    .weak()
-                                    .size(11.0),
-                            );
-                            if ui.small_button(tr(config.language, "fetch_now")).clicked() {
-                                do_fetch = true;
-                            }
-                        } else if shown == 0 {
-                            ui.label(
-                                RichText::new(tr(config.language, "no_matches"))
-                                    .weak()
-                                    .size(11.0),
-                            );
-                        }
-                    })
-                    .response
-                    .on_hover_text(tr(config.language, "branch_switch_tooltip"));
+                    }
+                    if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+                        close_popup = true;
+                    }
+                    // Wenn Window geschlossen (z.B. durch Klick außerhalb des egui Bereichs), open wird false
+                    if let Some(r) = win_resp {
+                        // r.response enthält den Frame – nicht direkt nutzen
+                        // Wir halten popup offen, es sei denn close_popup
+                        let _ = r;
+                    } else {
+                        // Window not shown due to earlier return? keep open
+                    }
+                    // Persist filter während Popup offen
+                    branch_filter_changed = branch_filter_changed || do_fetch;
+                }
 
                 // Speichere Filter zurück
-                if branch_filter_changed {
+                if branch_filter_changed || (popup_open && !branch_filter.is_empty()) {
                     ui.ctx()
                         .data_mut(|d| d.insert_temp(branch_filter_id, branch_filter.clone()));
+                }
+                if close_popup {
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(branch_popup_id, false);
+                        d.insert_temp(branch_filter_id, String::new());
+                        d.insert_temp(branch_focus_id, false);
+                    });
                 } else if do_fetch {
-                    // Filter beibehalten
+                    // Filter beibehalten, Popup bleibt offen
                     ui.ctx()
                         .data_mut(|d| d.insert_temp(branch_filter_id, branch_filter.clone()));
                 }
                 if let Some(b) = branch_selected {
                     actions.branch_switch = Some((repo.path.clone(), b));
+                    // Nach Auswahl Popup schließen und Filter leeren
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(branch_popup_id, false);
+                        d.insert_temp(branch_filter_id, String::new());
+                        d.insert_temp(branch_focus_id, false);
+                    });
                 }
                 if do_fetch {
                     actions.fetch_branches = Some(repo.path.clone());
@@ -241,7 +451,7 @@ fn show_repo_row(
 
                 ui.add_space(8.0);
 
-                // Solution Dropdown mit Suche
+                // Solution Dropdown mit Suche (ebenfalls custom popup)
                 let profile = config.get_effective_profile_for_repo(&repo.path);
                 let has_solutions = !repo.solutions.is_empty();
                 let selected_text = if let Some(sel) = &repo.selected_solution {
@@ -256,88 +466,195 @@ fn show_repo_row(
                     tr(config.language, "no_solution").replace("{}", &profile.file_extension)
                 };
 
-                let sln_filter_id = egui::Id::new(format!("sln_filter_{}", repo.path.display()));
+                let sln_filter_id = egui::Id::new("sln_filter").with(&repo.path);
+                let sln_popup_id = egui::Id::new("sln_popup").with(&repo.path);
+                let sln_win_id = egui::Id::new("sln_win").with(&repo.path);
+                let sln_focus_id = egui::Id::new("sln_focus").with(&repo.path);
                 let mut sln_filter = ui
                     .ctx()
                     .data_mut(|d| d.get_temp::<String>(sln_filter_id).unwrap_or_default());
-                let mut sln_filter_changed = false;
+                let mut sln_popup_open = ui
+                    .ctx()
+                    .data_mut(|d| d.get_temp::<bool>(sln_popup_id).unwrap_or(false));
                 let mut sln_selected: Option<PathBuf> = None;
+                let mut sln_filter_changed = false;
+                let mut sln_close_popup = false;
 
-                let combo = egui::ComboBox::from_id_salt(format!("sln_{}", repo.path.display()))
-                    .selected_text(selected_text.clone())
-                    .width(180.0)
-                    .show_ui(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(tr(config.language, "search_label")).size(11.0));
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut sln_filter)
-                                    .hint_text(tr(config.language, "filter_hint"))
-                                    .desired_width(120.0),
-                            );
-                            if resp.changed() {
-                                sln_filter_changed = true;
-                            }
-                        });
-                        ui.separator();
-                        let filter_lower = sln_filter.to_lowercase();
-                        let mut shown = 0;
-                        for sln in &repo.solutions {
-                            if !filter_lower.is_empty()
-                                && !sln.relative.to_lowercase().contains(&filter_lower)
-                            {
-                                continue;
-                            }
-                            let is_selected = Some(&sln.path) == repo.selected_solution.as_ref();
-                            if ui.selectable_label(is_selected, &sln.relative).clicked() {
-                                sln_selected = Some(sln.path.clone());
-                            }
-                            shown += 1;
-                            if shown > 50 {
-                                break;
-                            }
-                        }
-                        if !has_solutions {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} ({} {})",
-                                    tr(config.language, "no_solution")
-                                        .replace("{}", &profile.file_extension),
-                                    tr(config.language, "depth_label"),
-                                    profile.max_scan_depth
-                                ))
-                                .weak()
-                                .size(11.0),
-                            );
-                        } else if sln_selected.is_none()
-                            && has_solutions
-                            && !sln_filter.is_empty()
-                            && shown == 0
-                        {
-                            ui.label(
-                                RichText::new(tr(config.language, "no_matches"))
-                                    .weak()
-                                    .size(11.0),
-                            );
-                        } else if repo.solutions.len() >= 20 {
-                            ui.separator();
-                            ui.label(
-                                RichText::new("+ weitere vorhanden (Cap 20)")
-                                    .weak()
-                                    .size(10.0),
-                            );
-                        }
-                    });
-                if sln_filter_changed {
-                    ui.ctx()
-                        .data_mut(|d| d.insert_temp(sln_filter_id, sln_filter.clone()));
-                }
-                if let Some(p) = sln_selected {
-                    actions.solution_select = Some((repo.path.clone(), p));
-                }
-                combo.response.on_hover_text(format!(
+                let sln_chevron = if sln_popup_open {
+                    ICON_CHEVRON_UP
+                } else {
+                    ICON_CHEVRON_DOWN
+                };
+                // Solution Dropdown: Chevron jetzt innerhalb des Buttons
+                let sln_resp = dropdown_button(
+                    ui,
+                    &selected_text,
+                    sln_chevron,
+                    170.0,
+                    sln_popup_open,
+                    None,
+                    11.0,
+                )
+                .on_hover_text(format!(
                     "{} Dateien für Profil '{}' – tippe zum Filtern",
                     profile.file_extension, profile.display_name
                 ));
+                if sln_resp.clicked() {
+                    sln_popup_open = !sln_popup_open;
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(sln_popup_id, sln_popup_open));
+                    if !sln_popup_open {
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(sln_filter_id, String::new());
+                            d.insert_temp(sln_focus_id, false);
+                        });
+                        sln_filter.clear();
+                    }
+                }
+                if sln_popup_open {
+                    let sln_win_resp =
+                        egui::Window::new(format!("sln_popup_win_{}", repo.path.display()))
+                            .id(sln_win_id)
+                            .collapsible(false)
+                            .resizable(false)
+                            .title_bar(false)
+                            .fixed_pos(sln_resp.rect.left_bottom())
+                            .pivot(egui::Align2::LEFT_TOP)
+                            .show(ui.ctx(), |ui| {
+                                ui.set_min_width(260.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(tr(config.language, "search_label"))
+                                            .size(11.0),
+                                    );
+                                    let edit_resp = ui.add(
+                                        egui::TextEdit::singleline(&mut sln_filter)
+                                            .hint_text(tr(config.language, "filter_hint"))
+                                            .desired_width(140.0),
+                                    );
+                                    let has_focused = ui.ctx().data_mut(|d| {
+                                        d.get_temp::<bool>(sln_focus_id).unwrap_or(false)
+                                    });
+                                    if !has_focused {
+                                        edit_resp.request_focus();
+                                        ui.ctx().data_mut(|d| d.insert_temp(sln_focus_id, true));
+                                    }
+                                    if !edit_resp.has_focus()
+                                        && ui.ctx().memory(|m| m.focused().is_none())
+                                    {
+                                        edit_resp.request_focus();
+                                    }
+                                    if edit_resp.has_focus() && !has_focused {
+                                        ui.ctx().data_mut(|d| d.insert_temp(sln_focus_id, true));
+                                    }
+                                    if edit_resp.changed() {
+                                        sln_filter_changed = true;
+                                    }
+                                });
+                                ui.separator();
+                                egui::ScrollArea::vertical()
+                                    .max_height(220.0)
+                                    .show(ui, |ui| {
+                                        let filter_lower = sln_filter.to_lowercase();
+                                        let limit = config.branch_display_limit.max(50);
+                                        let mut shown = 0;
+                                        for sln in &repo.solutions {
+                                            if !filter_lower.is_empty()
+                                                && !sln
+                                                    .relative
+                                                    .to_lowercase()
+                                                    .contains(&filter_lower)
+                                            {
+                                                continue;
+                                            }
+                                            let is_selected =
+                                                Some(&sln.path) == repo.selected_solution.as_ref();
+                                            if ui
+                                                .selectable_label(is_selected, &sln.relative)
+                                                .clicked()
+                                            {
+                                                sln_selected = Some(sln.path.clone());
+                                                sln_close_popup = true;
+                                            }
+                                            shown += 1;
+                                            if shown >= limit {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "... und {} mehr (filtere)",
+                                                        repo.solutions.len() - shown
+                                                    ))
+                                                    .weak()
+                                                    .size(10.0),
+                                                );
+                                                break;
+                                            }
+                                        }
+                                        if !has_solutions {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "{} ({} {})",
+                                                    tr(config.language, "no_solution")
+                                                        .replace("{}", &profile.file_extension),
+                                                    tr(config.language, "depth_label"),
+                                                    profile.max_scan_depth
+                                                ))
+                                                .weak()
+                                                .size(11.0),
+                                            );
+                                        } else if shown == 0 {
+                                            ui.label(
+                                                RichText::new(tr(config.language, "no_matches"))
+                                                    .weak()
+                                                    .size(11.0),
+                                            );
+                                        } else if repo.solutions.len() >= 20 {
+                                            ui.separator();
+                                            ui.label(
+                                                RichText::new("+ weitere vorhanden (Cap 20)")
+                                                    .weak()
+                                                    .size(10.0),
+                                            );
+                                        }
+                                    });
+                            });
+                    if ui.ctx().input(|i| i.pointer.any_click()) {
+                        if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
+                            let btn_rect = sln_resp.rect;
+                            let win_rect = sln_win_resp
+                                .as_ref()
+                                .map(|r| r.response.rect)
+                                .unwrap_or(egui::Rect::NOTHING);
+                            if !btn_rect.contains(pos) && !win_rect.contains(pos) {
+                                sln_close_popup = true;
+                            }
+                        }
+                    }
+                    if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+                        sln_close_popup = true;
+                    }
+                }
+                if sln_filter_changed {
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(sln_filter_id, sln_filter.clone()));
+                } else if sln_popup_open && !sln_filter.is_empty() {
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(sln_filter_id, sln_filter.clone()));
+                }
+                if sln_close_popup {
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(sln_popup_id, false);
+                        d.insert_temp(sln_filter_id, String::new());
+                        d.insert_temp(sln_focus_id, false);
+                    });
+                }
+                if let Some(p) = sln_selected {
+                    actions.solution_select = Some((repo.path.clone(), p));
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(sln_popup_id, false);
+                        d.insert_temp(sln_filter_id, String::new());
+                        d.insert_temp(sln_focus_id, false);
+                    });
+                }
 
                 // Profile Override Combo (klein, rechts)
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -386,7 +703,7 @@ fn show_repo_row(
 
             ui.add_space(4.0);
 
-            // Zeile 2: Pfad + Explorer + IDE Buttons + AI Button (ohne Branch Pill)
+            // Zeile 2: Pfad + Explorer + Shell + IDE Buttons + AI Button (ohne Branch Pill)
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(repo.path.display().to_string())
@@ -395,20 +712,27 @@ fn show_repo_row(
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // AI Buttons (mehrere aktiv → mehrere Icons nebeneinander)
-                    let active_agents = config.get_active_agents();
-                    // Falls keine aktiv, zeige trotzdem den Default (claude) als Fallback
-                    let agents_to_show: Vec<_> = if active_agents.is_empty() {
-                        config.agents.iter().take(1).collect()
-                    } else {
-                        active_agents
+                    let effective_profile = config.get_effective_profile_for_repo(&repo.path);
+                    // AI Buttons (per Profil hidden/order) – respect hidden, fallback only when no active
+                    let agents_to_show = {
+                        let filtered = effective_profile
+                            .filtered_agents(&config.agents, &config.active_agent_ids);
+                        if filtered.is_empty() && config.active_agent_ids.is_empty() {
+                            config
+                                .agents
+                                .iter()
+                                .filter(|a| !effective_profile.hidden_agent_ids.contains(&a.id))
+                                .take(1)
+                                .collect::<Vec<_>>()
+                        } else {
+                            filtered
+                        }
                     };
                     for agent in agents_to_show.iter().rev() {
-                        // reverse wegen right_to-left
                         let icon = agent_icon_for(&agent.id);
                         let btn = egui::Button::image(
                             egui::Image::new(icon).fit_to_exact_size(Vec2::splat(18.0)),
-                        ); //.corner_radius(6);
+                        );
                         let resp = ui.add(btn).on_hover_text(
                             tr(config.language, "open_in_terminal")
                                 .replace("{}", &agent.display_name),
@@ -416,7 +740,6 @@ fn show_repo_row(
                         if resp.clicked() {
                             actions.agent_open = Some((repo.path.clone(), agent.id.clone()));
                         }
-                        // Hover highlight: draw rect border when hovered
                         if resp.hovered() {
                             let painter = ui.painter();
                             let rect = resp.rect;
@@ -429,40 +752,42 @@ fn show_repo_row(
                         }
                     }
 
-                    // Falls gar keine Agents konfiguriert (sollte nicht passieren)
-                    if agents_to_show.is_empty() {
-                        let image =
-                            egui::Image::new(ICON_CLAUDE).fit_to_exact_size(Vec2::splat(18.0));
-                        if ui
-                            .add(image)
-                            .on_hover_text(
-                                tr(config.language, "open_in_terminal").replace("{}", "AI"),
-                            )
-                            .clicked()
-                        {
-                            actions.agent_open = Some((repo.path.clone(), "claude".to_string()));
-                        }
-                    }
-
-                    // IDE Buttons (Icons)
-                    let effective_profile = config.get_effective_profile_for_repo(&repo.path);
-                    let mut ides_to_show: Vec<_> = effective_profile.ides.iter().collect();
-                    if let Some(def) = &effective_profile.default_ide_id {
-                        ides_to_show.sort_by_key(|ide| if &ide.id == def { 0 } else { 1 });
-                    }
+                    // IDE Buttons (Icons) – per Profil hidden/order
+                    let ides_to_show = effective_profile.visible_ides();
                     for ide in ides_to_show.iter().take(4) {
                         let icon = ide_icon_for(&ide.id);
                         let btn = egui::Button::image(
                             egui::Image::new(icon).fit_to_exact_size(Vec2::splat(18.0)),
                         );
+                        let preview_path = if ide.no_args {
+                            format!("{} (cwd: {})", ide.display_name, repo.path.display())
+                        } else {
+                            let eff = ide.effective_args();
+                            let arg_preview = eff.join(" ");
+                            // Zeige substituierte Vorschau mit Repo + Lösung
+                            let sln_path = repo.selected_solution.as_ref().unwrap_or(&repo.path);
+                            let substituted: Vec<String> = eff
+                                .iter()
+                                .map(|a| {
+                                    crate::git::substitute_placeholders(a, sln_path, &repo.path)
+                                })
+                                .collect();
+                            let sub_str = substituted.join(" ");
+                            format!(
+                                "{} {} (cwd: {})",
+                                ide.display_name,
+                                if sub_str.is_empty() {
+                                    arg_preview
+                                } else {
+                                    sub_str
+                                },
+                                repo.path.display()
+                            )
+                        };
                         let resp = ui.add(btn).on_hover_text(format!(
-                            "{} {} {}",
+                            "{} {}",
                             tr(config.language, "open_in"),
-                            ide.display_name,
-                            repo.selected_solution
-                                .as_ref()
-                                .map(|p| format!(" ({})", p.display()))
-                                .unwrap_or_default()
+                            preview_path
                         ));
                         if resp.clicked() {
                             let file_to_open = repo
@@ -472,7 +797,6 @@ fn show_repo_row(
                             actions.ide_open =
                                 Some((repo.path.clone(), ide.id.clone(), file_to_open));
                         }
-                        // Hover highlight
                         if resp.hovered() {
                             let painter = ui.painter();
                             let rect = resp.rect;
@@ -498,26 +822,50 @@ fn show_repo_row(
                         }
                     }
 
-                    // Explorer Button
-                    let explorer_btn = egui::Button::image(
-                        egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(18.0)),
-                    );
-                    let resp = ui
-                        .add(explorer_btn)
-                        .on_hover_text(tr(config.language, "open_in_explorer"));
-                    if resp.clicked() {
-                        actions.explorer_open = Some(repo.path.clone());
-                    }
-                    // Hover highlight
-                    if resp.hovered() {
-                        let painter = ui.painter();
-                        let rect = resp.rect;
-                        painter.rect_stroke(
-                            rect,
-                            egui::CornerRadius::same(4),
-                            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 100, 100)),
-                            egui::StrokeKind::Outside,
+                    // Shell Button (per Profil show_shell)
+                    if effective_profile.show_shell {
+                        let shell_btn = egui::Button::image(
+                            egui::Image::new(ICON_TERMINAL).fit_to_exact_size(Vec2::splat(18.0)),
                         );
+                        let resp = ui
+                            .add(shell_btn)
+                            .on_hover_text(tr(config.language, "open_in_shell"));
+                        if resp.clicked() {
+                            actions.shell_open = Some(repo.path.clone());
+                        }
+                        if resp.hovered() {
+                            let painter = ui.painter();
+                            let rect = resp.rect;
+                            painter.rect_stroke(
+                                rect,
+                                egui::CornerRadius::same(4),
+                                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 100, 100)),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                    }
+
+                    // Explorer Button (per Profil show_explorer)
+                    if effective_profile.show_explorer {
+                        let explorer_btn = egui::Button::image(
+                            egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(18.0)),
+                        );
+                        let resp = ui
+                            .add(explorer_btn)
+                            .on_hover_text(tr(config.language, "open_in_explorer"));
+                        if resp.clicked() {
+                            actions.explorer_open = Some(repo.path.clone());
+                        }
+                        if resp.hovered() {
+                            let painter = ui.painter();
+                            let rect = resp.rect;
+                            painter.rect_stroke(
+                                rect,
+                                egui::CornerRadius::same(4),
+                                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 100, 100)),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
                     }
                 });
             });
@@ -549,7 +897,6 @@ mod tests {
 
     #[test]
     fn ide_icon_for_mapping() {
-        // should not panic for known ids
         let _ = ide_icon_for("vs2022");
         let _ = ide_icon_for("vs");
         let _ = ide_icon_for("visualstudio");
@@ -557,11 +904,8 @@ mod tests {
         let _ = ide_icon_for("jetbrains");
         let _ = ide_icon_for("vscode");
         let _ = ide_icon_for("unknown");
-        // unknown fallback should be vscode (no panic and returns same as vscode)
-        // We verify by ensuring both calls succeed; direct equality not testable due to ImageSource internals
         let vscode = ide_icon_for("vscode");
         let unknown = ide_icon_for("unknown_id_xyz");
-        // Both should be valid ImageSource; we check that they don't panic and are debug-printable
         assert!(format!("{:?}", vscode).len() > 0);
         assert!(format!("{:?}", unknown).len() > 0);
     }
@@ -589,6 +933,7 @@ mod tests {
             profile_override: None,
             fetch_branches: None,
             explorer_open: None,
+            shell_open: None,
         };
         assert!(actions.branch_switch.is_none());
         assert!(actions.solution_select.is_none());
@@ -597,6 +942,7 @@ mod tests {
         assert!(actions.profile_override.is_none());
         assert!(actions.fetch_branches.is_none());
         assert!(actions.explorer_open.is_none());
+        assert!(actions.shell_open.is_none());
     }
 
     #[test]
@@ -609,6 +955,7 @@ mod tests {
             profile_override: None,
             fetch_branches: None,
             explorer_open: None,
+            shell_open: None,
         };
         actions.branch_switch = Some((PathBuf::from("/tmp/repo"), "main".to_string()));
         assert_eq!(
@@ -634,7 +981,8 @@ mod tests {
         assert!(actions.fetch_branches.is_some());
         actions.explorer_open = Some(PathBuf::from("/tmp/repo"));
         assert!(actions.explorer_open.is_some());
-        // profile_override None = global
+        actions.shell_open = Some(PathBuf::from("/tmp/repo"));
+        assert!(actions.shell_open.is_some());
         actions.profile_override = Some((PathBuf::from("/tmp/repo"), None));
         assert_eq!(
             actions.profile_override,
@@ -644,7 +992,6 @@ mod tests {
 
     #[test]
     fn repo_branch_display_detached_vs_normal() {
-        // logic from show_repo_row: if is_detached { format!("⬡ {}", branch) } else { format!(" {}", branch) }
         let branch = "main";
         let detached_text = if true {
             format!("⬡ {}", branch)
@@ -662,7 +1009,6 @@ mod tests {
 
     #[test]
     fn repo_dirty_indicator_logic() {
-        // verify constants used
         assert_eq!(
             crate::ui::theme::COLOR_DIRTY,
             Color32::from_rgb(220, 70, 40)
@@ -671,7 +1017,6 @@ mod tests {
             crate::ui::theme::COLOR_CLEAN,
             Color32::from_rgb(60, 160, 80)
         );
-        // dirty true -> ●, false -> ○
         let dirty_symbol = if true { "●" } else { "○" };
         let clean_symbol = if false { "●" } else { "○" };
         assert_eq!(dirty_symbol, "●");
@@ -681,7 +1026,6 @@ mod tests {
     #[test]
     fn repo_solution_display_and_filter() {
         let profile = AppConfig::default().get_active_profile().clone();
-        // has_solutions case
         let has_solutions = true;
         let selected_text_empty = if has_solutions {
             "a.sln".to_string()
@@ -698,7 +1042,6 @@ mod tests {
             format!("Keine {}", profile.file_extension)
         };
         assert_eq!(text_no_selection, "first.sln");
-        // filter case-insensitive
         let branches = vec!["main".to_string(), "feature/xyz".to_string()];
         let filter = "feat".to_lowercase();
         let filtered: Vec<_> = branches
@@ -719,9 +1062,14 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         });
         let path = PathBuf::from("/tmp/repo");
-        // no override -> global
         assert!(cfg.get_repo_state(&path).is_none());
         let effective = cfg.get_effective_profile_for_repo(&path);
         assert_eq!(effective.id, "dotnet");
@@ -733,23 +1081,101 @@ mod tests {
     #[test]
     fn repo_ide_and_agent_buttons_logic() {
         let cfg = AppConfig::default();
-        let active_agents = cfg.get_active_agents();
-        // if empty, show 1 fallback
-        let agents_to_show: Vec<_> = if active_agents.is_empty() {
-            cfg.agents.iter().take(1).collect()
-        } else {
-            active_agents
-        };
-        assert!(!agents_to_show.is_empty());
-        // max 4 IDEs
         let profile = cfg.get_effective_profile_for_repo(Path::new("/tmp/repo"));
-        let ides_to_show: Vec<_> = profile.ides.iter().take(4).collect();
+        let agents_to_show = profile.filtered_agents(&cfg.agents, &cfg.active_agent_ids);
+        assert!(!agents_to_show.is_empty());
+        let ides_to_show: Vec<_> = profile.visible_ides().into_iter().take(4).collect();
         assert!(ides_to_show.len() <= 4);
-        // default first
         if let Some(def) = &profile.default_ide_id {
             let mut sorted = profile.ides.clone();
             sorted.sort_by_key(|ide| if &ide.id == def { 0 } else { 1 });
             assert_eq!(&sorted[0].id, def);
         }
+    }
+
+    #[test]
+    fn filter_branches_logic() {
+        let branches = vec![
+            "main".to_string(),
+            "feature/a".to_string(),
+            "Feature/B".to_string(),
+            "develop".to_string(),
+        ];
+        let filtered = filter_branches(&branches, "feat", 10);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.contains(&"feature/a".to_string()));
+        assert!(filtered.contains(&"Feature/B".to_string()));
+        let limited = filter_branches(&branches, "", 2);
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0], "main");
+        let empty_filter = filter_branches(&branches, "xyz", 10);
+        assert!(empty_filter.is_empty());
+    }
+
+    #[test]
+    fn dropdown_arrow_and_filter_reset_logic() {
+        // Arrow sollte bei offenem Popup ▲ vs ▼ wechseln – reine Logik
+        let open_arrow = if true { " ▲" } else { " ▼" };
+        let closed_arrow = if false { " ▲" } else { " ▼" };
+        assert_eq!(open_arrow, " ▲");
+        assert_eq!(closed_arrow, " ▼");
+        // Filter Reset: nach Schließen sollte String leer sein
+        let mut filter = "feat".to_string();
+        let popup_closed = true;
+        if popup_closed {
+            filter.clear();
+        }
+        assert!(filter.is_empty());
+    }
+
+    #[test]
+    fn profile_visible_and_hidden_icons() {
+        let mut profile = crate::config::LanguageProfile {
+            id: "test".to_string(),
+            display_name: "Test".to_string(),
+            file_extension: ".txt".to_string(),
+            file_pattern: None,
+            max_scan_depth: 3,
+            ides: vec![
+                crate::config::IdeConfig {
+                    id: "a".to_string(),
+                    display_name: "A".to_string(),
+                    program: "a".to_string(),
+                    args: vec![],
+                    command: None,
+                    use_shell: false,
+                    allow_unsafe: false,
+                    no_args: false,
+                },
+                crate::config::IdeConfig {
+                    id: "b".to_string(),
+                    display_name: "B".to_string(),
+                    program: "b".to_string(),
+                    args: vec![],
+                    command: None,
+                    use_shell: false,
+                    allow_unsafe: false,
+                    no_args: false,
+                },
+            ],
+            default_ide_id: None,
+            ide_order: vec!["b".to_string(), "a".to_string()],
+            hidden_ide_ids: vec!["a".to_string()],
+            hidden_agent_ids: vec![],
+            agent_order: vec![],
+            show_shell: false,
+            show_explorer: true,
+        };
+        let visible = profile.visible_ides();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "b");
+        assert!(!profile.show_shell);
+        assert!(profile.show_explorer);
+        // Lücke schließen: hidden a entfernt, b rutscht nach vorne
+        profile.hidden_ide_ids.clear();
+        let visible2 = profile.visible_ides();
+        assert_eq!(visible2.len(), 2);
+        assert_eq!(visible2[0].id, "b");
+        assert_eq!(visible2[1].id, "a");
     }
 }

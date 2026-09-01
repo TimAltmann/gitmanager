@@ -1,7 +1,15 @@
 use crate::config::{AgentProfile, AppConfig, IdeConfig, LanguageProfile, TerminalPreference};
 use crate::i18n::{tr, tr_fmt, Language};
-use egui::{Color32, RichText};
+use egui::{Color32, RichText, Vec2};
 use std::path::PathBuf;
+
+const ICON_CHEVRON_DOWN: egui::ImageSource =
+    egui::include_image!("../../assets/icons/chevron-down.svg");
+const ICON_CHEVRON_UP: egui::ImageSource =
+    egui::include_image!("../../assets/icons/chevron-up.svg");
+const ICON_EYE: egui::ImageSource = egui::include_image!("../../assets/icons/eye.svg");
+const ICON_EYE_OFF: egui::ImageSource = egui::include_image!("../../assets/icons/eye-off.svg");
+const ICON_CROSS: egui::ImageSource = egui::include_image!("../../assets/icons/cross.svg");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
@@ -11,12 +19,14 @@ enum SettingsTab {
     Terminal,
     Appearance,
     Language,
+    Icons,
 }
 
 pub struct SettingsState {
     pub draft: AppConfig,
     pub error: Option<String>,
     pub success: Option<String>,
+    pub auto_detect_toast: Option<(String, std::time::Instant, bool)>,
     selected_tab: SettingsTab,
     selected_profile_idx: Option<usize>,
     selected_agent_idx: Option<usize>,
@@ -25,6 +35,7 @@ pub struct SettingsState {
     new_profile_ext: String,
     new_agent_name: String,
     new_agent_program: String,
+    prev_ide_args: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl SettingsState {
@@ -33,6 +44,7 @@ impl SettingsState {
             draft: cfg.clone(),
             error: None,
             success: None,
+            auto_detect_toast: None,
             selected_tab: SettingsTab::General,
             selected_profile_idx: if cfg.profiles.is_empty() {
                 None
@@ -44,6 +56,7 @@ impl SettingsState {
             new_profile_ext: String::new(),
             new_agent_name: String::new(),
             new_agent_program: String::new(),
+            prev_ide_args: Default::default(),
         }
     }
 }
@@ -73,6 +86,7 @@ pub fn show_settings_window(
                     (SettingsTab::Terminal, tr(lang, "tabs_terminal")),
                     (SettingsTab::Appearance, tr(lang, "tabs_appearance")),
                     (SettingsTab::Language, tr(lang, "tabs_language")),
+                    (SettingsTab::Icons, tr(lang, "tabs_icons")),
                 ] {
                     let is_active = state.selected_tab == tab;
                     if ui
@@ -94,6 +108,7 @@ pub fn show_settings_window(
                     SettingsTab::Terminal => show_terminal_tab(ui, state),
                     SettingsTab::Appearance => show_appearance_tab(ui, state),
                     SettingsTab::Language => show_language_tab(ui, state),
+                    SettingsTab::Icons => show_icons_tab(ui, state),
                 }
 
                 ui.add_space(12.0);
@@ -203,6 +218,67 @@ pub fn show_settings_window(
 
     if should_close {
         *open = false;
+    }
+
+    // Non-modal toast für Auto-Erkennung (3s, nicht blockierend)
+    if let Some((msg, t, is_err)) = state.auto_detect_toast.as_ref() {
+        if t.elapsed() > std::time::Duration::from_secs(3) {
+            state.auto_detect_toast = None;
+        } else {
+            let msg = msg.clone();
+            let is_err = *is_err;
+            let bg = if is_err {
+                Color32::from_rgb(255, 235, 235)
+            } else {
+                Color32::from_rgb(235, 255, 235)
+            };
+            let stroke_col = if is_err {
+                Color32::from_rgb(220, 100, 100)
+            } else {
+                Color32::from_rgb(100, 180, 100)
+            };
+            let text_col = if is_err {
+                Color32::from_rgb(160, 40, 40)
+            } else {
+                Color32::from_rgb(40, 100, 40)
+            };
+            let mut close_toast = false;
+            egui::Window::new("auto_detect_toast")
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 80.0])
+                .collapsible(false)
+                .resizable(false)
+                .title_bar(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(bg)
+                        .stroke(egui::Stroke::new(1.0, stroke_col))
+                        .corner_radius(8)
+                        .inner_margin(egui::Margin::symmetric(12, 8)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(msg.clone())
+                                .size(12.0)
+                                .color(text_col)
+                                .strong(),
+                        );
+                        if ui
+                            .add(egui::Button::image(
+                                egui::Image::new(ICON_CROSS).fit_to_exact_size(Vec2::splat(12.0)),
+                            ))
+                            .clicked()
+                        {
+                            close_toast = true;
+                        }
+                    });
+                });
+            if close_toast || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                state.auto_detect_toast = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+        }
     }
 }
 
@@ -391,12 +467,19 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         id: "vscode".to_string(),
                         display_name: "VS Code".to_string(),
                         program: "code".to_string(),
-                        args: vec!["{file}".to_string()],
+                        args: vec![".".to_string()],
                         command: None,
                         use_shell: false,
                         allow_unsafe: false,
+                        no_args: false,
                     }],
                     default_ide_id: Some("vscode".to_string()),
+                    ide_order: Vec::new(),
+                    hidden_ide_ids: Vec::new(),
+                    hidden_agent_ids: Vec::new(),
+                    agent_order: Vec::new(),
+                    show_shell: true,
+                    show_explorer: true,
                 });
                 state.selected_profile_idx = Some(state.draft.profiles.len() - 1);
             }
@@ -534,12 +617,19 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                             id: "vscode".to_string(),
                             display_name: "VS Code".to_string(),
                             program: "code".to_string(),
-                            args: vec!["{file}".to_string()],
+                            args: vec![".".to_string()],
                             command: None,
                             use_shell: false,
                             allow_unsafe: false,
+                            no_args: false,
                         }],
                         default_ide_id: Some("vscode".to_string()),
+                        ide_order: Vec::new(),
+                        hidden_ide_ids: Vec::new(),
+                        hidden_agent_ids: Vec::new(),
+                        agent_order: Vec::new(),
+                        show_shell: true,
+                        show_explorer: true,
                     });
                     state.selected_profile_idx = Some(state.draft.profiles.len() - 1);
                     state.new_profile_name.clear();
@@ -661,28 +751,86 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                 );
                                 ui.end_row();
                                 ui.label("Programm:");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut ide.program)
-                                        .hint_text("code / devenv / rider"),
-                                );
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut ide.program)
+                                            .hint_text("code / devenv / rider"),
+                                    );
+                                    let is_vs = matches!(
+                                        ide.id.as_str(),
+                                        "vs2022" | "vs" | "visualstudio"
+                                    );
+                                    let is_rider = matches!(ide.id.as_str(), "rider" | "jetbrains");
+                                    if is_vs || is_rider {
+                                        if ui.small_button("Auto erkennen").on_hover_text("Pfad automatisch erkennen (vswhere / Toolbox)").clicked() {
+                                            let detected = if is_vs {
+                                                crate::git::resolve_vs_path()
+                                            } else {
+                                                crate::git::resolve_rider_path()
+                                            };
+                                            if let Some(p) = detected {
+                                                ide.program = p.display().to_string();
+                                                state.auto_detect_toast = Some((
+                                                    format!("Erkannt: {}", ide.program),
+                                                    std::time::Instant::now(),
+                                                    false,
+                                                ));
+                                                state.error = None;
+                                                state.success = None;
+                                            } else {
+                                                state.auto_detect_toast = Some((
+                                                    if is_vs {
+                                                        "Visual Studio nicht gefunden (vswhere fehlt oder keine Installation)".to_string()
+                                                    } else {
+                                                        "Rider nicht gefunden (Toolbox / Program Files / PATH)".to_string()
+                                                    },
+                                                    std::time::Instant::now(),
+                                                    true,
+                                                ));
+                                                state.error = None;
+                                                state.success = None;
+                                            }
+                                        }
+                                    }
+                                });
                                 ui.end_row();
                                 ui.label("Args:");
-                                let mut args_str = ide.args.join(" ");
-                                if ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut args_str)
-                                            .hint_text("{file} --reuse-window"),
-                                    )
-                                    .changed()
-                                {
-                                    ide.args = args_str
-                                        .split_whitespace()
-                                        .map(|s| s.to_string())
-                                        .collect();
-                                    if ide.args.is_empty() {
-                                        ide.args = vec!["{file}".to_string()];
+                                ui.horizontal(|ui| {
+                                    let hint = if ide.id == "vscode" {
+                                        ".  ({file} {dir} {repo})"
+                                    } else {
+                                        "{file} --reuse-window  ({dir} {repo} | .)"
+                                    };
+                                    let mut args_str = ide.args.join(" ");
+                                    let enabled = !ide.no_args;
+                                    let resp = ui.add_enabled(
+                                        enabled,
+                                        egui::TextEdit::singleline(&mut args_str).hint_text(hint),
+                                    );
+                                    if resp.changed() {
+                                        ide.args = if args_str.trim().is_empty() {
+                                            Vec::new()
+                                        } else {
+                                            args_str.split_whitespace().map(|s| s.to_string()).collect()
+                                        };
                                     }
-                                }
+                                    if ui.checkbox(&mut ide.no_args, "Kein Argument").changed() {
+                                        if ide.no_args {
+                                            state
+                                                .prev_ide_args
+                                                .insert(ide.id.clone(), ide.args.clone());
+                                            ide.args.clear();
+                                        } else if let Some(prev) = state.prev_ide_args.remove(&ide.id) {
+                                            if !prev.is_empty() {
+                                                ide.args = prev;
+                                            } else {
+                                                ide.args = vec!["{file}".to_string()];
+                                            }
+                                        } else if ide.args.is_empty() {
+                                            ide.args = vec!["{file}".to_string()];
+                                        }
+                                    }
+                                });
                                 ui.end_row();
                                 ui.label("Shell:");
                                 {
@@ -697,15 +845,45 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                 }
                                 ui.end_row();
                             });
-                        // Preview
+                        // Preview (mit Substitution und cwd)
                         let prog = ide.effective_program();
                         let args_preview = ide.effective_args().join(" ");
+                        let cwd_preview = "C:\\repo";
+                        let file_preview = "C:\\repo\\MyApp.sln";
+                        let sub_preview: String = if ide.no_args || args_preview.is_empty() {
+                            "(keine Args, cwd = Repo)".to_string()
+                        } else {
+                            let file_path = std::path::Path::new(file_preview);
+                            let repo_path = std::path::Path::new(cwd_preview);
+                            ide.effective_args()
+                                .iter()
+                                .map(|a| crate::git::substitute_placeholders(a, file_path, repo_path))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        };
                         ui.label(
-                            RichText::new(format!("Vorschau: {} {}", prog, args_preview))
-                                .size(10.0)
-                                .color(Color32::from_rgb(100, 100, 100))
-                                .italics(),
+                            RichText::new(format!(
+                                "Vorschau: {} {}  (cwd = {})",
+                                prog,
+                                if sub_preview.is_empty() {
+                                    args_preview.clone()
+                                } else {
+                                    sub_preview
+                                },
+                                cwd_preview
+                            ))
+                            .size(10.0)
+                            .color(Color32::from_rgb(100, 100, 100))
+                            .italics(),
                         );
+                        if ide.id == "vscode" && ide.args == vec![".".to_string()] {
+                            ui.label(
+                                RichText::new("Hinweis: VS Code öffnet mit '.' das Repo-Root (cwd)")
+                                    .size(9.0)
+                                    .color(Color32::from_rgb(100, 120, 100))
+                                    .italics(),
+                            );
+                        }
                     });
                 ui.add_space(4.0);
             }
@@ -736,6 +914,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     command: None,
                     use_shell: false,
                     allow_unsafe: false,
+                    no_args: false,
                 });
             }
 
@@ -1315,6 +1494,291 @@ fn show_appearance_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     );
 }
 
+fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
+    let lang = state.draft.language;
+    ui.label(RichText::new(tr(lang, "icons_title")).size(13.0).strong());
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(tr(lang, "icons_desc"))
+            .size(11.0)
+            .color(Color32::from_rgb(100, 100, 100)),
+    );
+    ui.add_space(8.0);
+
+    // Profilauswahl für per-Profil Icons
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(tr(lang, "icons_profile")).size(12.0).strong());
+        let current_idx = state.selected_profile_idx.unwrap_or(0);
+        let current_name = state
+            .draft
+            .profiles
+            .get(current_idx)
+            .map(|p| p.display_name.clone())
+            .unwrap_or_default();
+        egui::ComboBox::from_id_salt("icons_profile_select")
+            .selected_text(current_name)
+            .show_ui(ui, |ui| {
+                for (idx, p) in state.draft.profiles.iter().enumerate() {
+                    let is_active = Some(idx) == state.selected_profile_idx;
+                    if ui.selectable_label(is_active, &p.display_name).clicked() {
+                        state.selected_profile_idx = Some(idx);
+                    }
+                }
+            });
+    });
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(8.0);
+
+    let Some(idx) = state.selected_profile_idx else {
+        ui.label(RichText::new("Kein Profil ausgewählt").weak());
+        return;
+    };
+    if let Some(profile) = state.draft.profiles.get_mut(idx) {
+        // Sicherstellen, dass order Listen vollständig sind
+        // IDE order
+        if profile.ide_order.is_empty() && !profile.ides.is_empty() {
+            profile.ide_order = profile.ides.iter().map(|i| i.id.clone()).collect();
+        } else {
+            // fehlende IDs ergänzen, entfernte entfernen
+            let all_ids: Vec<String> = profile.ides.iter().map(|i| i.id.clone()).collect();
+            for id in &all_ids {
+                if !profile.ide_order.contains(id) {
+                    profile.ide_order.push(id.clone());
+                }
+            }
+            profile.ide_order.retain(|id| all_ids.contains(id));
+        }
+        // Agent order per profil – basierend auf allen agents, aber nur aktive relevant
+        let all_agent_ids: Vec<String> = state.draft.agents.iter().map(|a| a.id.clone()).collect();
+        if profile.agent_order.is_empty() && !all_agent_ids.is_empty() {
+            profile.agent_order = all_agent_ids.clone();
+        } else {
+            for id in &all_agent_ids {
+                if !profile.agent_order.contains(id) {
+                    profile.agent_order.push(id.clone());
+                }
+            }
+            profile.agent_order.retain(|id| all_agent_ids.contains(id));
+        }
+
+        ui.label(
+            RichText::new(format!(
+                "{}: {}",
+                tr(lang, "profile_label"),
+                profile.display_name
+            ))
+            .size(12.0)
+            .strong(),
+        );
+        ui.add_space(8.0);
+
+        // IDEs
+        ui.label(RichText::new(tr(lang, "icons_ides")).size(12.0).strong());
+        ui.add_space(4.0);
+        let mut ide_move: Option<(usize, isize)> = None;
+        let mut ide_toggle: Option<String> = None;
+        for (order_idx, ide_id) in profile.ide_order.clone().iter().enumerate() {
+            let ide_opt = profile.ides.iter().find(|i| &i.id == ide_id);
+            let Some(ide) = ide_opt else { continue };
+            let is_hidden = profile.hidden_ide_ids.contains(ide_id);
+            ui.horizontal(|ui| {
+                let eye_icon = if is_hidden { ICON_EYE_OFF } else { ICON_EYE };
+                if ui
+                    .add(egui::Button::image(
+                        egui::Image::new(eye_icon).fit_to_exact_size(Vec2::splat(14.0)),
+                    ))
+                    .on_hover_text(tr(lang, "icons_toggle_visibility"))
+                    .clicked()
+                {
+                    ide_toggle = Some(ide_id.clone());
+                }
+                let visuals = ui.visuals();
+                ui.label(
+                    RichText::new(format!("{} ({})", ide.display_name, ide.id))
+                        .size(11.0)
+                        .color(if is_hidden {
+                            visuals.weak_text_color()
+                        } else {
+                            visuals.text_color()
+                        }),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(egui::Button::image(
+                            egui::Image::new(ICON_CHEVRON_DOWN)
+                                .fit_to_exact_size(Vec2::splat(14.0)),
+                        ))
+                        .clicked()
+                        && order_idx + 1 < profile.ide_order.len()
+                    {
+                        ide_move = Some((order_idx, 1));
+                    }
+                    if ui
+                        .add(egui::Button::image(
+                            egui::Image::new(ICON_CHEVRON_UP).fit_to_exact_size(Vec2::splat(14.0)),
+                        ))
+                        .clicked()
+                        && order_idx > 0
+                    {
+                        ide_move = Some((order_idx, -1));
+                    }
+                });
+            });
+            ui.add_space(2.0);
+        }
+        if let Some(id) = ide_toggle {
+            if profile.hidden_ide_ids.contains(&id) {
+                profile.hidden_ide_ids.retain(|x| x != &id);
+            } else {
+                profile.hidden_ide_ids.push(id);
+            }
+        }
+        if let Some((idx, delta)) = ide_move {
+            let new_idx = (idx as isize + delta) as usize;
+            if new_idx < profile.ide_order.len() {
+                profile.ide_order.swap(idx, new_idx);
+            }
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        // Terminal (Shell/Explorer)
+        ui.label(
+            RichText::new(tr(lang, "icons_terminal"))
+                .size(12.0)
+                .strong(),
+        );
+        ui.add_space(4.0);
+        let mut show_shell = profile.show_shell;
+        let mut show_explorer = profile.show_explorer;
+        if ui
+            .checkbox(&mut show_shell, tr(lang, "icons_show_shell"))
+            .changed()
+        {
+            profile.show_shell = show_shell;
+        }
+        if ui
+            .checkbox(&mut show_explorer, tr(lang, "icons_show_explorer"))
+            .changed()
+        {
+            profile.show_explorer = show_explorer;
+        }
+        ui.label(
+            RichText::new(tr(lang, "icons_terminal_hint"))
+                .size(10.0)
+                .color(Color32::from_rgb(120, 120, 120))
+                .italics(),
+        );
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        // AI Agents per Profil
+        ui.label(RichText::new(tr(lang, "icons_agents")).size(12.0).strong());
+        ui.add_space(4.0);
+        let mut agent_toggle: Option<String> = None;
+        let mut agent_move: Option<(usize, isize)> = None;
+        let agent_order_clone = profile.agent_order.clone();
+        for (order_idx, agent_id) in agent_order_clone.iter().enumerate() {
+            let agent_opt = state.draft.agents.iter().find(|a| &a.id == agent_id);
+            let Some(agent) = agent_opt else { continue };
+            let is_hidden = profile.hidden_agent_ids.contains(agent_id);
+            let is_active = state.draft.active_agent_ids.contains(agent_id);
+            ui.horizontal(|ui| {
+                let eye_icon = if is_hidden { ICON_EYE_OFF } else { ICON_EYE };
+                if ui
+                    .add(egui::Button::image(
+                        egui::Image::new(eye_icon).fit_to_exact_size(Vec2::splat(14.0)),
+                    ))
+                    .on_hover_text(tr(lang, "icons_toggle_visibility"))
+                    .clicked()
+                {
+                    agent_toggle = Some(agent_id.clone());
+                }
+                let mut label = format!("{} ({})", agent.display_name, agent.id);
+                if !is_active {
+                    label.push_str(" [inaktiv]");
+                }
+                let visuals = ui.visuals();
+                ui.label(RichText::new(label).size(11.0).color(if is_hidden {
+                    visuals.weak_text_color()
+                } else {
+                    visuals.text_color()
+                }));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(egui::Button::image(
+                            egui::Image::new(ICON_CHEVRON_DOWN)
+                                .fit_to_exact_size(Vec2::splat(14.0)),
+                        ))
+                        .clicked()
+                        && order_idx + 1 < agent_order_clone.len()
+                    {
+                        agent_move = Some((order_idx, 1));
+                    }
+                    if ui
+                        .add(egui::Button::image(
+                            egui::Image::new(ICON_CHEVRON_UP).fit_to_exact_size(Vec2::splat(14.0)),
+                        ))
+                        .clicked()
+                        && order_idx > 0
+                    {
+                        agent_move = Some((order_idx, -1));
+                    }
+                });
+            });
+            ui.add_space(2.0);
+        }
+        if let Some(id) = agent_toggle {
+            if profile.hidden_agent_ids.contains(&id) {
+                profile.hidden_agent_ids.retain(|x| x != &id);
+            } else {
+                profile.hidden_agent_ids.push(id);
+            }
+        }
+        if let Some((idx, delta)) = agent_move {
+            let new_idx = (idx as isize + delta) as usize;
+            if new_idx < profile.agent_order.len() {
+                profile.agent_order.swap(idx, new_idx);
+            }
+        }
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(format!(
+                "{} hidden: {}",
+                tr(lang, "icons_hidden_info"),
+                if profile.hidden_agent_ids.is_empty() {
+                    "—".to_string()
+                } else {
+                    profile.hidden_agent_ids.join(", ")
+                }
+            ))
+            .size(10.0)
+            .color(Color32::from_rgb(120, 120, 120)),
+        );
+        ui.add_space(8.0);
+        if ui.small_button(tr(lang, "icons_reset")).clicked() {
+            profile.hidden_ide_ids.clear();
+            profile.hidden_agent_ids.clear();
+            profile.ide_order.clear();
+            profile.agent_order.clear();
+            profile.show_shell = true;
+            profile.show_explorer = true;
+        }
+        // Warnung wenn alles hidden
+        if profile.hidden_ide_ids.len() == profile.ides.len() && !profile.ides.is_empty() {
+            ui.colored_label(
+                Color32::from_rgb(200, 80, 20),
+                tr(lang, "icons_all_hidden_warn"),
+            );
+        }
+    } else {
+        ui.label(RichText::new("Profil nicht gefunden").weak());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1473,8 +1937,15 @@ mod tests {
                 command: None,
                 use_shell: false,
                 allow_unsafe: false,
+                no_args: false,
             }],
             default_ide_id: Some("vscode".to_string()),
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         });
         state.selected_profile_idx = Some(state.draft.profiles.len() - 1);
         assert_eq!(state.draft.profiles.len(), len_before + 1);
@@ -1531,8 +2002,15 @@ mod tests {
                 command: None,
                 use_shell: false,
                 allow_unsafe: false,
+                no_args: false,
             }],
             default_ide_id: Some("vscode".to_string()),
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         });
         state.draft.profiles.remove(0);
         assert_eq!(state.draft.profiles.len(), 1);
@@ -1593,6 +2071,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         });
         state.draft.active_profile_id = "rust".to_string();
         assert_eq!(state.draft.active_profile_id, "rust");
@@ -1630,8 +2114,15 @@ mod tests {
                     command: None,
                     use_shell: false,
                     allow_unsafe: false,
+                    no_args: false,
                 }],
                 default_ide_id: Some("vscode".to_string()),
+                ide_order: Vec::new(),
+                hidden_ide_ids: Vec::new(),
+                hidden_agent_ids: Vec::new(),
+                agent_order: Vec::new(),
+                show_shell: true,
+                show_explorer: true,
             });
             assert_eq!(ext, ".rs");
             assert_eq!(id, "rust");
@@ -1684,6 +2175,7 @@ mod tests {
             command: None,
             use_shell: false,
             allow_unsafe: false,
+            no_args: false,
         });
         assert_eq!(profile.ides.len(), before + 1);
         // remove until one left should error
@@ -1710,6 +2202,7 @@ mod tests {
             command: None,
             use_shell: false,
             allow_unsafe: false,
+            no_args: false,
         };
         assert_eq!(ide.effective_program(), "code");
         assert_eq!(ide.effective_args(), vec!["{file}"]);
@@ -1794,8 +2287,15 @@ mod tests {
                 command: None,
                 use_shell: false,
                 allow_unsafe: false,
+                no_args: false,
             }],
             default_ide_id: Some("vscode".to_string()),
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         });
         state.selected_profile_idx = Some(1);
         // delete idx 0, selection should adjust -1

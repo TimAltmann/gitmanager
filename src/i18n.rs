@@ -123,12 +123,16 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "no_matches") => "Keine Treffer".to_string(),
         (Language::En, "branch_switch_tooltip") => "Switch branch – type to filter, ↻ to fetch".to_string(),
         (Language::De, "branch_switch_tooltip") => "Branch wechseln – tippe zum Filtern, ↻ für fetch".to_string(),
+        (Language::En, "detached_tooltip") => "Detached HEAD – commit checked out, not a branch".to_string(),
+        (Language::De, "detached_tooltip") => "Detached HEAD – Commit ausgecheckt, kein Branch".to_string(),
         (Language::En, "profile_override_tooltip") => "Override language profile for this repo".to_string(),
         (Language::De, "profile_override_tooltip") => "Sprach-Profil für dieses Repo überschreiben".to_string(),
         (Language::En, "global") => "— Global —".to_string(),
         (Language::De, "global") => "— Global —".to_string(),
         (Language::En, "open_in_explorer") => "Show in Explorer".to_string(),
         (Language::De, "open_in_explorer") => "Im Explorer öffnen".to_string(),
+        (Language::En, "open_in_shell") => "Open shell".to_string(),
+        (Language::De, "open_in_shell") => "Shell öffnen".to_string(),
         (Language::En, "open_in") => "Open in".to_string(),
         (Language::De, "open_in") => "Mit".to_string(),
         (Language::En, "open_in_terminal") => "Open in {} (Terminal)".to_string(),
@@ -305,6 +309,34 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "tabs_appearance") => "Erscheinungsbild".to_string(),
         (Language::En, "tabs_language") => "Language".to_string(),
         (Language::De, "tabs_language") => "Sprache".to_string(),
+        (Language::En, "tabs_icons") => "Icons".to_string(),
+        (Language::De, "tabs_icons") => "Icons".to_string(),
+        (Language::En, "icons_title") => "Icon order & visibility (per profile)".to_string(),
+        (Language::De, "icons_title") => "Icon-Reihenfolge & Sichtbarkeit (pro Profil)".to_string(),
+        (Language::En, "icons_desc") => "Reorder and hide IDE / terminal / AI icons. Hidden icons disappear from repo list without gaps.".to_string(),
+        (Language::De, "icons_desc") => "Icons für IDE / Terminal / AI neu anordnen und ausblenden. Ausgeblendete Icons verschwinden ohne Lücke.".to_string(),
+        (Language::En, "icons_profile") => "Profile:".to_string(),
+        (Language::De, "icons_profile") => "Profil:".to_string(),
+        (Language::En, "icons_ides") => "IDEs".to_string(),
+        (Language::De, "icons_ides") => "IDEs".to_string(),
+        (Language::En, "icons_terminal") => "Terminal / Explorer".to_string(),
+        (Language::De, "icons_terminal") => "Terminal / Explorer".to_string(),
+        (Language::En, "icons_agents") => "AI Agents".to_string(),
+        (Language::De, "icons_agents") => "AI Agents".to_string(),
+        (Language::En, "icons_show_shell") => "Show shell icon".to_string(),
+        (Language::De, "icons_show_shell") => "Shell-Icon anzeigen".to_string(),
+        (Language::En, "icons_show_explorer") => "Show explorer icon".to_string(),
+        (Language::De, "icons_show_explorer") => "Explorer-Icon anzeigen".to_string(),
+        (Language::En, "icons_toggle_visibility") => "Toggle visibility".to_string(),
+        (Language::De, "icons_toggle_visibility") => "Sichtbarkeit umschalten".to_string(),
+        (Language::En, "icons_hidden_info") => "Hidden".to_string(),
+        (Language::De, "icons_hidden_info") => "Ausgeblendet".to_string(),
+        (Language::En, "icons_reset") => "Reset visibility & order".to_string(),
+        (Language::De, "icons_reset") => "Sichtbarkeit & Reihenfolge zurücksetzen".to_string(),
+        (Language::En, "icons_all_hidden_warn") => "Warning: all IDE icons hidden – no IDE button will be shown.".to_string(),
+        (Language::De, "icons_all_hidden_warn") => "Warnung: alle IDE-Icons ausgeblendet – es wird kein IDE-Button angezeigt.".to_string(),
+        (Language::En, "icons_terminal_hint") => "Explorer and shell buttons appear next to IDE icons in the repo list.".to_string(),
+        (Language::De, "icons_terminal_hint") => "Explorer- und Shell-Buttons erscheinen neben den IDE-Icons in der Repo-Liste.".to_string(),
 
         // ── Errors / validation ────────────────────────────────────────
         (Language::En, "error_need_path") => "Please specify at least one path.".to_string(),
@@ -331,6 +363,8 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "solution_selected") => "Solution ausgewählt: {}".to_string(),
         (Language::En, "explorer_opened") => "Explorer opened: {}".to_string(),
         (Language::De, "explorer_opened") => "Explorer geöffnet: {}".to_string(),
+        (Language::En, "shell_opened") => "Shell opened: {}".to_string(),
+        (Language::De, "shell_opened") => "Shell geöffnet: {}".to_string(),
         (Language::En, "fetching_branches") => "Fetching branches for {}...".to_string(),
         (Language::De, "fetching_branches") => "Fetche Branches für {}...".to_string(),
         (Language::En, "branch_switched_to") => "Branch switched to '{}': {}".to_string(),
@@ -347,7 +381,6 @@ pub fn tr(lang: Language, key: &str) -> String {
 }
 
 /// Format helper: replaces `{}` placeholders sequentially.
-#[allow(dead_code)]
 pub fn tr_fmt(lang: Language, key: &str, args: &[&str]) -> String {
     let mut s = tr(lang, key);
     for arg in args {

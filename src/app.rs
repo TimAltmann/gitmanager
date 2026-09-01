@@ -30,6 +30,9 @@ pub struct MyApp {
     settings_state: Option<SettingsState>,
     scan_tx: Sender<ScanResult>,
     scan_rx: Receiver<ScanResult>,
+    launch_err_tx: Sender<String>,
+    launch_err_rx: Receiver<String>,
+    config_update_rx: Receiver<AppConfig>,
     status_message: Option<String>,
     status_message_time: Option<std::time::Instant>,
     branch_dialog: Option<BranchDialog>,
@@ -48,6 +51,8 @@ impl MyApp {
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
         let (tx, rx) = mpsc::channel();
+        let (launch_err_tx, launch_err_rx) = mpsc::channel();
+        let (config_update_tx, config_update_rx) = mpsc::channel();
 
         let mut app = Self {
             config,
@@ -58,6 +63,9 @@ impl MyApp {
             settings_state: None,
             scan_tx: tx,
             scan_rx: rx,
+            launch_err_tx,
+            launch_err_rx,
+            config_update_rx,
             status_message: None,
             status_message_time: None,
             branch_dialog: None,
@@ -65,6 +73,38 @@ impl MyApp {
             last_window_size: [0.0; 2],
             top_bar_collapsed: false,
         };
+        // Auto-Erkennung asynchron (verhindert UI Freeze beim Start)
+        {
+            let cfg = app.config.clone();
+            let tx = config_update_tx;
+            std::thread::spawn(move || {
+                let mut cfg = cfg;
+                let mut need_save = false;
+                for profile in &mut cfg.profiles {
+                    for ide in &mut profile.ides {
+                        if ide.id == "vs2022"
+                            && (ide.program == "devenv" || ide.program == "devenv.exe")
+                        {
+                            if let Some(p) = crate::git::resolve_vs_path() {
+                                ide.program = p.display().to_string();
+                                need_save = true;
+                            }
+                        } else if ide.id == "rider"
+                            && (ide.program == "rider" || ide.program == "rider64.exe")
+                        {
+                            if let Some(p) = crate::git::resolve_rider_path() {
+                                ide.program = p.display().to_string();
+                                need_save = true;
+                            }
+                        }
+                    }
+                }
+                if need_save {
+                    let _ = cfg.save();
+                    let _ = tx.send(cfg);
+                }
+            });
+        }
         app.start_scan();
         // Initial size matches viewport default (1080x680) – used for collapse logic
         app.last_window_size = [1080.0, 680.0];
@@ -91,6 +131,20 @@ impl MyApp {
             let ScanResult::Repos(repos) = result;
             self.repos = repos;
             self.error = None;
+            ctx.request_repaint();
+        }
+        while let Ok(err) = self.launch_err_rx.try_recv() {
+            self.error = Some(err);
+            ctx.request_repaint();
+        }
+        while let Ok(cfg) = self.config_update_rx.try_recv() {
+            self.config = cfg;
+            // SettingsState neu laden falls Settings offen
+            if self.show_settings {
+                self.settings_state = Some(SettingsState::from_config(&self.config));
+            }
+            self.status_message = Some(tr(self.config.language, "saved_scan_restart"));
+            self.status_message_time = Some(std::time::Instant::now());
             ctx.request_repaint();
         }
         if self.scanning {
@@ -655,6 +709,7 @@ impl eframe::App for MyApp {
                     profile_override: None,
                     fetch_branches: None,
                     explorer_open: None,
+                    shell_open: None,
                 };
 
                 // Wir brauchen &mut für repo_list, um selektierte Werte zu zeigen, aber hier clonen wir mut
@@ -698,12 +753,20 @@ impl eframe::App for MyApp {
                     // Finde IdeConfig
                     let profile = self.config.get_effective_profile_for_repo(&repo_path);
                     if let Some(ide) = profile.ides.iter().find(|i| i.id == ide_id) {
-                        match launch_ide(ide, &file_path) {
+                        let file_opt = if ide.no_args {
+                            None
+                        } else {
+                            Some(file_path.as_path())
+                        };
+                        let display_path = file_opt
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| repo_path.display().to_string());
+                        match launch_ide(ide, &repo_path, file_opt) {
                             Ok(()) => {
                                 self.status_message = Some(tr_fmt(
                                     lang,
                                     "opening_with",
-                                    &[&file_path.display().to_string(), &ide.display_name],
+                                    &[&display_path, &ide.display_name],
                                 ));
                                 self.status_message_time = Some(std::time::Instant::now());
                             }
@@ -735,22 +798,25 @@ impl eframe::App for MyApp {
                             .terminal_override
                             .clone()
                             .unwrap_or_else(|| self.config.terminal.preference.clone());
-                        match launch_agent(&agent, &repo_path, &term_pref) {
-                            Ok(()) => {
-                                self.status_message = Some(tr_fmt(
-                                    lang,
-                                    "starting_agent_in",
-                                    &[&agent.display_name, &repo_path.display().to_string()],
-                                ));
-                                self.status_message_time = Some(std::time::Instant::now());
-                            }
-                            Err(e) => {
-                                self.error = Some(format!(
+                        // Nicht blockierend starten (verhindert UI Freeze, besonders bei pwsh/wt)
+                        let repo_clone = repo_path.clone();
+                        let agent_clone = agent.clone();
+                        let display_name = agent.display_name.clone();
+                        let err_tx = self.launch_err_tx.clone();
+                        std::thread::spawn(move || {
+                            if let Err(e) = launch_agent(&agent_clone, &repo_clone, &term_pref) {
+                                let _ = err_tx.send(format!(
                                     "Agent '{}' konnte nicht gestartet werden: {e:#}",
-                                    agent.display_name
+                                    display_name
                                 ));
                             }
-                        }
+                        });
+                        self.status_message = Some(tr_fmt(
+                            lang,
+                            "starting_agent_in",
+                            &[&agent.display_name, &repo_path.display().to_string()],
+                        ));
+                        self.status_message_time = Some(std::time::Instant::now());
                     } else {
                         self.error = Some(tr_fmt(lang, "agent_not_found", &[&agent_id]));
                     }
@@ -805,6 +871,23 @@ impl eframe::App for MyApp {
                                 Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"));
                         }
                     }
+                }
+                if let Some(repo_path) = actions.shell_open {
+                    let pref = self.config.terminal.preference.clone();
+                    let repo_clone = repo_path.clone();
+                    let err_tx = self.launch_err_tx.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = crate::git::open_shell(&repo_clone, &pref) {
+                            let _ =
+                                err_tx.send(format!("Shell konnte nicht geöffnet werden: {e:#}"));
+                        }
+                    });
+                    self.status_message = Some(tr_fmt(
+                        lang,
+                        "shell_opened",
+                        &[&repo_path.display().to_string()],
+                    ));
+                    self.status_message_time = Some(std::time::Instant::now());
                 }
             });
 
@@ -998,6 +1081,12 @@ mod tests {
                 max_scan_depth: 3,
                 ides: vec![],
                 default_ide_id: None,
+                ide_order: Vec::new(),
+                hidden_ide_ids: Vec::new(),
+                hidden_agent_ids: Vec::new(),
+                agent_order: Vec::new(),
+                show_shell: true,
+                show_explorer: true,
             });
         }
         cfg.active_profile_id = new_profile.to_string();

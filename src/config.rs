@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 // --- Default helpers ---
 fn default_config_version() -> u32 {
-    5
+    6
 }
 fn default_active_profile() -> String {
     "dotnet".to_string()
@@ -17,6 +17,9 @@ fn default_scan_depth() -> usize {
 }
 fn default_language() -> Language {
     Language::En
+}
+fn default_branch_limit() -> usize {
+    200
 }
 
 // --- Terminal ---
@@ -99,6 +102,9 @@ pub struct IdeConfig {
     pub use_shell: bool,
     #[serde(default)]
     pub allow_unsafe: bool,
+    /// Wenn true: IDE ohne Argumente starten (nur cwd = repo_path)
+    #[serde(default)]
+    pub no_args: bool,
 }
 
 impl IdeConfig {
@@ -113,6 +119,9 @@ impl IdeConfig {
         }
     }
     pub fn effective_args(&self) -> Vec<String> {
+        if self.no_args {
+            return Vec::new();
+        }
         if !self.args.is_empty() {
             self.args.clone()
         } else if let Some(cmd) = &self.command {
@@ -129,6 +138,10 @@ impl IdeConfig {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 // --- Language Profile ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageProfile {
@@ -142,6 +155,22 @@ pub struct LanguageProfile {
     pub max_scan_depth: usize,
     pub ides: Vec<IdeConfig>,
     pub default_ide_id: Option<String>,
+    /// Reihenfolge der IDE-Icons (IDs in Anzeigereihenfolge). Leer = natürliche ides Reihenfolge
+    #[serde(default)]
+    pub ide_order: Vec<String>,
+    /// Ausgeblendete IDE Icons (IDs)
+    #[serde(default)]
+    pub hidden_ide_ids: Vec<String>,
+    /// Ausgeblendete AI Agents pro Profil
+    #[serde(default)]
+    pub hidden_agent_ids: Vec<String>,
+    /// Reihenfolge der AI Icons pro Profil
+    #[serde(default)]
+    pub agent_order: Vec<String>,
+    #[serde(default = "default_true")]
+    pub show_shell: bool,
+    #[serde(default = "default_true")]
+    pub show_explorer: bool,
 }
 
 impl LanguageProfile {
@@ -228,6 +257,54 @@ impl LanguageProfile {
             .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()) == ext)
             .unwrap_or(false)
     }
+
+    pub fn visible_ides(&self) -> Vec<&IdeConfig> {
+        let mut v: Vec<&IdeConfig> = self
+            .ides
+            .iter()
+            .filter(|i| !self.hidden_ide_ids.contains(&i.id))
+            .collect();
+        if !self.ide_order.is_empty() {
+            v.sort_by_key(|ide| {
+                self.ide_order
+                    .iter()
+                    .position(|id| id == &ide.id)
+                    .unwrap_or(usize::MAX)
+            });
+        } else if let Some(def) = &self.default_ide_id {
+            v.sort_by_key(|ide| if &ide.id == def { 0 } else { 1 });
+        }
+        v
+    }
+
+    pub fn filtered_agents<'a>(
+        &self,
+        all_agents: &'a [crate::config::AgentProfile],
+        active_ids: &[String],
+    ) -> Vec<&'a crate::config::AgentProfile> {
+        // Nur aktive und nicht hidden
+        let mut v: Vec<&crate::config::AgentProfile> = all_agents
+            .iter()
+            .filter(|a| active_ids.contains(&a.id) && !self.hidden_agent_ids.contains(&a.id))
+            .collect();
+        if !self.agent_order.is_empty() {
+            v.sort_by_key(|a| {
+                self.agent_order
+                    .iter()
+                    .position(|id| id == &a.id)
+                    .unwrap_or(usize::MAX)
+            });
+        } else {
+            // behalte active_ids Reihenfolge
+            v.sort_by_key(|a| {
+                active_ids
+                    .iter()
+                    .position(|id| id == &a.id)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        v
+    }
 }
 
 fn default_dotnet_profile() -> LanguageProfile {
@@ -247,15 +324,17 @@ fn default_dotnet_profile() -> LanguageProfile {
                 command: None,
                 use_shell: false,
                 allow_unsafe: false,
+                no_args: false,
             },
             IdeConfig {
                 id: "vscode".to_string(),
                 display_name: "VS Code".to_string(),
                 program: "code".to_string(),
-                args: vec!["{file}".to_string()],
+                args: vec![".".to_string()],
                 command: None,
                 use_shell: false,
                 allow_unsafe: false,
+                no_args: false,
             },
             IdeConfig {
                 id: "rider".to_string(),
@@ -265,8 +344,15 @@ fn default_dotnet_profile() -> LanguageProfile {
                 command: None,
                 use_shell: false,
                 allow_unsafe: false,
+                no_args: false,
             },
         ],
+        ide_order: Vec::new(),
+        hidden_ide_ids: Vec::new(),
+        hidden_agent_ids: Vec::new(),
+        agent_order: Vec::new(),
+        show_shell: true,
+        show_explorer: true,
     }
 }
 
@@ -415,6 +501,9 @@ pub struct AppConfig {
 
     #[serde(default = "default_language")]
     pub language: Language,
+
+    #[serde(default = "default_branch_limit")]
+    pub branch_display_limit: usize,
 }
 
 impl Default for AppConfig {
@@ -438,6 +527,7 @@ impl Default for AppConfig {
             terminal: TerminalConfig::default(),
             repo_state: HashMap::new(),
             language: default_language(),
+            branch_display_limit: default_branch_limit(),
         }
     }
 }
@@ -601,6 +691,32 @@ impl AppConfig {
             cfg.config_version = 5;
             let _ = cfg.save();
         }
+        if cfg.config_version < 6 {
+            // v6: branch_display_limit + vscode default "." + no_args flag
+            if cfg.branch_display_limit == 0 {
+                cfg.branch_display_limit = default_branch_limit();
+            }
+            // Migrate vscode args from {file} to "." if still default
+            for p in &mut cfg.profiles {
+                for ide in &mut p.ides {
+                    if ide.id == "vscode" && ide.args == vec!["{file}".to_string()] && !ide.no_args
+                    {
+                        ide.args = vec![".".to_string()];
+                    }
+                }
+            }
+            cfg.config_version = 6;
+            let _ = cfg.save();
+        }
+        if cfg.branch_display_limit == 0 {
+            cfg.branch_display_limit = default_branch_limit();
+        }
+        if cfg.branch_display_limit < 50 {
+            cfg.branch_display_limit = 50;
+        }
+        if cfg.branch_display_limit > 500 {
+            cfg.branch_display_limit = 500;
+        }
         if cfg.max_depth == 0 {
             cfg.max_depth = 2;
         }
@@ -663,6 +779,25 @@ impl AppConfig {
             } else {
                 p.default_ide_id = p.ides.first().map(|i| i.id.clone());
             }
+            // Icon-Einstellungen bereinigen (hidden/order nur für existierende IDs)
+            let ide_ids: Vec<String> = p.ides.iter().map(|i| i.id.clone()).collect();
+            p.hidden_ide_ids.retain(|id| ide_ids.contains(id));
+            p.hidden_ide_ids.sort();
+            p.hidden_ide_ids.dedup();
+            p.ide_order.retain(|id| ide_ids.contains(id));
+            // Deduplicate ide_order (first wins) – keine Sortierung, User-Reihenfolge erhalten
+            {
+                let mut seen = std::collections::HashSet::new();
+                p.ide_order.retain(|id| seen.insert(id.clone()));
+            }
+            // Agent hidden/order – validiere gegen globale Agents (später nach Agents-Validierung, aber hier schon)
+            // Wird nach Agents-Validierung nochmal gefiltert; hier nur Duplikate entfernen (Reihenfolge erhalten)
+            p.hidden_agent_ids.sort();
+            p.hidden_agent_ids.dedup();
+            {
+                let mut seen = std::collections::HashSet::new();
+                p.agent_order.retain(|id| seen.insert(id.clone()));
+            }
         }
         // Duplikate bei Profilen entfernen (letztes gewinnt)
         {
@@ -710,6 +845,12 @@ impl AppConfig {
                 cfg.active_agent_id = new_active.clone();
                 cfg.active_agent_ids = new_active.into_iter().collect();
             }
+        }
+        // Per-Profil hidden_agent_ids / agent_order gegen tatsächliche Agents validieren
+        let valid_agent_ids: Vec<String> = cfg.agents.iter().map(|a| a.id.clone()).collect();
+        for p in &mut cfg.profiles {
+            p.hidden_agent_ids.retain(|id| valid_agent_ids.contains(id));
+            p.agent_order.retain(|id| valid_agent_ids.contains(id));
         }
         Ok(cfg)
     }
@@ -1008,6 +1149,7 @@ mod tests {
             command: Some("devenv /something".to_string()),
             use_shell: false,
             allow_unsafe: false,
+            no_args: false,
         };
         assert_eq!(ide.effective_program(), "code");
     }
@@ -1022,6 +1164,7 @@ mod tests {
             command: Some("devenv /something".to_string()),
             use_shell: false,
             allow_unsafe: false,
+            no_args: false,
         };
         assert_eq!(ide.effective_program(), "devenv");
         let ide2 = IdeConfig {
@@ -1042,6 +1185,7 @@ mod tests {
             command: None,
             use_shell: false,
             allow_unsafe: false,
+            no_args: false,
         };
         assert_eq!(ide.effective_program(), "code");
         let ide2 = IdeConfig {
@@ -1063,6 +1207,7 @@ mod tests {
             command: Some("code other".to_string()),
             use_shell: false,
             allow_unsafe: false,
+            no_args: false,
         };
         assert_eq!(ide.effective_args(), vec!["{file}", "--reuse-window"]);
     }
@@ -1077,6 +1222,7 @@ mod tests {
             command: Some("cmd arg1 arg2".to_string()),
             use_shell: false,
             allow_unsafe: false,
+            no_args: false,
         };
         assert_eq!(ide.effective_args(), vec!["arg1", "arg2"]);
     }
@@ -1091,6 +1237,7 @@ mod tests {
             command: Some("code".to_string()),
             use_shell: false,
             allow_unsafe: false,
+            no_args: false,
         };
         assert_eq!(ide.effective_args(), vec!["{file}"]);
         let ide2 = IdeConfig {
@@ -1110,6 +1257,7 @@ mod tests {
             command: Some("other arg".to_string()),
             use_shell: false,
             allow_unsafe: false,
+            no_args: false,
         };
         assert_eq!(ide.effective_args(), vec!["custom"]);
     }
@@ -1124,6 +1272,7 @@ mod tests {
             command: None,
             use_shell: true,
             allow_unsafe: true,
+            no_args: false,
         };
         let json = serde_json::to_string(&ide).unwrap();
         let de: IdeConfig = serde_json::from_str(&json).unwrap();
@@ -1144,6 +1293,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         assert_eq!(p.normalized_extension(), ".sln");
         let p2 = LanguageProfile {
@@ -1163,6 +1318,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         assert_eq!(p.normalized_extension(), ".sln");
         let p2 = LanguageProfile {
@@ -1182,6 +1343,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         assert_eq!(p.normalized_extension(), ".sln");
     }
@@ -1196,6 +1363,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         assert!(p.matches_file(Path::new("foo.sln")));
         assert!(p.matches_file(Path::new("FOO.SLN")));
@@ -1212,6 +1385,12 @@ mod tests {
             max_scan_depth: 2,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         assert!(p.matches_file(Path::new("Cargo.toml")));
         assert!(!p.matches_file(Path::new("foo.toml")));
@@ -1228,6 +1407,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         assert!(p.matches_file(Path::new("main.rs")));
         assert!(p.matches_file(Path::new("MAIN.RS")));
@@ -1245,6 +1430,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         assert!(p.matches_file(Path::new("pom.xml")));
         assert!(!p.matches_file(Path::new("build.gradle")));
@@ -1260,6 +1451,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         assert!(p.matches_file(Path::new("pom.xml")));
         assert!(p.matches_file(Path::new("build.gradle")));
@@ -1282,6 +1479,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         assert!(!p.matches_file(Path::new("Makefile")));
     }
@@ -1310,6 +1513,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         let json = serde_json::to_string(&p).unwrap();
         let de: LanguageProfile = serde_json::from_str(&json).unwrap();
@@ -1430,7 +1639,7 @@ mod tests {
     fn config_default_has_valid_state() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.max_depth, 2);
-        assert_eq!(cfg.config_version, 5);
+        assert_eq!(cfg.config_version, 6);
         assert_eq!(cfg.active_profile_id, "dotnet");
         assert!(!cfg.profiles.is_empty());
         assert_eq!(cfg.agents.len(), 6);
@@ -1585,6 +1794,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         });
         let path = PathBuf::from("/tmp/repo");
         // without override -> active (dotnet)
@@ -1699,7 +1914,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded.roots.len(), 2);
         assert_eq!(loaded.max_depth, 3);
-        assert_eq!(loaded.config_version, 5);
+        assert_eq!(loaded.config_version, 6);
     }
 
     #[test]
@@ -1762,6 +1977,12 @@ mod tests {
                 max_scan_depth: 3,
                 ides: vec![],
                 default_ide_id: None,
+                ide_order: Vec::new(),
+                hidden_ide_ids: Vec::new(),
+                hidden_agent_ids: Vec::new(),
+                agent_order: Vec::new(),
+                show_shell: true,
+                show_explorer: true,
             });
         }
         // simulate v4 migration retain logic
@@ -1787,6 +2008,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         });
         let has_custom = cfg.profiles.iter().any(|p| p.id == "custom");
         assert!(has_custom);
@@ -1848,6 +2075,12 @@ mod tests {
             max_scan_depth: 0,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         // simulate validation
         p.file_extension = p.normalized_extension();
@@ -1871,6 +2104,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         p2.id = p2.id.trim().to_lowercase();
         if p2.id.is_empty() {
@@ -1891,6 +2130,12 @@ mod tests {
                 max_scan_depth: 3,
                 ides: vec![],
                 default_ide_id: None,
+                ide_order: Vec::new(),
+                hidden_ide_ids: Vec::new(),
+                hidden_agent_ids: Vec::new(),
+                agent_order: Vec::new(),
+                show_shell: true,
+                show_explorer: true,
             },
             LanguageProfile {
                 id: "dotnet".to_string(),
@@ -1900,6 +2145,12 @@ mod tests {
                 max_scan_depth: 3,
                 ides: vec![],
                 default_ide_id: None,
+                ide_order: Vec::new(),
+                hidden_ide_ids: Vec::new(),
+                hidden_agent_ids: Vec::new(),
+                agent_order: Vec::new(),
+                show_shell: true,
+                show_explorer: true,
             },
         ];
         // dedup like try_load
@@ -1977,6 +2228,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         assert_eq!(p.normalized_extension(), ".sln");
         p.file_extension = ".SLN".to_string();
@@ -1993,6 +2250,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         assert!(p.matches_file(Path::new("foo.sln")));
         assert!(p.matches_file(Path::new("FOO.SLN")));
@@ -2006,6 +2269,12 @@ mod tests {
             max_scan_depth: 2,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         assert!(p2.matches_file(Path::new("Cargo.toml")));
         assert!(!p2.matches_file(Path::new("foo.toml")));
@@ -2039,6 +2308,12 @@ mod tests {
             max_scan_depth: 3,
             ides: vec![],
             default_ide_id: None,
+            ide_order: Vec::new(),
+            hidden_ide_ids: Vec::new(),
+            hidden_agent_ids: Vec::new(),
+            agent_order: Vec::new(),
+            show_shell: true,
+            show_explorer: true,
         };
         p.id = p.id.trim().to_lowercase();
         assert_eq!(p.id, "dotnet");
@@ -2059,5 +2334,154 @@ mod tests {
             let d: Theme = serde_json::from_str(&s).unwrap();
             assert_eq!(theme, d);
         }
+    }
+
+    #[test]
+    fn ide_no_args_returns_empty() {
+        let mut ide = IdeConfig {
+            id: "test".to_string(),
+            display_name: "Test".to_string(),
+            program: "code".to_string(),
+            args: vec!["{file}".to_string()],
+            command: None,
+            use_shell: false,
+            allow_unsafe: false,
+            no_args: true,
+        };
+        assert!(ide.effective_args().is_empty());
+        ide.no_args = false;
+        assert_eq!(ide.effective_args(), vec!["{file}"]);
+        // Serie roundtrip with true
+        ide.no_args = true;
+        ide.args = vec!["should be ignored".to_string()];
+        assert!(ide.effective_args().is_empty());
+        let json = serde_json::to_string(&ide).unwrap();
+        let de: IdeConfig = serde_json::from_str(&json).unwrap();
+        assert!(de.no_args);
+    }
+
+    #[test]
+    fn dotnet_vscode_default_is_dot() {
+        let p = default_dotnet_profile();
+        let vscode = p.ides.iter().find(|i| i.id == "vscode").unwrap();
+        assert_eq!(vscode.args, vec![".".to_string()]);
+        assert!(!vscode.no_args);
+    }
+
+    #[test]
+    fn branch_limit_default_and_clamp() {
+        assert_eq!(default_branch_limit(), 200);
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.branch_display_limit, 200);
+        // Clamp via try_load logic: simulate validation
+        let mut cfg2 = AppConfig::default();
+        cfg2.branch_display_limit = 10;
+        if cfg2.branch_display_limit < 50 {
+            cfg2.branch_display_limit = 50;
+        }
+        assert_eq!(cfg2.branch_display_limit, 50);
+        cfg2.branch_display_limit = 1000;
+        if cfg2.branch_display_limit > 500 {
+            cfg2.branch_display_limit = 500;
+        }
+        assert_eq!(cfg2.branch_display_limit, 500);
+    }
+
+    #[test]
+    fn profile_visible_ides_filters_and_orders() {
+        let mut p = LanguageProfile {
+            id: "test".to_string(),
+            display_name: "Test".to_string(),
+            file_extension: ".txt".to_string(),
+            file_pattern: None,
+            max_scan_depth: 3,
+            ides: vec![
+                IdeConfig {
+                    id: "a".to_string(),
+                    display_name: "A".to_string(),
+                    program: "a".to_string(),
+                    args: vec![],
+                    command: None,
+                    use_shell: false,
+                    allow_unsafe: false,
+                    no_args: false,
+                },
+                IdeConfig {
+                    id: "b".to_string(),
+                    display_name: "B".to_string(),
+                    program: "b".to_string(),
+                    args: vec![],
+                    command: None,
+                    use_shell: false,
+                    allow_unsafe: false,
+                    no_args: false,
+                },
+                IdeConfig {
+                    id: "c".to_string(),
+                    display_name: "C".to_string(),
+                    program: "c".to_string(),
+                    args: vec![],
+                    command: None,
+                    use_shell: false,
+                    allow_unsafe: false,
+                    no_args: false,
+                },
+            ],
+            default_ide_id: None,
+            ide_order: vec!["c".to_string(), "a".to_string(), "b".to_string()],
+            hidden_ide_ids: vec!["a".to_string()],
+            hidden_agent_ids: vec![],
+            agent_order: vec![],
+            show_shell: true,
+            show_explorer: true,
+        };
+        let visible = p.visible_ides();
+        // a is hidden, so only c and b in order c,b
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].id, "c");
+        assert_eq!(visible[1].id, "b");
+        // show flags
+        assert!(p.show_shell);
+        p.show_shell = false;
+        assert!(!p.show_shell);
+    }
+
+    #[test]
+    fn profile_filtered_agents_per_profile() {
+        let cfg = AppConfig::default();
+        let p = LanguageProfile {
+            id: "test".to_string(),
+            display_name: "Test".to_string(),
+            file_extension: ".txt".to_string(),
+            file_pattern: None,
+            max_scan_depth: 3,
+            ides: vec![],
+            default_ide_id: None,
+            ide_order: vec![],
+            hidden_ide_ids: vec![],
+            hidden_agent_ids: vec!["codex".to_string()],
+            agent_order: vec!["gemini".to_string(), "claude".to_string()],
+            show_shell: true,
+            show_explorer: true,
+        };
+        let active = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+        ];
+        let filtered = p.filtered_agents(&cfg.agents, &active);
+        // codex hidden, so only gemini, claude in order gemini,claude
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].id, "gemini");
+        assert_eq!(filtered[1].id, "claude");
+    }
+
+    #[test]
+    fn language_profile_default_icon_flags() {
+        let p = default_dotnet_profile();
+        assert!(p.show_shell);
+        assert!(p.show_explorer);
+        assert!(p.hidden_ide_ids.is_empty());
+        assert!(p.ide_order.is_empty());
     }
 }

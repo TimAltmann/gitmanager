@@ -1,5 +1,9 @@
 use git2::{BranchType, Repository, StatusOptions};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+static VS_PATH_CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
+static RIDER_PATH_CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 // --- SolutionFile ---
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,9 +209,8 @@ pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
         };
         match repo.find_remote(remote_name) {
             Ok(mut remote) => {
-                // Fetch ohne Specs = default fetchspec des Remotes
                 let mut opts = git2::FetchOptions::new();
-                // Kein Callback für Credentials – nutze default (ssh-agent, credential helper)
+                opts.prune(git2::FetchPrune::On);
                 if let Err(e) = remote.fetch(&[] as &[&str], Some(&mut opts), None) {
                     eprintln!("Fetch für Remote '{}' fehlgeschlagen: {e}", remote_name);
                     last_err = Some(e);
@@ -461,13 +464,17 @@ pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
 // --- IDE & Agent Launch Helpers ---
 use crate::config::{AgentProfile, IdeConfig, TerminalPreference};
 
-fn substitute_placeholders(template: &str, file: &Path) -> String {
+pub(crate) fn substitute_placeholders(template: &str, file: &Path, repo: &Path) -> String {
     let file_str = file.display().to_string();
-    let dir_str = file
-        .parent()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| file_str.clone());
-    let repo_str = file_str.clone();
+    let repo_str = repo.display().to_string();
+    // {dir} = parent of file (solution dir) when file != repo, else repo itself (for agent case where file==repo)
+    let dir_str = if file == repo {
+        repo_str.clone()
+    } else {
+        file.parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| repo_str.clone())
+    };
     template
         .replace("{file}", &file_str)
         .replace("{dir}", &dir_str)
@@ -483,7 +490,26 @@ fn quote_if_needed(s: &str) -> String {
 }
 
 fn escape_for_powershell(s: &str) -> String {
-    // PowerShell single-quoted string: ' escapes as ''
+    let needs_quote = s.contains(' ')
+        || s.contains('\'')
+        || s.contains('"')
+        || s.contains('&')
+        || s.contains('|')
+        || s.contains(';')
+        || s.contains('>')
+        || s.contains('<')
+        || s.contains('^')
+        || s.contains('`')
+        || s.contains('$');
+    if needs_quote {
+        format!("'{}'", s.replace('\'', "''"))
+    } else {
+        s.to_string()
+    }
+}
+
+#[cfg(not(test))]
+fn escape_for_powershell_force(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
@@ -524,7 +550,7 @@ where
             .iter()
             .map(|a| {
                 let substituted = if substitute_args {
-                    substitute_placeholders(a, repo_path)
+                    substitute_placeholders(a, repo_path, repo_path)
                 } else {
                     a.clone()
                 };
@@ -539,12 +565,12 @@ where
         }
     } else if let Some(cmd) = &agent.command {
         if has_placeholders(cmd) {
-            substitute_placeholders(cmd, repo_path)
+            substitute_placeholders(cmd, repo_path, repo_path)
         } else {
             cmd.clone()
         }
     } else {
-        escape_fn(&agent.program)
+        format!("{}{}", prefix, escape_fn(&agent.program))
     }
 }
 
@@ -557,13 +583,16 @@ fn build_agent_cmd_raw(agent: &AgentProfile, repo_path: &Path) -> String {
         let args_str = agent
             .args
             .iter()
-            .map(|a| quote_if_needed(a))
+            .map(|a| {
+                let substituted = substitute_placeholders(a, repo_path, repo_path);
+                quote_if_needed(&substituted)
+            })
             .collect::<Vec<_>>()
             .join(" ");
         format!("{} {}", agent.program, args_str)
     } else if let Some(cmd) = &agent.command {
         if has_placeholders(cmd) {
-            substitute_placeholders(cmd, repo_path)
+            substitute_placeholders(cmd, repo_path, repo_path)
         } else {
             cmd.clone()
         }
@@ -573,7 +602,11 @@ fn build_agent_cmd_raw(agent: &AgentProfile, repo_path: &Path) -> String {
 }
 
 fn build_powershell_script(agent: &AgentProfile, repo_path: &Path) -> String {
-    build_agent_command(agent, repo_path, escape_for_powershell, "& ", true)
+    let prog = &agent.program;
+    let needs_amp =
+        prog.contains(' ') || prog.contains('\\') || prog.contains('/') || prog.contains('\'');
+    let prefix = if needs_amp { "& " } else { "" };
+    build_agent_command(agent, repo_path, escape_for_powershell, prefix, true)
 }
 
 fn build_cmd_agent_string(agent: &AgentProfile, repo_path: &Path) -> String {
@@ -581,13 +614,16 @@ fn build_cmd_agent_string(agent: &AgentProfile, repo_path: &Path) -> String {
 }
 
 pub fn is_program_available(program: &str) -> bool {
-    // Blocke Shell-Metazeichen im Programmnamen selbst (verhindert Injection über Config)
-    if program.is_empty() || program.chars().any(|c| "&|;><`$\"'".contains(c)) {
+    if program.is_empty() {
         return false;
     }
-    // Direkter Pfad? Prüfe Existenz ohne PATH-Suche
+    // Direkter Pfad? Prüfe Existenz ohne PATH-Suche – Shell-Zeichen in Pfaden erlauben (z.B. "Tom & Jerry")
     if program.contains('/') || program.contains('\\') {
         return Path::new(program).exists();
+    }
+    // Blocke Shell-Metazeichen nur für bare Programmnamen (verhindert Injection über Config)
+    if program.chars().any(|c| "&|;><`$\"'".contains(c)) {
+        return false;
     }
     // Manuelle PATH-Suche (vermeidet Hijacking von `where`/`which` selbst)
     if let Ok(path_var) = std::env::var("PATH") {
@@ -646,25 +682,131 @@ pub fn is_program_available(program: &str) -> bool {
 }
 
 pub fn resolve_vs_path() -> Option<PathBuf> {
-    // Versuche vswhere.exe
-    let vswhere =
-        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
-    if !vswhere.exists() {
-        return None;
-    }
-    let out = std::process::Command::new(&vswhere)
-        .args(["-latest", "-products", "*", "-property", "productPath"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if p.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(p))
-    }
+    VS_PATH_CACHE
+        .get_or_init(|| {
+            let vswhere = PathBuf::from(
+                r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe",
+            );
+            if vswhere.exists() {
+                if let Ok(out) = std::process::Command::new(&vswhere)
+                    .args(["-latest", "-products", "*", "-property", "productPath"])
+                    .output()
+                {
+                    if out.status.success() {
+                        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if !p.is_empty()
+                            && !p.to_lowercase().contains("sql server")
+                            && !p.to_lowercase().contains("ssms")
+                        {
+                            let pb = PathBuf::from(&p);
+                            if pb.exists() {
+                                return Some(pb);
+                            }
+                        }
+                    }
+                }
+                if let Ok(out) = std::process::Command::new(&vswhere)
+                    .args(["-latest", "-products", "*", "-property", "installationPath"])
+                    .output()
+                {
+                    if out.status.success() {
+                        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if !p.is_empty() {
+                            let candidate = PathBuf::from(&p)
+                                .join("Common7")
+                                .join("IDE")
+                                .join("devenv.exe");
+                            if candidate.exists() {
+                                return Some(candidate);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Ok(path_var) = std::env::var("PATH") {
+                for dir in std::env::split_paths(&path_var) {
+                    let lower = dir.to_string_lossy().to_lowercase();
+                    if lower.contains("sql server") || lower.contains("ssms") {
+                        continue;
+                    }
+                    let candidate = dir.join("devenv.exe");
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                }
+            }
+            None
+        })
+        .clone()
+}
+
+pub fn resolve_rider_path() -> Option<PathBuf> {
+    RIDER_PATH_CACHE
+        .get_or_init(|| {
+            let mut candidates = Vec::new();
+            if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                let toolbox_base = PathBuf::from(local_app_data)
+                    .join("JetBrains")
+                    .join("Toolbox")
+                    .join("apps")
+                    .join("Rider");
+                if toolbox_base.exists() {
+                    if let Ok(entries) = std::fs::read_dir(&toolbox_base) {
+                        for ch in entries.flatten() {
+                            if let Ok(sub) = std::fs::read_dir(ch.path()) {
+                                for ver in sub.flatten() {
+                                    let rider_exe = ver.path().join("bin").join("rider64.exe");
+                                    if rider_exe.exists() {
+                                        candidates.push(rider_exe);
+                                    }
+                                    let rider_exe2 = ver.path().join("bin").join("rider.exe");
+                                    if rider_exe2.exists() {
+                                        candidates.push(rider_exe2);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for base in [
+                r"C:\Program Files\JetBrains",
+                r"C:\Program Files (x86)\JetBrains",
+            ] {
+                let base_path = PathBuf::from(base);
+                if let Ok(entries) = std::fs::read_dir(&base_path) {
+                    for e in entries.flatten() {
+                        for exe in ["rider64.exe", "rider.exe"] {
+                            let p = e.path().join("bin").join(exe);
+                            if p.exists() {
+                                candidates.push(p);
+                            }
+                        }
+                    }
+                }
+            }
+            candidates.sort_by_key(|p| {
+                std::fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .map(|t| std::cmp::Reverse(t))
+                    .unwrap_or(std::cmp::Reverse(std::time::SystemTime::UNIX_EPOCH))
+            });
+            if let Some(p) = candidates.into_iter().next() {
+                return Some(p);
+            }
+            if let Ok(path_var) = std::env::var("PATH") {
+                for dir in std::env::split_paths(&path_var) {
+                    for exe in ["rider64.exe", "rider.exe", "rider.cmd"] {
+                        let p = dir.join(exe);
+                        if p.exists() {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+            None
+        })
+        .clone()
 }
 
 fn set_creation_flags(_cmd: &mut std::process::Command, _flags: u32) {
@@ -676,25 +818,34 @@ fn set_creation_flags(_cmd: &mut std::process::Command, _flags: u32) {
 }
 
 /// Öffnet eine Datei/Ordner mit einer IDE-Konfiguration
-pub fn launch_ide(ide: &IdeConfig, file: &Path) -> anyhow::Result<()> {
+/// `repo_path` ist immer das Repo-Root (für cwd), `file` ist optional die Solution/Project Datei
+pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> anyhow::Result<()> {
     let program = ide.effective_program();
     let args_template = ide.effective_args();
+    let file_for_subst: PathBuf = file
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| repo_path.to_path_buf());
     let args: Vec<String> = args_template
         .iter()
-        .map(|a| substitute_placeholders(a, file))
+        .map(|a| substitute_placeholders(a, &file_for_subst, repo_path))
         .collect();
 
-    // Spezialfall Visual Studio: versuche vswhere wenn program == devenv und nicht im PATH
     let mut effective_program = program.clone();
-    if program.to_lowercase() == "devenv" && !is_program_available(&program) {
+    if program.to_lowercase() == "devenv" {
         if let Some(vs_path) = resolve_vs_path() {
             effective_program = vs_path.to_string_lossy().to_string();
+        }
+    }
+    if program.to_lowercase() == "rider" && !is_program_available(&program) {
+        if let Some(rider_path) = resolve_rider_path() {
+            effective_program = rider_path.to_string_lossy().to_string();
         }
     }
 
     let spawn = |prog: &str, args: &[String]| -> std::io::Result<std::process::Child> {
         let mut cmd = std::process::Command::new(prog);
         cmd.args(args);
+        cmd.current_dir(repo_path);
         set_creation_flags(&mut cmd, 0x08000000);
         cmd.spawn()
     };
@@ -752,6 +903,7 @@ pub fn launch_ide(ide: &IdeConfig, file: &Path) -> anyhow::Result<()> {
                 shell_args.extend(args.clone());
                 let mut cmd = std::process::Command::new("cmd");
                 cmd.args(&shell_args);
+                cmd.current_dir(repo_path);
                 set_creation_flags(&mut cmd, 0x08000000);
                 cmd.spawn().map(|_| ()).map_err(|e2| {
                     anyhow::anyhow!(
@@ -795,12 +947,78 @@ fn spawn_powershell(ps_script: &str, repo_path: &Path) -> anyhow::Result<()> {
     let has_pwsh = is_program_available("pwsh");
     let ps = if has_pwsh { "pwsh" } else { "powershell" };
     let mut cmd = std::process::Command::new(ps);
-    cmd.args(["-NoExit", "-Command", ps_script]);
+    if has_pwsh {
+        cmd.args([
+            "-NoLogo",
+            "-NoExit",
+            "-WorkingDirectory",
+            &repo_path.display().to_string(),
+            "-Command",
+            ps_script,
+        ]);
+    } else {
+        let repo_escaped = escape_for_powershell_force(&repo_path.display().to_string());
+        let full_script = format!("Set-Location {}; {}", repo_escaped, ps_script);
+        cmd.args(["-NoLogo", "-NoExit", "-Command", &full_script]);
+    }
     cmd.current_dir(repo_path);
     set_creation_flags(&mut cmd, 0x00000010);
     cmd.spawn()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("Powershell starten fehlgeschlagen: {e}"))
+}
+
+#[cfg(not(test))]
+fn spawn_powershell_shell(repo_path: &Path) -> anyhow::Result<()> {
+    let has_pwsh = is_program_available("pwsh");
+    let ps = if has_pwsh { "pwsh" } else { "powershell" };
+    let mut cmd = std::process::Command::new(ps);
+    if has_pwsh {
+        cmd.args([
+            "-NoLogo",
+            "-NoExit",
+            "-WorkingDirectory",
+            &repo_path.display().to_string(),
+        ]);
+    } else {
+        cmd.args([
+            "-NoLogo",
+            "-NoExit",
+            "-Command",
+            &format!(
+                "Set-Location {}",
+                escape_for_powershell_force(&repo_path.display().to_string())
+            ),
+        ]);
+    }
+    cmd.current_dir(repo_path);
+    set_creation_flags(&mut cmd, 0x00000010);
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("Powershell starten fehlgeschlagen: {e}"))
+}
+
+#[cfg(not(test))]
+fn spawn_wt_shell(repo_path: &Path) -> anyhow::Result<()> {
+    let repo_str = repo_path.display().to_string();
+    let mut cmd = std::process::Command::new("wt");
+    cmd.args(["-d", &repo_str]);
+    cmd.current_dir(repo_path);
+    set_creation_flags(&mut cmd, 0x00000010);
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("Windows Terminal starten fehlgeschlagen: {e}"))
+}
+
+#[cfg(not(test))]
+fn spawn_cmd_shell(repo_str: &str, repo_path: &Path) -> anyhow::Result<()> {
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.args(["/C", "start", "", "/D", repo_str, "cmd", "/K", ""]);
+    cmd.current_dir(repo_path);
+    set_creation_flags(&mut cmd, 0x08000000);
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("cmd starten fehlgeschlagen: {e}"))
 }
 
 #[cfg(not(test))]
@@ -858,7 +1076,7 @@ pub fn launch_agent(
                 if !agent.args.is_empty() {
                     cmd.arg(&agent.program);
                     for a in &agent.args {
-                        let substituted = substitute_placeholders(a, repo_path);
+                        let substituted = substitute_placeholders(a, repo_path, repo_path);
                         cmd.arg(substituted);
                     }
                 } else {
@@ -871,6 +1089,40 @@ pub fn launch_agent(
                 })
             }
             _ => spawn_cmd(&cmd_agent_string, &repo_str, repo_path),
+        }
+    }
+}
+
+/// Öffnet nur die Shell im Repo-Verzeichnis (ohne Agent-Command)
+pub fn open_shell(repo_path: &Path, terminal_pref: &TerminalPreference) -> anyhow::Result<()> {
+    #[cfg(test)]
+    {
+        let _ = (repo_path, terminal_pref);
+        return Ok(());
+    }
+    #[cfg(not(test))]
+    {
+        let has_wt = is_program_available("wt");
+        let repo_str = repo_path.display().to_string();
+        match terminal_pref {
+            TerminalPreference::WindowsTerminal if has_wt => spawn_wt_shell(repo_path),
+            TerminalPreference::Powershell => spawn_powershell_shell(repo_path),
+            TerminalPreference::Cmd => spawn_cmd_shell(&repo_str, repo_path),
+            TerminalPreference::Auto if !has_wt => {
+                spawn_powershell_shell(repo_path).or_else(|_| spawn_cmd_shell(&repo_str, repo_path))
+            }
+            TerminalPreference::Auto => spawn_wt_shell(repo_path)
+                .or_else(|_| spawn_powershell_shell(repo_path))
+                .or_else(|_| spawn_cmd_shell(&repo_str, repo_path)),
+            TerminalPreference::Custom(custom) => {
+                let mut cmd = std::process::Command::new(custom);
+                cmd.current_dir(repo_path);
+                set_creation_flags(&mut cmd, 0x00000010);
+                cmd.spawn().map(|_| ()).map_err(|e| {
+                    anyhow::anyhow!("Custom Terminal '{}' starten fehlgeschlagen: {e}", custom)
+                })
+            }
+            _ => spawn_cmd_shell(&repo_str, repo_path),
         }
     }
 }
@@ -1497,25 +1749,30 @@ mod tests {
     #[test]
     fn substitute_placeholders_all() {
         let file = Path::new("/tmp/repo/sub/foo.sln");
+        let repo = Path::new("/tmp/repo");
         assert_eq!(
-            substitute_placeholders("{file}", file),
-            "/tmp/repo/sub/foo.sln"
-        );
-        assert_eq!(substitute_placeholders("{dir}", file), "/tmp/repo/sub");
-        assert_eq!(
-            substitute_placeholders("{repo}", file),
+            substitute_placeholders("{file}", file, repo),
             "/tmp/repo/sub/foo.sln"
         );
         assert_eq!(
-            substitute_placeholders("{file} {dir} {repo}", file),
-            "/tmp/repo/sub/foo.sln /tmp/repo/sub /tmp/repo/sub/foo.sln"
+            substitute_placeholders("{dir}", file, repo),
+            "/tmp/repo/sub"
+        );
+        assert_eq!(substitute_placeholders("{repo}", file, repo), "/tmp/repo");
+        assert_eq!(
+            substitute_placeholders("{file} {dir} {repo}", file, repo),
+            "/tmp/repo/sub/foo.sln /tmp/repo/sub /tmp/repo"
         );
         assert_eq!(
-            substitute_placeholders("no placeholder", file),
+            substitute_placeholders("no placeholder", file, repo),
             "no placeholder"
         );
         let deep = Path::new("/a/b/c/d/e/file.txt");
-        assert!(substitute_placeholders("{dir}", deep).contains("/a/b/c/d/e"));
+        assert!(substitute_placeholders("{dir}", deep, deep).contains("/a/b/c/d/e"));
+        assert_eq!(
+            substitute_placeholders("{dir}", file, file),
+            "/tmp/repo/sub/foo.sln"
+        );
     }
 
     #[test]
@@ -1541,6 +1798,7 @@ mod tests {
             command: Some("other arg".to_string()),
             use_shell: false,
             allow_unsafe: false,
+            no_args: false,
         };
         assert_eq!(ide.effective_program(), "code");
         assert_eq!(ide.effective_args(), vec!["{file}"]);
@@ -1566,8 +1824,9 @@ mod tests {
             command: None,
             use_shell: true,
             allow_unsafe: false,
+            no_args: false,
         };
-        let res = launch_ide(&ide, Path::new("/tmp/foo.sln"));
+        let res = launch_ide(&ide, Path::new("/tmp"), Some(Path::new("/tmp/foo.sln")));
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Ungültige Zeichen"));
 
@@ -1576,7 +1835,11 @@ mod tests {
             use_shell: false,
             ..ide.clone()
         };
-        let res_no_shell = launch_ide(&ide_no_shell, Path::new("/tmp/foo.sln"));
+        let res_no_shell = launch_ide(
+            &ide_no_shell,
+            Path::new("/tmp"),
+            Some(Path::new("/tmp/foo.sln")),
+        );
         // In tests wird spawn für "code" gemockt -> Ok, aber nicht wegen Shell-Chars fehlgeschlagen
         assert!(
             res_no_shell.is_ok()
@@ -1588,6 +1851,7 @@ mod tests {
 
         let mut ide2 = IdeConfig {
             allow_unsafe: true,
+            no_args: false,
             use_shell: true,
             ..ide.clone()
         };
@@ -1595,7 +1859,7 @@ mod tests {
         ide2.program = "true".to_string();
         ide2.args = vec!["a & b".to_string()];
         // With allow_unsafe true, it should not fail due to shell chars
-        let res2 = launch_ide(&ide2, Path::new("/tmp/foo.sln"));
+        let res2 = launch_ide(&ide2, Path::new("/tmp"), Some(Path::new("/tmp/foo.sln")));
         // Should succeed (mocked in tests for GUI, or `true` exits 0)
         assert!(res2.is_ok());
         if let Err(e) = res2 {
@@ -1611,8 +1875,13 @@ mod tests {
             command: None,
             use_shell: false,
             allow_unsafe: false,
+            no_args: false,
         };
-        let res_path = launch_ide(&ide_path, Path::new("/tmp/Tom & Jerry/app.sln"));
+        let res_path = launch_ide(
+            &ide_path,
+            Path::new("/tmp"),
+            Some(Path::new("/tmp/Tom & Jerry/app.sln")),
+        );
         assert!(res_path.is_ok());
     }
 
@@ -1627,8 +1896,9 @@ mod tests {
                 command: None,
                 use_shell: true,
                 allow_unsafe: false,
+                no_args: false,
             };
-            assert!(launch_ide(&ide, Path::new("/tmp/f")).is_err());
+            assert!(launch_ide(&ide, Path::new("/tmp"), Some(Path::new("/tmp/f"))).is_err());
         }
         // Bei use_shell=false sollen gleiche Zeichen nicht blockiert werden
         for ch in ["&", "|", ";", ">", "<"] {
@@ -1640,8 +1910,9 @@ mod tests {
                 command: None,
                 use_shell: false,
                 allow_unsafe: false,
+                no_args: false,
             };
-            let res = launch_ide(&ide, Path::new("/tmp/f"));
+            let res = launch_ide(&ide, Path::new("/tmp"), Some(Path::new("/tmp/f")));
             assert!(
                 res.is_ok() || !res.unwrap_err().to_string().contains("Ungültige Zeichen"),
                 "should not block shell chars when use_shell=false for '{}'",
@@ -1815,13 +2086,106 @@ mod tests {
             command: None,
             use_shell: false,
             allow_unsafe: false,
+            no_args: false,
         };
         let file = Path::new("/tmp/foo.sln");
         let prog = ide.effective_program();
         assert_eq!(prog, "code");
         let args = ide.effective_args();
         assert_eq!(args, vec!["{file}", "--reuse-window"]);
-        let sub = substitute_placeholders("{file} --test", file);
+        let sub = substitute_placeholders("{file} --test", file, file);
         assert!(sub.contains("foo.sln"));
+    }
+
+    #[test]
+    fn escape_powershell_bare_vs_quoted() {
+        assert_eq!(escape_for_powershell("claude"), "claude");
+        assert_eq!(escape_for_powershell("code"), "code");
+        assert_eq!(
+            escape_for_powershell("C:\\Program Files\\app.exe"),
+            "'C:\\Program Files\\app.exe'"
+        );
+        assert_eq!(escape_for_powershell("a&b"), "'a&b'");
+        assert_eq!(escape_for_powershell("a'b"), "'a''b'");
+    }
+
+    #[test]
+    fn build_powershell_script_bare_and_path() {
+        let repo = Path::new("/tmp/repo");
+        let agent_bare = AgentProfile {
+            id: "claude".to_string(),
+            display_name: "Claude".to_string(),
+            program: "claude".to_string(),
+            args: vec![],
+            command: None,
+            launch_mode: crate::config::AgentLaunchMode::Terminal,
+            terminal_override: None,
+        };
+        let script = build_powershell_script(&agent_bare, repo);
+        assert_eq!(script, "claude");
+        let agent_path = AgentProfile {
+            program: "C:\\Program Files\\claude.exe".to_string(),
+            ..agent_bare.clone()
+        };
+        let script2 = build_powershell_script(&agent_path, repo);
+        assert!(script2.starts_with("& "));
+        assert!(script2.contains("'C:\\Program Files\\claude.exe'"));
+        let mut agent_args = agent_bare.clone();
+        agent_args.args = vec!["--help".to_string(), "foo bar".to_string()];
+        let script3 = build_powershell_script(&agent_args, repo);
+        assert_eq!(script3, "claude --help 'foo bar'");
+    }
+
+    #[test]
+    fn visible_ides_and_filtered_agents_logic() {
+        let profile = crate::config::LanguageProfile {
+            id: "test".to_string(),
+            display_name: "Test".to_string(),
+            file_extension: ".txt".to_string(),
+            file_pattern: None,
+            max_scan_depth: 3,
+            ides: vec![
+                IdeConfig {
+                    id: "a".to_string(),
+                    display_name: "A".to_string(),
+                    program: "a".to_string(),
+                    args: vec![],
+                    command: None,
+                    use_shell: false,
+                    allow_unsafe: false,
+                    no_args: false,
+                },
+                IdeConfig {
+                    id: "b".to_string(),
+                    display_name: "B".to_string(),
+                    program: "b".to_string(),
+                    args: vec![],
+                    command: None,
+                    use_shell: false,
+                    allow_unsafe: false,
+                    no_args: false,
+                },
+            ],
+            default_ide_id: None,
+            ide_order: vec!["b".to_string(), "a".to_string()],
+            hidden_ide_ids: vec!["a".to_string()],
+            hidden_agent_ids: vec![],
+            agent_order: vec![],
+            show_shell: false,
+            show_explorer: true,
+        };
+        let visible = profile.visible_ides();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "b");
+        assert!(!profile.show_shell);
+        assert!(profile.show_explorer);
+    }
+
+    #[test]
+    fn substitute_with_repo_and_file_distinct() {
+        let file = Path::new("/tmp/repo/sub/app.sln");
+        let repo = Path::new("/tmp/repo");
+        let sub = substitute_placeholders("{file} {dir} {repo}", file, repo);
+        assert_eq!(sub, "/tmp/repo/sub/app.sln /tmp/repo/sub /tmp/repo");
     }
 }
