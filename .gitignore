@@ -24,5 +24,11 @@ desktop.ini
 *.pdb
 *.ilk
 
+# Agent guide (lokal, nicht im Repo) – siehe Agent.md
+Agent.md
+AGENT.md
+AGENTS.md
+CLAUDE.md
+
 # Config (lokal, nicht im Repo)
 config.json

@@ -1,9 +1,61 @@
 use git2::{BranchType, Repository, StatusOptions};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-static VS_PATH_CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
-static RIDER_PATH_CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
+const VS_RIDER_CACHE_TTL: Duration = Duration::from_secs(300);
+
+type CachedPath = Mutex<Option<(Option<PathBuf>, Instant)>>;
+
+#[allow(clippy::type_complexity)]
+static VS_PATH_CACHE: OnceLock<CachedPath> = OnceLock::new();
+#[allow(clippy::type_complexity)]
+static RIDER_PATH_CACHE: OnceLock<CachedPath> = OnceLock::new();
+
+fn vs_cache() -> &'static CachedPath {
+    VS_PATH_CACHE.get_or_init(|| Mutex::new(None))
+}
+fn rider_cache() -> &'static CachedPath {
+    RIDER_PATH_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+pub fn clear_vs_cache() {
+    if let Some(m) = VS_PATH_CACHE.get() {
+        *m.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+pub fn clear_rider_cache() {
+    if let Some(m) = RIDER_PATH_CACHE.get() {
+        *m.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+fn cached_resolve<F>(cache: &'static CachedPath, compute: F) -> Option<PathBuf>
+where
+    F: FnOnce() -> Option<PathBuf>,
+{
+    // Fast path: check TTL without holding lock during compute
+    if let Some((cached, instant)) =
+        cache.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    {
+        if instant.elapsed() < VS_RIDER_CACHE_TTL {
+            return cached;
+        }
+    }
+    let result = compute();
+    *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((result.clone(), Instant::now()));
+    result
+}
+
+const VS_PROGRAMS: &[&str] = &["devenv", "devenv.exe"];
+const RIDER_PROGRAMS: &[&str] = &["rider", "rider.exe", "rider64.exe", "rider.cmd"];
+
+pub fn is_vs_program(program: &str) -> bool {
+    VS_PROGRAMS.contains(&program.to_lowercase().as_str())
+}
+pub fn is_rider_program(program: &str) -> bool {
+    RIDER_PROGRAMS.contains(&program.to_lowercase().as_str())
+}
 
 // --- SolutionFile ---
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -681,132 +733,142 @@ pub fn is_program_available(program: &str) -> bool {
     }
 }
 
-pub fn resolve_vs_path() -> Option<PathBuf> {
-    VS_PATH_CACHE
-        .get_or_init(|| {
-            let vswhere = PathBuf::from(
-                r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe",
-            );
-            if vswhere.exists() {
-                if let Ok(out) = std::process::Command::new(&vswhere)
-                    .args(["-latest", "-products", "*", "-property", "productPath"])
-                    .output()
+fn resolve_vs_path_uncached() -> Option<PathBuf> {
+    let vswhere =
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
+    if vswhere.exists() {
+        if let Ok(out) = std::process::Command::new(&vswhere)
+            .args(["-latest", "-products", "*", "-property", "productPath"])
+            .output()
+        {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !p.is_empty()
+                    && !p.to_lowercase().contains("sql server")
+                    && !p.to_lowercase().contains("ssms")
                 {
-                    if out.status.success() {
-                        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        if !p.is_empty()
-                            && !p.to_lowercase().contains("sql server")
-                            && !p.to_lowercase().contains("ssms")
-                        {
-                            let pb = PathBuf::from(&p);
-                            if pb.exists() {
-                                return Some(pb);
-                            }
-                        }
-                    }
-                }
-                if let Ok(out) = std::process::Command::new(&vswhere)
-                    .args(["-latest", "-products", "*", "-property", "installationPath"])
-                    .output()
-                {
-                    if out.status.success() {
-                        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        if !p.is_empty() {
-                            let candidate = PathBuf::from(&p)
-                                .join("Common7")
-                                .join("IDE")
-                                .join("devenv.exe");
-                            if candidate.exists() {
-                                return Some(candidate);
-                            }
-                        }
+                    let pb = PathBuf::from(&p);
+                    if pb.exists() {
+                        return Some(pb);
                     }
                 }
             }
-            if let Ok(path_var) = std::env::var("PATH") {
-                for dir in std::env::split_paths(&path_var) {
-                    let lower = dir.to_string_lossy().to_lowercase();
-                    if lower.contains("sql server") || lower.contains("ssms") {
-                        continue;
-                    }
-                    let candidate = dir.join("devenv.exe");
+        }
+        if let Ok(out) = std::process::Command::new(&vswhere)
+            .args(["-latest", "-products", "*", "-property", "installationPath"])
+            .output()
+        {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !p.is_empty() {
+                    let candidate = PathBuf::from(&p)
+                        .join("Common7")
+                        .join("IDE")
+                        .join("devenv.exe");
                     if candidate.exists() {
                         return Some(candidate);
                     }
                 }
             }
-            None
-        })
-        .clone()
+        }
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let lower = dir.to_string_lossy().to_lowercase();
+            if lower.contains("sql server") || lower.contains("ssms") {
+                continue;
+            }
+            let candidate = dir.join("devenv.exe");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+pub fn resolve_vs_path() -> Option<PathBuf> {
+    // TTL-Cache: vermeidet erneute vswhere Aufrufe innerhalb 5min, aber nicht für immer
+    cached_resolve(vs_cache(), resolve_vs_path_uncached)
+}
+
+pub fn resolve_vs_path_force() -> Option<PathBuf> {
+    clear_vs_cache();
+    resolve_vs_path()
+}
+
+fn resolve_rider_path_uncached() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let toolbox_base = PathBuf::from(local_app_data)
+            .join("JetBrains")
+            .join("Toolbox")
+            .join("apps")
+            .join("Rider");
+        if toolbox_base.exists() {
+            if let Ok(entries) = std::fs::read_dir(&toolbox_base) {
+                for ch in entries.flatten() {
+                    if let Ok(sub) = std::fs::read_dir(ch.path()) {
+                        for ver in sub.flatten() {
+                            let rider_exe = ver.path().join("bin").join("rider64.exe");
+                            if rider_exe.exists() {
+                                candidates.push(rider_exe);
+                            }
+                            let rider_exe2 = ver.path().join("bin").join("rider.exe");
+                            if rider_exe2.exists() {
+                                candidates.push(rider_exe2);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for base in [
+        r"C:\Program Files\JetBrains",
+        r"C:\Program Files (x86)\JetBrains",
+    ] {
+        let base_path = PathBuf::from(base);
+        if let Ok(entries) = std::fs::read_dir(&base_path) {
+            for e in entries.flatten() {
+                for exe in ["rider64.exe", "rider.exe"] {
+                    let p = e.path().join("bin").join(exe);
+                    if p.exists() {
+                        candidates.push(p);
+                    }
+                }
+            }
+        }
+    }
+    candidates.sort_by_key(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .map(std::cmp::Reverse)
+            .unwrap_or(std::cmp::Reverse(std::time::SystemTime::UNIX_EPOCH))
+    });
+    if let Some(p) = candidates.into_iter().next() {
+        return Some(p);
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            for exe in ["rider64.exe", "rider.exe", "rider.cmd"] {
+                let p = dir.join(exe);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn resolve_rider_path() -> Option<PathBuf> {
-    RIDER_PATH_CACHE
-        .get_or_init(|| {
-            let mut candidates = Vec::new();
-            if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-                let toolbox_base = PathBuf::from(local_app_data)
-                    .join("JetBrains")
-                    .join("Toolbox")
-                    .join("apps")
-                    .join("Rider");
-                if toolbox_base.exists() {
-                    if let Ok(entries) = std::fs::read_dir(&toolbox_base) {
-                        for ch in entries.flatten() {
-                            if let Ok(sub) = std::fs::read_dir(ch.path()) {
-                                for ver in sub.flatten() {
-                                    let rider_exe = ver.path().join("bin").join("rider64.exe");
-                                    if rider_exe.exists() {
-                                        candidates.push(rider_exe);
-                                    }
-                                    let rider_exe2 = ver.path().join("bin").join("rider.exe");
-                                    if rider_exe2.exists() {
-                                        candidates.push(rider_exe2);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            for base in [
-                r"C:\Program Files\JetBrains",
-                r"C:\Program Files (x86)\JetBrains",
-            ] {
-                let base_path = PathBuf::from(base);
-                if let Ok(entries) = std::fs::read_dir(&base_path) {
-                    for e in entries.flatten() {
-                        for exe in ["rider64.exe", "rider.exe"] {
-                            let p = e.path().join("bin").join(exe);
-                            if p.exists() {
-                                candidates.push(p);
-                            }
-                        }
-                    }
-                }
-            }
-            candidates.sort_by_key(|p| {
-                std::fs::metadata(p)
-                    .and_then(|m| m.modified())
-                    .map(|t| std::cmp::Reverse(t))
-                    .unwrap_or(std::cmp::Reverse(std::time::SystemTime::UNIX_EPOCH))
-            });
-            if let Some(p) = candidates.into_iter().next() {
-                return Some(p);
-            }
-            if let Ok(path_var) = std::env::var("PATH") {
-                for dir in std::env::split_paths(&path_var) {
-                    for exe in ["rider64.exe", "rider.exe", "rider.cmd"] {
-                        let p = dir.join(exe);
-                        if p.exists() {
-                            return Some(p);
-                        }
-                    }
-                }
-            }
-            None
-        })
-        .clone()
+    cached_resolve(rider_cache(), resolve_rider_path_uncached)
+}
+
+pub fn resolve_rider_path_force() -> Option<PathBuf> {
+    clear_rider_cache();
+    resolve_rider_path()
 }
 
 fn set_creation_flags(_cmd: &mut std::process::Command, _flags: u32) {
@@ -831,12 +893,12 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
         .collect();
 
     let mut effective_program = program.clone();
-    if program.to_lowercase() == "devenv" {
+    if is_vs_program(&program) {
         if let Some(vs_path) = resolve_vs_path() {
             effective_program = vs_path.to_string_lossy().to_string();
         }
-    }
-    if program.to_lowercase() == "rider" && !is_program_available(&program) {
+    } else if is_rider_program(&program) {
+        // Konsistent zu VS: immer versuchen aufzulösen, nicht nur wenn !is_program_available
         if let Some(rider_path) = resolve_rider_path() {
             effective_program = rider_path.to_string_lossy().to_string();
         }

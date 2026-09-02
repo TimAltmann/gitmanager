@@ -263,6 +263,7 @@ fn show_repo_row(
                             .collapsible(false)
                             .resizable(false)
                             .title_bar(false)
+                            .movable(false)
                             .fixed_pos(btn_resp.rect.left_bottom())
                             .pivot(egui::Align2::LEFT_TOP)
                             .show(ui.ctx(), |ui| {
@@ -322,7 +323,7 @@ fn show_repo_row(
                                 egui::ScrollArea::vertical()
                                     .max_height(220.0)
                                     .show(ui, |ui| {
-                                        let limit = config.branch_display_limit.max(50);
+                                        let limit = config.branch_display_limit.clamp(50, 500);
                                         let filtered =
                                             filter_branches(&repo.branches, &branch_filter, limit);
                                         for b in &filtered {
@@ -392,17 +393,20 @@ fn show_repo_row(
                                         }
                                     });
                             });
-                    // Außenklick schließt Popup
-                    if ui.ctx().input(|i| i.pointer.any_click()) {
+                    // Außenklick schließt Popup – tolerant (4px) für Scrollbar-Rand, nur primary
+                    if ui.ctx().input(|i| i.pointer.primary_clicked()) {
                         if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
                             let btn_rect = btn_resp.rect;
                             let win_rect = win_resp
                                 .as_ref()
                                 .map(|r| r.response.rect)
-                                .unwrap_or(egui::Rect::NOTHING);
+                                .unwrap_or(egui::Rect::NOTHING)
+                                .expand(4.0);
                             if !btn_rect.contains(pos) && !win_rect.contains(pos) {
                                 close_popup = true;
                             }
+                        } else {
+                            close_popup = true;
                         }
                     }
                     if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -518,6 +522,7 @@ fn show_repo_row(
                             .collapsible(false)
                             .resizable(false)
                             .title_bar(false)
+                            .movable(false)
                             .fixed_pos(sln_resp.rect.left_bottom())
                             .pivot(egui::Align2::LEFT_TOP)
                             .show(ui.ctx(), |ui| {
@@ -556,7 +561,7 @@ fn show_repo_row(
                                     .max_height(220.0)
                                     .show(ui, |ui| {
                                         let filter_lower = sln_filter.to_lowercase();
-                                        let limit = config.branch_display_limit.max(50);
+                                        let limit = config.branch_display_limit.clamp(50, 500);
                                         let mut shown = 0;
                                         for sln in &repo.solutions {
                                             if !filter_lower.is_empty()
@@ -617,16 +622,19 @@ fn show_repo_row(
                                         }
                                     });
                             });
-                    if ui.ctx().input(|i| i.pointer.any_click()) {
+                    if ui.ctx().input(|i| i.pointer.primary_clicked()) {
                         if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
                             let btn_rect = sln_resp.rect;
                             let win_rect = sln_win_resp
                                 .as_ref()
                                 .map(|r| r.response.rect)
-                                .unwrap_or(egui::Rect::NOTHING);
+                                .unwrap_or(egui::Rect::NOTHING)
+                                .expand(4.0);
                             if !btn_rect.contains(pos) && !win_rect.contains(pos) {
                                 sln_close_popup = true;
                             }
+                        } else {
+                            sln_close_popup = true;
                         }
                     }
                     if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {

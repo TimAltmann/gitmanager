@@ -38,10 +38,42 @@ pub struct SettingsState {
     prev_ide_args: std::collections::HashMap<String, Vec<String>>,
 }
 
+fn ensure_icon_orders(profile: &mut LanguageProfile, agents: &[AgentProfile]) {
+    // IDE order: fehlende ergänzen, entfernte entfernen, Reihenfolge behalten
+    let all_ids: Vec<String> = profile.ides.iter().map(|i| i.id.clone()).collect();
+    if profile.ide_order.is_empty() && !all_ids.is_empty() {
+        profile.ide_order = all_ids.clone();
+    } else {
+        for id in &all_ids {
+            if !profile.ide_order.contains(id) {
+                profile.ide_order.push(id.clone());
+            }
+        }
+        profile.ide_order.retain(|id| all_ids.contains(id));
+    }
+    // Agent order: analog, basierend auf allen globalen Agents
+    let all_agent_ids: Vec<String> = agents.iter().map(|a| a.id.clone()).collect();
+    if profile.agent_order.is_empty() && !all_agent_ids.is_empty() {
+        profile.agent_order = all_agent_ids.clone();
+    } else {
+        for id in &all_agent_ids {
+            if !profile.agent_order.contains(id) {
+                profile.agent_order.push(id.clone());
+            }
+        }
+        profile.agent_order.retain(|id| all_agent_ids.contains(id));
+    }
+}
+
 impl SettingsState {
     pub fn from_config(cfg: &AppConfig) -> Self {
+        let mut draft = cfg.clone();
+        // Icon-Reihenfolgen vervollständigen ohne Draft als dirty zu markieren
+        for profile in &mut draft.profiles {
+            ensure_icon_orders(profile, &draft.agents);
+        }
         Self {
-            draft: cfg.clone(),
+            draft,
             error: None,
             success: None,
             auto_detect_toast: None,
@@ -57,6 +89,38 @@ impl SettingsState {
             new_agent_name: String::new(),
             new_agent_program: String::new(),
             prev_ide_args: Default::default(),
+        }
+    }
+
+    /// Merged nur auto-erkannte VS/Rider Pfade aus neuer Config in den bestehenden Draft,
+    /// ohne sonstige Benutzer-Änderungen zu verwerfen.
+    pub fn merge_auto_detected(&mut self, new_cfg: &AppConfig) {
+        for new_profile in &new_cfg.profiles {
+            if let Some(draft_profile) = self
+                .draft
+                .profiles
+                .iter_mut()
+                .find(|p| p.id == new_profile.id)
+            {
+                for new_ide in &new_profile.ides {
+                    if let Some(draft_ide) =
+                        draft_profile.ides.iter_mut().find(|i| i.id == new_ide.id)
+                    {
+                        let is_vs = new_ide.id == "vs2022";
+                        let is_rider = new_ide.id == "rider";
+                        if (is_vs || is_rider) && draft_ide.program != new_ide.program {
+                            draft_ide.program = new_ide.program.clone();
+                        }
+                    }
+                }
+            }
+        }
+        // Branch-Limit NICHT automatisch übernehmen: würde Slider-Änderungen im offenen Settings-Draft clobbern.
+        // Auto-Erkennung ändert nur VS/Rider Programme, nicht das Limit. Limit wird erst beim nächsten
+        // Laden (from_config) oder explizitem Save übernommen.
+        // Agents haben sich nicht via Auto-Erkennung geändert, aber sicherstellen dass Orders vollständig
+        for profile in &mut self.draft.profiles {
+            ensure_icon_orders(profile, &self.draft.agents);
         }
     }
 }
@@ -393,6 +457,56 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                 .color(Color32::from_rgb(120, 120, 120)),
         );
     });
+    ui.add_space(8.0);
+
+    // Branch Anzeige Limit
+    ui.separator();
+    ui.add_space(8.0);
+    ui.label(RichText::new("Branch-Anzeige Limit").size(13.0).strong());
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(
+            "Maximale Anzahl Branches im Dropdown (50–500, Standard 200). Höhere Werte zeigen mehr Branches, können aber die Liste unübersichtlich machen.",
+        )
+        .size(11.0)
+        .color(Color32::from_rgb(100, 100, 100)),
+    );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Limit:");
+        let mut limit = state.draft.branch_display_limit;
+        let slider = egui::Slider::new(&mut limit, 50..=500)
+            .text("Branches")
+            .step_by(10.0);
+        if ui.add(slider).changed() {
+            state.draft.branch_display_limit = limit.clamp(50, 500);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Oder direkt:");
+        let mut l = state.draft.branch_display_limit;
+        if ui
+            .add(egui::DragValue::new(&mut l).range(50..=500).speed(1.0))
+            .changed()
+        {
+            state.draft.branch_display_limit = l.clamp(50, 500);
+        }
+        ui.label(
+            RichText::new(format!("(aktuell: {})", state.draft.branch_display_limit))
+                .size(11.0)
+                .color(Color32::from_rgb(120, 120, 120)),
+        );
+    });
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(format!(
+            "Zeigt bis zu {} Branches (Tippe zum Filtern, mehr anzeigen).",
+            state.draft.branch_display_limit
+        ))
+        .size(10.0)
+        .color(Color32::from_rgb(120, 120, 120))
+        .italics(),
+    );
     ui.add_space(8.0);
 
     // Aktives Profil global
@@ -761,12 +875,18 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         "vs2022" | "vs" | "visualstudio"
                                     );
                                     let is_rider = matches!(ide.id.as_str(), "rider" | "jetbrains");
-                                    if is_vs || is_rider {
-                                        if ui.small_button("Auto erkennen").on_hover_text("Pfad automatisch erkennen (vswhere / Toolbox)").clicked() {
+                                    if (is_vs || is_rider)
+                                        && ui
+                                            .small_button("Auto erkennen")
+                                            .on_hover_text(
+                                                "Pfad automatisch erkennen (vswhere / Toolbox)",
+                                            )
+                                            .clicked()
+                                    {
                                             let detected = if is_vs {
-                                                crate::git::resolve_vs_path()
+                                                crate::git::resolve_vs_path_force()
                                             } else {
-                                                crate::git::resolve_rider_path()
+                                                crate::git::resolve_rider_path_force()
                                             };
                                             if let Some(p) = detected {
                                                 ide.program = p.display().to_string();
@@ -791,7 +911,6 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                                 state.success = None;
                                             }
                                         }
-                                    }
                                 });
                                 ui.end_row();
                                 ui.label("Args:");
@@ -815,12 +934,15 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         };
                                     }
                                     if ui.checkbox(&mut ide.no_args, "Kein Argument").changed() {
+                                        let key = format!("{}:{}", profile.id, ide.id);
                                         if ide.no_args {
-                                            state
-                                                .prev_ide_args
-                                                .insert(ide.id.clone(), ide.args.clone());
+                                            state.prev_ide_args.insert(key, ide.args.clone());
                                             ide.args.clear();
-                                        } else if let Some(prev) = state.prev_ide_args.remove(&ide.id) {
+                                        } else if let Some(prev) = state
+                                            .prev_ide_args
+                                            .remove(&key)
+                                            .or_else(|| state.prev_ide_args.remove(&ide.id.clone()))
+                                        {
                                             if !prev.is_empty() {
                                                 ide.args = prev;
                                             } else {
@@ -1535,32 +1657,33 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         return;
     };
     if let Some(profile) = state.draft.profiles.get_mut(idx) {
-        // Sicherstellen, dass order Listen vollständig sind
-        // IDE order
-        if profile.ide_order.is_empty() && !profile.ides.is_empty() {
-            profile.ide_order = profile.ides.iter().map(|i| i.id.clone()).collect();
-        } else {
-            // fehlende IDs ergänzen, entfernte entfernen
-            let all_ids: Vec<String> = profile.ides.iter().map(|i| i.id.clone()).collect();
-            for id in &all_ids {
-                if !profile.ide_order.contains(id) {
-                    profile.ide_order.push(id.clone());
-                }
-            }
-            profile.ide_order.retain(|id| all_ids.contains(id));
-        }
-        // Agent order per profil – basierend auf allen agents, aber nur aktive relevant
+        // Effektive Orders berechnen ohne Draft jedes Frame zu mutieren (pure rendering)
+        let all_ids: Vec<String> = profile.ides.iter().map(|i| i.id.clone()).collect();
         let all_agent_ids: Vec<String> = state.draft.agents.iter().map(|a| a.id.clone()).collect();
-        if profile.agent_order.is_empty() && !all_agent_ids.is_empty() {
-            profile.agent_order = all_agent_ids.clone();
+        let effective_ide_order: Vec<String> = if profile.ide_order.is_empty() {
+            all_ids.clone()
         } else {
-            for id in &all_agent_ids {
-                if !profile.agent_order.contains(id) {
-                    profile.agent_order.push(id.clone());
+            let mut eff = profile.ide_order.clone();
+            eff.retain(|id| all_ids.contains(id));
+            for id in &all_ids {
+                if !eff.contains(id) {
+                    eff.push(id.clone());
                 }
             }
-            profile.agent_order.retain(|id| all_agent_ids.contains(id));
-        }
+            eff
+        };
+        let effective_agent_order: Vec<String> = if profile.agent_order.is_empty() {
+            all_agent_ids.clone()
+        } else {
+            let mut eff = profile.agent_order.clone();
+            eff.retain(|id| all_agent_ids.contains(id));
+            for id in &all_agent_ids {
+                if !eff.contains(id) {
+                    eff.push(id.clone());
+                }
+            }
+            eff
+        };
 
         ui.label(
             RichText::new(format!(
@@ -1578,7 +1701,7 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         ui.add_space(4.0);
         let mut ide_move: Option<(usize, isize)> = None;
         let mut ide_toggle: Option<String> = None;
-        for (order_idx, ide_id) in profile.ide_order.clone().iter().enumerate() {
+        for (order_idx, ide_id) in effective_ide_order.iter().enumerate() {
             let ide_opt = profile.ides.iter().find(|i| &i.id == ide_id);
             let Some(ide) = ide_opt else { continue };
             let is_hidden = profile.hidden_ide_ids.contains(ide_id);
@@ -1610,7 +1733,7 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                 .fit_to_exact_size(Vec2::splat(14.0)),
                         ))
                         .clicked()
-                        && order_idx + 1 < profile.ide_order.len()
+                        && order_idx + 1 < effective_ide_order.len()
                     {
                         ide_move = Some((order_idx, 1));
                     }
@@ -1635,6 +1758,10 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             }
         }
         if let Some((idx, delta)) = ide_move {
+            // Initialisiere Order falls leer (lazy)
+            if profile.ide_order.is_empty() {
+                profile.ide_order = effective_ide_order.clone();
+            }
             let new_idx = (idx as isize + delta) as usize;
             if new_idx < profile.ide_order.len() {
                 profile.ide_order.swap(idx, new_idx);
@@ -1680,8 +1807,7 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         ui.add_space(4.0);
         let mut agent_toggle: Option<String> = None;
         let mut agent_move: Option<(usize, isize)> = None;
-        let agent_order_clone = profile.agent_order.clone();
-        for (order_idx, agent_id) in agent_order_clone.iter().enumerate() {
+        for (order_idx, agent_id) in effective_agent_order.iter().enumerate() {
             let agent_opt = state.draft.agents.iter().find(|a| &a.id == agent_id);
             let Some(agent) = agent_opt else { continue };
             let is_hidden = profile.hidden_agent_ids.contains(agent_id);
@@ -1714,7 +1840,7 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                 .fit_to_exact_size(Vec2::splat(14.0)),
                         ))
                         .clicked()
-                        && order_idx + 1 < agent_order_clone.len()
+                        && order_idx + 1 < effective_agent_order.len()
                     {
                         agent_move = Some((order_idx, 1));
                     }
@@ -1739,6 +1865,9 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             }
         }
         if let Some((idx, delta)) = agent_move {
+            if profile.agent_order.is_empty() {
+                profile.agent_order = effective_agent_order.clone();
+            }
             let new_idx = (idx as isize + delta) as usize;
             if new_idx < profile.agent_order.len() {
                 profile.agent_order.swap(idx, new_idx);

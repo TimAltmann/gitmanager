@@ -692,16 +692,34 @@ impl AppConfig {
             let _ = cfg.save();
         }
         if cfg.config_version < 6 {
-            // v6: branch_display_limit + vscode default "." + no_args flag
+            // v6: branch_display_limit + vscode default "." + no_args flag + {repo} Warnung
             if cfg.branch_display_limit == 0 {
                 cfg.branch_display_limit = default_branch_limit();
             }
-            // Migrate vscode args from {file} to "." if still default
+            // Migrate vscode args from {file} to "." if still default (auch mit Zusatzflags)
             for p in &mut cfg.profiles {
                 for ide in &mut p.ides {
-                    if ide.id == "vscode" && ide.args == vec!["{file}".to_string()] && !ide.no_args
+                    if ide.id == "vscode"
+                        && !ide.no_args
+                        && ide.args.first().map(|s| s == "{file}").unwrap_or(false)
                     {
-                        ide.args = vec![".".to_string()];
+                        if ide.args.len() == 1 {
+                            ide.args = vec![".".to_string()];
+                        } else {
+                            ide.args[0] = ".".to_string();
+                        }
+                    }
+                    // Historisch getrennte Flags synchronisieren nur einmalig für Migration
+                    // (danach bleiben sie unabhängig – vermeidet ungewolltes allow_unsafe=true)
+                    if ide.use_shell && !ide.allow_unsafe {
+                        ide.allow_unsafe = true;
+                    }
+                    // {repo} bedeutete früher Datei, jetzt Repo-Root – warnen wenn noch genutzt
+                    if ide.args.iter().any(|a| a.contains("{repo}")) {
+                        eprintln!(
+                            "Warnung: IDE '{}' nutzt {{repo}} – seit v6 bedeutet {{repo}} Repo-Root (früher Datei). Prüfe Args: {:?}",
+                            ide.id, ide.args
+                        );
                     }
                 }
             }
@@ -711,12 +729,7 @@ impl AppConfig {
         if cfg.branch_display_limit == 0 {
             cfg.branch_display_limit = default_branch_limit();
         }
-        if cfg.branch_display_limit < 50 {
-            cfg.branch_display_limit = 50;
-        }
-        if cfg.branch_display_limit > 500 {
-            cfg.branch_display_limit = 500;
-        }
+        cfg.branch_display_limit = cfg.branch_display_limit.clamp(50, 500);
         if cfg.max_depth == 0 {
             cfg.max_depth = 2;
         }
@@ -765,12 +778,9 @@ impl AppConfig {
             if p.id.is_empty() {
                 p.id = "custom".to_string();
             }
-            // IDEs: synchronisiere use_shell / allow_unsafe (historisch getrennte Flags)
-            for ide in &mut p.ides {
-                let unsafe_enabled = ide.allow_unsafe || ide.use_shell;
-                ide.allow_unsafe = unsafe_enabled;
-                ide.use_shell = unsafe_enabled;
-            }
+            // IDE Flags bleiben unabhängig (kein automatisches Sync mehr – vermeidet ungewolltes allow_unsafe=true).
+            // Migration für alte Configs erfolgt einmalig im v6-Block oben.
+            // Hinweis zu {repo} nur einmalig während Migration (oben), nicht bei jedem Laden – vermeidet Spam in Tests/Logs.
             // Default IDE validieren
             if let Some(def) = &p.default_ide_id {
                 if !p.ides.iter().any(|i| &i.id == def) {

@@ -32,7 +32,7 @@ pub struct MyApp {
     scan_rx: Receiver<ScanResult>,
     launch_err_tx: Sender<String>,
     launch_err_rx: Receiver<String>,
-    config_update_rx: Receiver<AppConfig>,
+    config_update_rx: Receiver<Result<AppConfig, String>>,
     status_message: Option<String>,
     status_message_time: Option<std::time::Instant>,
     branch_dialog: Option<BranchDialog>,
@@ -52,7 +52,7 @@ impl MyApp {
 
         let (tx, rx) = mpsc::channel();
         let (launch_err_tx, launch_err_rx) = mpsc::channel();
-        let (config_update_tx, config_update_rx) = mpsc::channel();
+        let (config_update_tx, config_update_rx) = mpsc::channel::<Result<AppConfig, String>>();
 
         let mut app = Self {
             config,
@@ -82,16 +82,18 @@ impl MyApp {
                 let mut need_save = false;
                 for profile in &mut cfg.profiles {
                     for ide in &mut profile.ides {
-                        if ide.id == "vs2022"
-                            && (ide.program == "devenv" || ide.program == "devenv.exe")
-                        {
+                        let prog_lower = ide.program.to_lowercase();
+                        let is_vs_program = matches!(prog_lower.as_str(), "devenv" | "devenv.exe");
+                        let is_rider_program = matches!(
+                            prog_lower.as_str(),
+                            "rider" | "rider.exe" | "rider64.exe" | "rider.cmd"
+                        );
+                        if ide.id == "vs2022" && is_vs_program {
                             if let Some(p) = crate::git::resolve_vs_path() {
                                 ide.program = p.display().to_string();
                                 need_save = true;
                             }
-                        } else if ide.id == "rider"
-                            && (ide.program == "rider" || ide.program == "rider64.exe")
-                        {
+                        } else if ide.id == "rider" && is_rider_program {
                             if let Some(p) = crate::git::resolve_rider_path() {
                                 ide.program = p.display().to_string();
                                 need_save = true;
@@ -100,8 +102,16 @@ impl MyApp {
                     }
                 }
                 if need_save {
-                    let _ = cfg.save();
-                    let _ = tx.send(cfg);
+                    match cfg.save() {
+                        Ok(()) => {
+                            let _ = tx.send(Ok(cfg));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(format!(
+                                "Config Auto-Erkennung speichern fehlgeschlagen: {e:#}"
+                            )));
+                        }
+                    }
                 }
             });
         }
@@ -135,17 +145,34 @@ impl MyApp {
         }
         while let Ok(err) = self.launch_err_rx.try_recv() {
             self.error = Some(err);
+            self.status_message = None;
+            self.status_message_time = None;
             ctx.request_repaint();
         }
-        while let Ok(cfg) = self.config_update_rx.try_recv() {
-            self.config = cfg;
-            // SettingsState neu laden falls Settings offen
-            if self.show_settings {
-                self.settings_state = Some(SettingsState::from_config(&self.config));
+        while let Ok(res) = self.config_update_rx.try_recv() {
+            match res {
+                Ok(cfg) => {
+                    self.config = cfg;
+                    self.error = None;
+                    // Settings offen: nicht kompletten Draft verwerfen, nur auto-erkannte Programme mergen
+                    if self.show_settings {
+                        if let Some(state) = self.settings_state.as_mut() {
+                            state.merge_auto_detected(&self.config);
+                        } else {
+                            self.settings_state = Some(SettingsState::from_config(&self.config));
+                        }
+                    }
+                    self.status_message = Some(tr(self.config.language, "saved_scan_restart"));
+                    self.status_message_time = Some(std::time::Instant::now());
+                    ctx.request_repaint();
+                }
+                Err(err_msg) => {
+                    self.error = Some(err_msg);
+                    self.status_message = None;
+                    self.status_message_time = None;
+                    ctx.request_repaint();
+                }
             }
-            self.status_message = Some(tr(self.config.language, "saved_scan_restart"));
-            self.status_message_time = Some(std::time::Instant::now());
-            ctx.request_repaint();
         }
         if self.scanning {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
