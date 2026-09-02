@@ -35,9 +35,7 @@ where
     F: FnOnce() -> Option<PathBuf>,
 {
     // Fast path: check TTL without holding lock during compute
-    if let Some((cached, instant)) =
-        cache.lock().unwrap_or_else(|e| e.into_inner()).clone()
-    {
+    if let Some((cached, instant)) = cache.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         if instant.elapsed() < VS_RIDER_CACHE_TTL {
             return cached;
         }
