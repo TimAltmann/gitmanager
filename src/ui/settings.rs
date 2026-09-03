@@ -301,7 +301,7 @@ pub fn show_settings_window(
                                                 valid = false;
                                                 break;
                                             }
-                                            let nid = sel.id.trim().to_lowercase();
+                                            let nid = sel.id.trim().to_lowercase().replace(' ', "_");
                                             if !seen.insert(nid) {
                                                 state.error = Some(format!(
                                                     "Doppelte Selector-ID '{}' in Profil '{}'",
@@ -1295,7 +1295,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                 );
                                 ui.end_row();
                                 ui.label("Custom erlauben:");
-                                ui.checkbox(&mut sel.allow_custom, "");
+                                ui.checkbox(&mut sel.allow_custom, "erlauben");
                                 ui.end_row();
                             });
                         ui.add_space(6.0);
@@ -1332,7 +1332,6 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                     label: format!("Option {}", n),
                                 });
                             }
-                            ui.checkbox(&mut sel.allow_custom, "Custom Werte erlauben");
                         });
                         if sel.options.is_empty() {
                             ui.label(
