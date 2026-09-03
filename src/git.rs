@@ -1,4 +1,5 @@
 use git2::{BranchType, Repository, StatusOptions};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -73,6 +74,8 @@ pub struct RepoInfo {
     pub branches: Vec<String>,
     pub solutions: Vec<SolutionFile>,
     pub selected_solution: Option<PathBuf>,
+    pub custom_values: HashMap<String, String>,
+    pub custom_errors: HashMap<String, String>,
 }
 
 impl RepoInfo {
@@ -90,6 +93,8 @@ impl RepoInfo {
             branches: Vec::new(),
             solutions: Vec::new(),
             selected_solution: None,
+            custom_values: HashMap::new(),
+            custom_errors: HashMap::new(),
         }
     }
 

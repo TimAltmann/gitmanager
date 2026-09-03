@@ -1,7 +1,7 @@
 use crate::config::{AppConfig, LanguageProfile};
 use crate::git::{get_repo_info, RepoInfo, SolutionFile};
 use rayon::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -79,6 +79,26 @@ pub fn scan_repos(config: &AppConfig) -> Vec<RepoInfo> {
         }
         repo.solutions = solutions;
         repo.selected_solution = selected;
+        let mut cvals = HashMap::new();
+        let mut cerrs = HashMap::new();
+        for sel in &profile.config_selectors {
+            match crate::config_parser::read_xml_value(&repo.path, sel) {
+                Ok(Some(v)) => {
+                    cvals.insert(sel.id.clone(), v);
+                }
+                Ok(None) => {
+                    cerrs.insert(
+                        sel.id.clone(),
+                        format!("Key '{}' nicht gefunden in {}", sel.key, sel.file_path),
+                    );
+                }
+                Err(e) => {
+                    cerrs.insert(sel.id.clone(), e);
+                }
+            }
+        }
+        repo.custom_values = cvals;
+        repo.custom_errors = cerrs;
     });
 
     all_repos
@@ -187,7 +207,7 @@ fn scan_single_root(root: &Path, max_depth: usize) -> Vec<RepoInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, LanguageProfile};
+    use crate::config::{AppConfig, ConfigSelector, LanguageProfile};
     use git2::Repository;
     use std::fs;
     use tempfile::tempdir;
@@ -781,5 +801,35 @@ mod tests {
         profile.file_extension = "sln".to_string();
         let sols3 = scan_solutions_for_repo(&repo, &profile);
         assert_eq!(sols3.len(), 1);
+    }
+
+    #[test]
+    fn scan_repos_populates_custom_values_per_profile() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let repo = root.join("repo");
+        fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        fs::write(
+            repo.join("App.config"),
+            r#"<configuration><appSettings><add key="Database" value="dev"/></appSettings></configuration>"#,
+        )
+        .unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.roots = vec![root.to_path_buf()];
+        cfg.max_depth = 1;
+        cfg.profiles[0].config_selectors.push(ConfigSelector {
+            id: "db".to_string(),
+            display_name: "DB".to_string(),
+            file_path: "App.config".to_string(),
+            key: "Database".to_string(),
+            key_attribute: "key".to_string(),
+            value_attribute: "value".to_string(),
+            kind: crate::config::XmlSelectorKind::AddKeyValue,
+            options: vec![],
+            allow_custom: false,
+        });
+        let repos = scan_repos(&cfg);
+        assert_eq!(repos[0].custom_values.get("db"), Some(&"dev".to_string()));
     }
 }
