@@ -1114,6 +1114,7 @@ mod tests {
                 agent_order: Vec::new(),
                 show_shell: true,
                 show_explorer: true,
+                config_selectors: Vec::new(),
             });
         }
         cfg.active_profile_id = new_profile.to_string();

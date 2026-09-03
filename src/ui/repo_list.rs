@@ -1076,6 +1076,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         });
         let path = PathBuf::from("/tmp/repo");
         assert!(cfg.get_repo_state(&path).is_none());
@@ -1173,6 +1174,7 @@ mod tests {
             agent_order: vec![],
             show_shell: false,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         let visible = profile.visible_ides();
         assert_eq!(visible.len(), 1);

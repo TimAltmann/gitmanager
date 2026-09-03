@@ -1337,6 +1337,7 @@ dependencies = [
  "image",
  "rayon",
  "rfd",
+ "roxmltree",
  "serde",
  "serde_json",
  "tempfile",

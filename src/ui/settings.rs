@@ -594,6 +594,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     agent_order: Vec::new(),
                     show_shell: true,
                     show_explorer: true,
+                    config_selectors: Vec::new(),
                 });
                 state.selected_profile_idx = Some(state.draft.profiles.len() - 1);
             }
@@ -744,6 +745,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         agent_order: Vec::new(),
                         show_shell: true,
                         show_explorer: true,
+                        config_selectors: Vec::new(),
                     });
                     state.selected_profile_idx = Some(state.draft.profiles.len() - 1);
                     state.new_profile_name.clear();
@@ -2075,6 +2077,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         });
         state.selected_profile_idx = Some(state.draft.profiles.len() - 1);
         assert_eq!(state.draft.profiles.len(), len_before + 1);
@@ -2140,6 +2143,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         });
         state.draft.profiles.remove(0);
         assert_eq!(state.draft.profiles.len(), 1);
@@ -2206,6 +2210,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         });
         state.draft.active_profile_id = "rust".to_string();
         assert_eq!(state.draft.active_profile_id, "rust");
@@ -2252,6 +2257,7 @@ mod tests {
                 agent_order: Vec::new(),
                 show_shell: true,
                 show_explorer: true,
+                config_selectors: Vec::new(),
             });
             assert_eq!(ext, ".rs");
             assert_eq!(id, "rust");
@@ -2425,6 +2431,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         });
         state.selected_profile_idx = Some(1);
         // delete idx 0, selection should adjust -1

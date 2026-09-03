@@ -2233,6 +2233,7 @@ mod tests {
             agent_order: vec![],
             show_shell: false,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         let visible = profile.visible_ides();
         assert_eq!(visible.len(), 1);

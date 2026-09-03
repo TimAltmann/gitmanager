@@ -517,6 +517,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         let sols = scan_solutions_for_repo(&repo, &profile);
         assert_eq!(sols.len(), 1);
@@ -544,6 +545,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         // create deep file at depth 5 (repo/a/b/c/d/e/file.txt) -> should be ignored because capped at 4
         let deep = repo.join("a/b/c/d/e");
@@ -585,6 +587,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         let repos = scan_repos(&cfg);
         // repo2 should have truncated solutions to 20 when via scan_repos
@@ -617,6 +620,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         let sols = scan_solutions_for_repo(&repo, &profile);
         assert!(
@@ -647,6 +651,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         let sols = scan_solutions_for_repo(&repo, &profile);
         assert_eq!(sols.len(), 1);
@@ -681,6 +686,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         let mut sols = scan_solutions_for_repo(&repo, &profile);
         sols.sort_by(|a, b| {
@@ -719,6 +725,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         let sols = scan_solutions_for_repo(&repo, &profile);
         assert!(sols.iter().any(|s| s.relative.ends_with("a.sln")));
@@ -749,6 +756,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         // normalized to .sln
         assert_eq!(profile.normalized_extension(), ".sln");

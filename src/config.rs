@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 // --- Default helpers ---
 fn default_config_version() -> u32 {
-    6
+    7
 }
 fn default_active_profile() -> String {
     "dotnet".to_string()
@@ -142,6 +142,41 @@ fn default_true() -> bool {
     true
 }
 
+fn default_key_attr() -> String {
+    "key".to_string()
+}
+fn default_val_attr() -> String {
+    "value".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigOption {
+    pub value: String,
+    pub label: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum XmlSelectorKind {
+    #[default]
+    AddKeyValue,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigSelector {
+    pub id: String,
+    pub display_name: String,
+    pub file_path: String,
+    pub key: String,
+    #[serde(default = "default_key_attr")]
+    pub key_attribute: String,
+    #[serde(default = "default_val_attr")]
+    pub value_attribute: String,
+    #[serde(default)]
+    pub kind: XmlSelectorKind,
+    pub options: Vec<ConfigOption>,
+    #[serde(default)]
+    pub allow_custom: bool,
+}
+
 // --- Language Profile ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageProfile {
@@ -171,6 +206,8 @@ pub struct LanguageProfile {
     pub show_shell: bool,
     #[serde(default = "default_true")]
     pub show_explorer: bool,
+    #[serde(default)]
+    pub config_selectors: Vec<ConfigSelector>,
 }
 
 impl LanguageProfile {
@@ -353,6 +390,7 @@ fn default_dotnet_profile() -> LanguageProfile {
         agent_order: Vec::new(),
         show_shell: true,
         show_explorer: true,
+        config_selectors: Vec::new(),
     }
 }
 
@@ -726,6 +764,24 @@ impl AppConfig {
             cfg.config_version = 6;
             let _ = cfg.save();
         }
+        if cfg.config_version < 7 {
+            for p in &mut cfg.profiles {
+                for sel in &mut p.config_selectors {
+                    sel.id = sel.id.trim().to_lowercase().replace(' ', "_");
+                    sel.file_path = sel.file_path.trim().to_string();
+                    sel.key = sel.key.trim().to_string();
+                    if sel.key_attribute.trim().is_empty() {
+                        sel.key_attribute = "key".to_string();
+                    }
+                    if sel.value_attribute.trim().is_empty() {
+                        sel.value_attribute = "value".to_string();
+                    }
+                    sel.options.retain(|o| !o.value.trim().is_empty());
+                }
+            }
+            cfg.config_version = 7;
+            let _ = cfg.save();
+        }
         if cfg.branch_display_limit == 0 {
             cfg.branch_display_limit = default_branch_limit();
         }
@@ -807,6 +863,19 @@ impl AppConfig {
             {
                 let mut seen = std::collections::HashSet::new();
                 p.agent_order.retain(|id| seen.insert(id.clone()));
+            }
+            // Config selectors normalisieren (analog file_extension etc.)
+            for sel in &mut p.config_selectors {
+                sel.id = sel.id.trim().to_lowercase().replace(' ', "_");
+                sel.file_path = sel.file_path.trim().to_string();
+                sel.key = sel.key.trim().to_string();
+                if sel.key_attribute.trim().is_empty() {
+                    sel.key_attribute = "key".to_string();
+                }
+                if sel.value_attribute.trim().is_empty() {
+                    sel.value_attribute = "value".to_string();
+                }
+                sel.options.retain(|o| !o.value.trim().is_empty());
             }
         }
         // Duplikate bei Profilen entfernen (letztes gewinnt)
@@ -1309,6 +1378,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         assert_eq!(p.normalized_extension(), ".sln");
         let p2 = LanguageProfile {
@@ -1334,6 +1404,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         assert_eq!(p.normalized_extension(), ".sln");
         let p2 = LanguageProfile {
@@ -1359,6 +1430,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         assert_eq!(p.normalized_extension(), ".sln");
     }
@@ -1379,6 +1451,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         assert!(p.matches_file(Path::new("foo.sln")));
         assert!(p.matches_file(Path::new("FOO.SLN")));
@@ -1401,6 +1474,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         assert!(p.matches_file(Path::new("Cargo.toml")));
         assert!(!p.matches_file(Path::new("foo.toml")));
@@ -1423,6 +1497,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         assert!(p.matches_file(Path::new("main.rs")));
         assert!(p.matches_file(Path::new("MAIN.RS")));
@@ -1446,6 +1521,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         assert!(p.matches_file(Path::new("pom.xml")));
         assert!(!p.matches_file(Path::new("build.gradle")));
@@ -1467,6 +1543,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         assert!(p.matches_file(Path::new("pom.xml")));
         assert!(p.matches_file(Path::new("build.gradle")));
@@ -1495,6 +1572,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         assert!(!p.matches_file(Path::new("Makefile")));
     }
@@ -1529,6 +1607,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         let json = serde_json::to_string(&p).unwrap();
         let de: LanguageProfile = serde_json::from_str(&json).unwrap();
@@ -1649,7 +1728,7 @@ mod tests {
     fn config_default_has_valid_state() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.max_depth, 2);
-        assert_eq!(cfg.config_version, 6);
+        assert_eq!(cfg.config_version, 7);
         assert_eq!(cfg.active_profile_id, "dotnet");
         assert!(!cfg.profiles.is_empty());
         assert_eq!(cfg.agents.len(), 6);
@@ -1810,6 +1889,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         });
         let path = PathBuf::from("/tmp/repo");
         // without override -> active (dotnet)
@@ -1924,7 +2004,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded.roots.len(), 2);
         assert_eq!(loaded.max_depth, 3);
-        assert_eq!(loaded.config_version, 6);
+        assert_eq!(loaded.config_version, 7);
     }
 
     #[test]
@@ -1993,6 +2073,7 @@ mod tests {
                 agent_order: Vec::new(),
                 show_shell: true,
                 show_explorer: true,
+                config_selectors: Vec::new(),
             });
         }
         // simulate v4 migration retain logic
@@ -2024,6 +2105,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         });
         let has_custom = cfg.profiles.iter().any(|p| p.id == "custom");
         assert!(has_custom);
@@ -2091,6 +2173,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         // simulate validation
         p.file_extension = p.normalized_extension();
@@ -2120,6 +2203,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         p2.id = p2.id.trim().to_lowercase();
         if p2.id.is_empty() {
@@ -2146,6 +2230,7 @@ mod tests {
                 agent_order: Vec::new(),
                 show_shell: true,
                 show_explorer: true,
+                config_selectors: Vec::new(),
             },
             LanguageProfile {
                 id: "dotnet".to_string(),
@@ -2161,6 +2246,7 @@ mod tests {
                 agent_order: Vec::new(),
                 show_shell: true,
                 show_explorer: true,
+                config_selectors: Vec::new(),
             },
         ];
         // dedup like try_load
@@ -2244,6 +2330,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         assert_eq!(p.normalized_extension(), ".sln");
         p.file_extension = ".SLN".to_string();
@@ -2266,6 +2353,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         assert!(p.matches_file(Path::new("foo.sln")));
         assert!(p.matches_file(Path::new("FOO.SLN")));
@@ -2285,6 +2373,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         assert!(p2.matches_file(Path::new("Cargo.toml")));
         assert!(!p2.matches_file(Path::new("foo.toml")));
@@ -2324,6 +2413,7 @@ mod tests {
             agent_order: Vec::new(),
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         p.id = p.id.trim().to_lowercase();
         assert_eq!(p.id, "dotnet");
@@ -2444,6 +2534,7 @@ mod tests {
             agent_order: vec![],
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         let visible = p.visible_ides();
         // a is hidden, so only c and b in order c,b
@@ -2473,6 +2564,7 @@ mod tests {
             agent_order: vec!["gemini".to_string(), "claude".to_string()],
             show_shell: true,
             show_explorer: true,
+            config_selectors: Vec::new(),
         };
         let active = vec![
             "claude".to_string(),
@@ -2493,5 +2585,31 @@ mod tests {
         assert!(p.show_explorer);
         assert!(p.hidden_ide_ids.is_empty());
         assert!(p.ide_order.is_empty());
+    }
+
+    #[test]
+    fn config_selector_default_and_serde() {
+        let sel = ConfigSelector {
+            id: "db".into(),
+            display_name: "Datenbank".into(),
+            file_path: "App.config".into(),
+            key: "Database".into(),
+            key_attribute: "key".into(),
+            value_attribute: "value".into(),
+            kind: XmlSelectorKind::AddKeyValue,
+            options: vec![ConfigOption {
+                value: "dev".into(),
+                label: "Dev".into(),
+            }],
+            allow_custom: false,
+        };
+        let json = serde_json::to_string(&sel).unwrap();
+        let de: ConfigSelector = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.id, "db");
+    }
+    #[test]
+    fn profile_has_config_selectors_empty_by_default() {
+        let cfg = AppConfig::default();
+        assert!(cfg.get_active_profile().config_selectors.is_empty());
     }
 }
