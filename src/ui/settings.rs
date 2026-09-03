@@ -248,6 +248,73 @@ pub fn show_settings_window(
                                         valid = false;
                                         break;
                                     }
+                                    // Validierung Config-Selektoren (pro Profil)
+                                    {
+                                        use std::collections::HashSet;
+                                        let mut seen: HashSet<String> = HashSet::new();
+                                        for sel in &p.config_selectors {
+                                            if sel.id.trim().is_empty() {
+                                                state.error = Some(format!(
+                                                    "Selector in Profil '{}' hat leere ID",
+                                                    p.display_name
+                                                ));
+                                                valid = false;
+                                                break;
+                                            }
+                                            if sel.display_name.trim().is_empty() {
+                                                state.error = Some(format!(
+                                                    "Selector '{}' in Profil '{}' braucht Anzeigename",
+                                                    sel.id, p.display_name
+                                                ));
+                                                valid = false;
+                                                break;
+                                            }
+                                            if sel.file_path.trim().is_empty() {
+                                                state.error = Some(format!(
+                                                    "Selector '{}' in Profil '{}' braucht Dateipfad",
+                                                    sel.id, p.display_name
+                                                ));
+                                                valid = false;
+                                                break;
+                                            }
+                                            if sel.key.trim().is_empty() {
+                                                state.error = Some(format!(
+                                                    "Selector '{}' in Profil '{}' braucht Key",
+                                                    sel.id, p.display_name
+                                                ));
+                                                valid = false;
+                                                break;
+                                            }
+                                            if sel.key_attribute.trim().is_empty() {
+                                                state.error = Some(format!(
+                                                    "Selector '{}' in Profil '{}' braucht Key-Attribut",
+                                                    sel.id, p.display_name
+                                                ));
+                                                valid = false;
+                                                break;
+                                            }
+                                            if sel.value_attribute.trim().is_empty() {
+                                                state.error = Some(format!(
+                                                    "Selector '{}' in Profil '{}' braucht Value-Attribut",
+                                                    sel.id, p.display_name
+                                                ));
+                                                valid = false;
+                                                break;
+                                            }
+                                            let nid = sel.id.trim().to_lowercase();
+                                            if !seen.insert(nid) {
+                                                state.error = Some(format!(
+                                                    "Doppelte Selector-ID '{}' in Profil '{}'",
+                                                    sel.id, p.display_name
+                                                ));
+                                                valid = false;
+                                                break;
+                                            }
+                                        }
+                                        if !valid {
+                                            break;
+                                        }
+                                    }
                                 }
                                 if valid {
                                     match state.draft.clone().save() {
@@ -1064,6 +1131,272 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         }
                     });
             });
+
+            // ── Config-Dropdowns für dieses Profil ───────────────────────
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Config-Dropdowns für dieses Profil")
+                    .size(13.0)
+                    .strong(),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "XML-Werte aus .config Dateien als Dropdowns in der Repo-Zeile. Jeder Selector liest/schreibt einen Key in file_path (z.B. App.config <add key=\"Database\" value=\"...\"/>).",
+                )
+                .size(11.0)
+                .color(Color32::from_rgb(100, 100, 100)),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("Selektoren ({}):", profile.config_selectors.len()))
+                        .size(12.0)
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("＋ Selector hinzufügen").clicked() {
+                        let mut max_n = 0;
+                        for sel in &profile.config_selectors {
+                            if let Some(suffix) = sel.id.strip_prefix("selector") {
+                                if let Ok(n) = suffix.parse::<usize>() {
+                                    if n > max_n {
+                                        max_n = n;
+                                    }
+                                }
+                            }
+                        }
+                        let new_id = format!("selector{}", max_n + 1);
+                        profile.config_selectors.push(crate::config::ConfigSelector {
+                            id: new_id,
+                            display_name: "Neuer Selector".to_string(),
+                            file_path: "App.config".to_string(),
+                            key: "Database".to_string(),
+                            key_attribute: "key".to_string(),
+                            value_attribute: "value".to_string(),
+                            kind: crate::config::XmlSelectorKind::AddKeyValue,
+                            options: vec![
+                                crate::config::ConfigOption {
+                                    value: "dev".to_string(),
+                                    label: "Dev".to_string(),
+                                },
+                                crate::config::ConfigOption {
+                                    value: "prod".to_string(),
+                                    label: "Prod".to_string(),
+                                },
+                            ],
+                            allow_custom: false,
+                        });
+                    }
+                });
+            });
+            ui.add_space(6.0);
+
+            let sel_count = profile.config_selectors.len();
+            let mut to_remove_sel: Option<usize> = None;
+            let mut sel_move: Option<(usize, isize)> = None;
+            for (sel_idx, sel) in profile.config_selectors.iter_mut().enumerate() {
+                let visuals = ui.visuals();
+                egui::Frame::new()
+                    .fill(visuals.widgets.inactive.bg_fill)
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        visuals.widgets.inactive.fg_stroke.color,
+                    ))
+                    .corner_radius(6)
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Selector {}: {} ({})",
+                                    sel_idx + 1,
+                                    sel.display_name,
+                                    sel.id
+                                ))
+                                .size(11.0)
+                                .strong(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("✕").on_hover_text("Löschen").clicked() {
+                                        to_remove_sel = Some(sel_idx);
+                                    }
+                                    if ui
+                                        .add(egui::Button::image(
+                                            egui::Image::new(ICON_CHEVRON_DOWN)
+                                                .fit_to_exact_size(Vec2::splat(14.0)),
+                                        ))
+                                        .clicked()
+                                        && sel_idx + 1 < sel_count
+                                    {
+                                        sel_move = Some((sel_idx, 1));
+                                    }
+                                    if ui
+                                        .add(egui::Button::image(
+                                            egui::Image::new(ICON_CHEVRON_UP)
+                                                .fit_to_exact_size(Vec2::splat(14.0)),
+                                        ))
+                                        .clicked()
+                                        && sel_idx > 0
+                                    {
+                                        sel_move = Some((sel_idx, -1));
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(4.0);
+                        egui::Grid::new(format!("selector_edit_{}_{}", idx, sel_idx))
+                            .num_columns(2)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("ID:");
+                                let mut id = sel.id.clone();
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut id).hint_text("db"),
+                                    )
+                                    .changed()
+                                {
+                                    sel.id = id.trim().to_lowercase().replace(' ', "_");
+                                }
+                                ui.end_row();
+                                ui.label("Anzeigename:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut sel.display_name)
+                                        .hint_text("Datenbank"),
+                                );
+                                ui.end_row();
+                                ui.label("Datei:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut sel.file_path)
+                                        .hint_text("App.config"),
+                                );
+                                ui.end_row();
+                                ui.label("Key:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut sel.key)
+                                        .hint_text("Database"),
+                                );
+                                ui.end_row();
+                                ui.label("Key-Attribut:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut sel.key_attribute)
+                                        .hint_text("key"),
+                                );
+                                ui.end_row();
+                                ui.label("Value-Attribut:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut sel.value_attribute)
+                                        .hint_text("value"),
+                                );
+                                ui.end_row();
+                                ui.label("Custom erlauben:");
+                                ui.checkbox(&mut sel.allow_custom, "");
+                                ui.end_row();
+                            });
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Optionen:").size(11.0).strong());
+                        ui.add_space(2.0);
+                        let mut to_remove_opt: Option<usize> = None;
+                        for (opt_idx, opt) in sel.options.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("{}:", opt_idx + 1));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut opt.value)
+                                        .hint_text("value")
+                                        .desired_width(90.0),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut opt.label)
+                                        .hint_text("Label")
+                                        .desired_width(120.0),
+                                );
+                                if ui.small_button("✕").on_hover_text("Option löschen").clicked() {
+                                    to_remove_opt = Some(opt_idx);
+                                }
+                            });
+                            ui.add_space(2.0);
+                        }
+                        if let Some(o_idx) = to_remove_opt {
+                            sel.options.remove(o_idx);
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.small_button("＋ Option").clicked() {
+                                let n = sel.options.len() + 1;
+                                sel.options.push(crate::config::ConfigOption {
+                                    value: format!("value{}", n),
+                                    label: format!("Option {}", n),
+                                });
+                            }
+                            ui.checkbox(&mut sel.allow_custom, "Custom Werte erlauben");
+                        });
+                        if sel.options.is_empty() {
+                            ui.label(
+                                RichText::new("Keine Optionen – füge Werte hinzu oder erlaube Custom.")
+                                    .size(10.0)
+                                    .color(Color32::from_rgb(140, 140, 140))
+                                    .italics(),
+                            );
+                        }
+                    });
+                ui.add_space(4.0);
+            }
+            if let Some(s_idx) = to_remove_sel {
+                profile.config_selectors.remove(s_idx);
+            }
+            if let Some((s_idx, delta)) = sel_move {
+                let new_idx = (s_idx as isize + delta) as usize;
+                if new_idx < profile.config_selectors.len() {
+                    profile.config_selectors.swap(s_idx, new_idx);
+                }
+            }
+            if profile.config_selectors.is_empty() {
+                ui.label(
+                    RichText::new(
+                        "Keine Selektoren konfiguriert. Füge einen hinzu, um XML-Werte per Dropdown zu steuern.",
+                    )
+                    .italics()
+                    .color(Color32::from_rgb(140, 140, 140)),
+                );
+                ui.add_space(4.0);
+            }
+            if ui.button("＋ Selector hinzufügen").clicked() {
+                let mut max_n = 0;
+                for sel in &profile.config_selectors {
+                    if let Some(suffix) = sel.id.strip_prefix("selector") {
+                        if let Ok(n) = suffix.parse::<usize>() {
+                            if n > max_n {
+                                max_n = n;
+                            }
+                        }
+                    }
+                }
+                let new_id = format!("selector{}", max_n + 1);
+                profile.config_selectors.push(crate::config::ConfigSelector {
+                    id: new_id,
+                    display_name: "Neuer Selector".to_string(),
+                    file_path: "App.config".to_string(),
+                    key: "Database".to_string(),
+                    key_attribute: "key".to_string(),
+                    value_attribute: "value".to_string(),
+                    kind: crate::config::XmlSelectorKind::AddKeyValue,
+                    options: vec![
+                        crate::config::ConfigOption {
+                            value: "dev".to_string(),
+                            label: "Dev".to_string(),
+                        },
+                        crate::config::ConfigOption {
+                            value: "prod".to_string(),
+                            label: "Prod".to_string(),
+                        },
+                    ],
+                    allow_custom: false,
+                });
+            }
         }
     }
 }
@@ -2443,5 +2776,27 @@ mod tests {
             }
         }
         assert_eq!(state.selected_profile_idx, Some(0));
+    }
+
+    #[test]
+    fn settings_add_config_selector_to_profile() {
+        let mut cfg = AppConfig::default();
+        let p = &mut cfg.profiles[0];
+        assert!(p.config_selectors.is_empty());
+        p.config_selectors.push(crate::config::ConfigSelector {
+            id: "db".into(),
+            display_name: "Datenbank".into(),
+            file_path: "App.config".into(),
+            key: "Database".into(),
+            key_attribute: "key".into(),
+            value_attribute: "value".into(),
+            kind: crate::config::XmlSelectorKind::AddKeyValue,
+            options: vec![crate::config::ConfigOption {
+                value: "dev".into(),
+                label: "Dev".into(),
+            }],
+            allow_custom: false,
+        });
+        assert_eq!(p.config_selectors.len(), 1);
     }
 }
