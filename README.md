@@ -79,7 +79,8 @@ After building: double-click `gitmanager.exe`. On first launch go to `⚙ Settin
 | **🚀 Open in IDE** | One-click open via official brand icons: **Visual Studio** (`devenv` via `vswhere`), **VS Code** (`code`), **Rider** (`rider`). Fully configurable per language profile (`program` + `args` with `{file}` `{dir}` `{repo}` placeholders). |
 | **🤖 AI agents** | Launch any CLI agent in a terminal (`wt` → `powershell` → `cmd` auto-detected, `cmd /K` keeps window open). Presets: Claude, Codex, Gemini, Copilot, Cursor, Aider — add your own. |
 | **📂 Explorer** | Icon button (`explorer` / `xdg-open`). |
-| **⚙ Profiles** | Language profiles (e.g. `.NET` → `*.sln`, `Rust` → `Cargo.toml`) + agents + terminal preference. Stored as `config.json` v5. |
+| **🔧 Config dropdowns** | Per-profile XML `key=value` switching (`App.config` `<add key="Database" value="...">`) – define `file`, `key`, options in `Settings → Languages/Profiles`, shown as dropdown per repo row. |
+| **⚙ Profiles** | Language profiles (e.g. `.NET` → `*.sln`, `Rust` → `Cargo.toml`) + agents + terminal preference. Stored as `config.json` v7. |
 | **🎨 Theming** | 5 themes: Light, Dark, Nord, Dracula, Solarized Light. Instant preview. |
 | **🌐 Languages** | App UI in **English** and **German** — switch in the top bar (`Language`) or `Settings → Language`. |
 | **🪶 Portable** | Single `.exe` ~5.4 MB (with icon + SVGs), no installer, config in `%APPDATA%\gitmanager\config\config.json` (atomic write, auto-migration from legacy `repomanager`). |
@@ -92,7 +93,7 @@ GitManager ships with **English (default) and German**:
 
 - **Top bar:** `Language` dropdown (English / Deutsch) — changes instantly, persists to `config.json`.
 - **Settings:** `Settings → Language` tab — same selector with larger preview.
-- **Persistence:** `config.json → "language": "en" | "de"` (`v5`). Missing field defaults to `en` for backward compatibility.
+- **Persistence:** `config.json → "language": "en" | "de"` (`v7`). Missing field defaults to `en` for backward compatibility.
 - **Adding translations:** edit `src/i18n.rs` (`tr(lang, key)`) and add a new `Language` variant — the settings UI picks it up automatically.
 
 > The legacy config path `%APPDATA%\repomanager\config\config.json` is automatically imported on first launch if `%APPDATA%\gitmanager\...` does not exist.
@@ -105,7 +106,7 @@ Config lives at `%APPDATA%\gitmanager\config\config.json` (resolved via `directo
 
 ```json
 {
-  "config_version": 5,
+  "config_version": 7,
   "roots": ["C:\\Dev"],
   "max_depth": 2,
   "active_profile_id": "dotnet",
@@ -169,7 +170,7 @@ src/
   main.rs       # eframe bootstrap + load_icon (256) + image loaders
   app.rs        # MyApp, scan thread, branch dialog, top/status bars, language switch
   i18n.rs       # Language enum (En/De) + tr() translations
-  config.rs     # AppConfig v5 (roots, profiles, agents, terminal, theme, language, repo_state) + migration
+  config.rs     # AppConfig v7 (roots, profiles, agents, terminal, theme, language, repo_state) + migration
   git.rs        # RepoInfo, branches, checkout (safe/force/stash), fetch, launch_ide/agent, explorer
   scanner.rs    # WalkDir + rayon, scan_repos + scan_solutions_for_repo (depth 3, cap 20)
   ui/
@@ -246,6 +247,9 @@ A: Change via top bar `Language` dropdown or `Settings → Language`. The value 
 
 **Q: Config from `repomanager` not showing?**  
 A: On first launch GitManager imports the legacy config from `%APPDATA%\repomanager\config\config.json` if its own config does not exist yet, then saves to the new path.
+
+**Q: Config dropdown shows error / missing value?**  
+A: The selector reads `<add key="Database" value="...">` from `App.config` (or your configured `file_path`/`key`). Check `Settings → Languages/Profiles → Config dropdowns` – the file must exist in the repo root and contain the key. The dropdown tooltip shows `file:key = value` or the error (e.g. `Key 'Database' not found`). Switching the value rewrites the file atomically and rescans.
 
 ---
 

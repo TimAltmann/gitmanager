@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod config_parser;
 mod git;
 mod i18n;
 mod scanner;

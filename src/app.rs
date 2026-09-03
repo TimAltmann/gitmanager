@@ -737,6 +737,7 @@ impl eframe::App for MyApp {
                     fetch_branches: None,
                     explorer_open: None,
                     shell_open: None,
+                    custom_select: None,
                 };
 
                 // Wir brauchen &mut für repo_list, um selektierte Werte zu zeigen, aber hier clonen wir mut
@@ -748,6 +749,53 @@ impl eframe::App for MyApp {
                     // Verzögert handeln, damit UI nicht blockiert
                     self.pending_branch_switch = Some((repo_path, branch));
                     ctx.request_repaint();
+                }
+                if let Some((repo_path, selector_id, new_value)) = actions.custom_select {
+                    let sel_opt = {
+                        let profile = self.config.get_effective_profile_for_repo(&repo_path);
+                        profile
+                            .config_selectors
+                            .iter()
+                            .find(|s| s.id == selector_id)
+                            .cloned()
+                    };
+                    if let Some(sel) = sel_opt {
+                        match crate::config_parser::write_xml_value(&repo_path, &sel, &new_value) {
+                            Ok(()) => {
+                                let raw =
+                                    tr_fmt(lang, "config_saved", &[&sel.display_name, &new_value]);
+                                let msg = if raw == "config_saved" {
+                                    format!("{} auf '{}' gesetzt", sel.display_name, new_value)
+                                } else {
+                                    raw
+                                };
+                                self.status_message = Some(msg);
+                                self.status_message_time = Some(std::time::Instant::now());
+                                if let Some(repo) =
+                                    self.repos.iter_mut().find(|r| r.path == repo_path)
+                                {
+                                    repo.custom_values
+                                        .insert(selector_id.clone(), new_value.clone());
+                                    repo.custom_errors.remove(&selector_id);
+                                    repo.dirty = true;
+                                }
+                                self.start_scan();
+                            }
+                            Err(e) => {
+                                let raw =
+                                    tr_fmt(lang, "config_save_failed", &[&sel.display_name, &e]);
+                                let msg = if raw == "config_save_failed" {
+                                    format!(
+                                        "Config '{}' speichern fehlgeschlagen: {e}",
+                                        sel.display_name
+                                    )
+                                } else {
+                                    raw
+                                };
+                                self.error = Some(msg);
+                            }
+                        }
+                    }
                 }
                 if let Some((repo_path, sln_path)) = actions.solution_select {
                     // Speichere Auswahl in config
@@ -1114,6 +1162,7 @@ mod tests {
                 agent_order: Vec::new(),
                 show_shell: true,
                 show_explorer: true,
+                config_selectors: Vec::new(),
             });
         }
         cfg.active_profile_id = new_profile.to_string();
@@ -1155,5 +1204,29 @@ mod tests {
         let (path, branch) = taken.unwrap();
         assert_eq!(path, PathBuf::from("/tmp/repo"));
         assert_eq!(branch, "main");
+    }
+
+    #[test]
+    fn custom_select_writes_file() {
+        let dir = tempdir().unwrap();
+        let sel = crate::config::ConfigSelector {
+            id: "db".into(),
+            display_name: "DB".into(),
+            file_path: "App.config".into(),
+            key: "Database".into(),
+            key_attribute: "key".into(),
+            value_attribute: "value".into(),
+            kind: crate::config::XmlSelectorKind::AddKeyValue,
+            options: vec![],
+            allow_custom: true,
+        };
+        std::fs::write(
+            dir.path().join("App.config"),
+            r#"<add key="Database" value="dev"/>"#,
+        )
+        .unwrap();
+        crate::config_parser::write_xml_value(dir.path(), &sel, "prod").unwrap();
+        let out = std::fs::read_to_string(dir.path().join("App.config")).unwrap();
+        assert!(out.contains(r#"value="prod""#));
     }
 }
