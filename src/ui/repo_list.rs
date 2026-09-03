@@ -204,10 +204,20 @@ fn show_repo_row(
                     ICON_GIT_BRANCH
                 };
                 let branch_tooltip = if repo.is_detached {
-                    tr(config.language, "detached_tooltip")
+                    format!(
+                        "{}: {}",
+                        repo.branch,
+                        tr(config.language, "detached_tooltip")
+                    )
                 } else {
-                    tr(config.language, "branch_switch_tooltip")
+                    format!(
+                        "{} – {}",
+                        repo.branch,
+                        tr(config.language, "branch_switch_tooltip")
+                    )
                 };
+                // Branch Dropdown: adaptive Breite für lange Branchenamen (140..280)
+                let branch_width = (branch_text.len() as f32 * 7.0 + 46.0).clamp(140.0, 280.0);
                 // Branch Dropdown: Chevron jetzt innerhalb des Buttons (rechtsbündig)
                 let btn_resp = ui
                     .horizontal(|ui| {
@@ -231,7 +241,7 @@ fn show_repo_row(
                             ui,
                             &branch_text,
                             chevron_icon,
-                            130.0,
+                            branch_width,
                             popup_open,
                             Some(branch_color),
                             12.0,
@@ -843,8 +853,8 @@ fn show_repo_row(
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(repo.path.display().to_string())
-                        .size(10.5)
-                        .color(Color32::from_rgb(120, 120, 120)),
+                        .size(11.5)
+                        .color(Color32::from_rgb(90, 90, 90)),
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
