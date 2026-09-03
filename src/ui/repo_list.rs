@@ -96,6 +96,7 @@ pub struct RepoListActions {
     pub fetch_branches: Option<PathBuf>,
     pub explorer_open: Option<PathBuf>,
     pub shell_open: Option<PathBuf>,
+    pub custom_select: Option<(PathBuf, String, String)>,
 }
 
 use std::path::PathBuf;
@@ -664,6 +665,134 @@ fn show_repo_row(
                     });
                 }
 
+                // Custom Config Selectors (per effective profile)
+                if !profile.config_selectors.is_empty() {
+                    for sel in &profile.config_selectors {
+                        ui.add_space(8.0);
+                        let current_val = repo.custom_values.get(&sel.id);
+                        let error_msg = repo.custom_errors.get(&sel.id);
+                        let has_error = error_msg.is_some();
+                        let display_text = if let Some(v) = current_val {
+                            sel.options
+                                .iter()
+                                .find(|o| &o.value == v)
+                                .map(|o| o.label.clone())
+                                .unwrap_or_else(|| v.clone())
+                        } else if has_error {
+                            "—".to_string()
+                        } else {
+                            "—".to_string()
+                        };
+                        let tooltip = if let Some(err) = error_msg {
+                            format!("{}:{} – {}", sel.file_path, sel.key, err)
+                        } else if let Some(v) = current_val {
+                            format!("{}:{} = {}", sel.file_path, sel.key, v)
+                        } else {
+                            format!("{}:{} (nicht gesetzt)", sel.file_path, sel.key)
+                        };
+                        let text_color = if has_error {
+                            Some(Color32::from_rgb(220, 70, 40))
+                        } else {
+                            None
+                        };
+                        let custom_popup_id =
+                            egui::Id::new("custom_popup").with(&repo.path).with(&sel.id);
+                        let custom_win_id =
+                            egui::Id::new("custom_filter").with(&repo.path).with(&sel.id);
+                        let mut custom_popup_open = ui
+                            .ctx()
+                            .data_mut(|d| d.get_temp::<bool>(custom_popup_id).unwrap_or(false));
+                        let chevron = if custom_popup_open {
+                            ICON_CHEVRON_UP
+                        } else {
+                            ICON_CHEVRON_DOWN
+                        };
+                        let btn_resp = dropdown_button(
+                            ui,
+                            &display_text,
+                            chevron,
+                            140.0,
+                            custom_popup_open,
+                            text_color,
+                            11.0,
+                        )
+                        .on_hover_text(tooltip);
+                        if btn_resp.clicked() {
+                            custom_popup_open = !custom_popup_open;
+                            ui.ctx()
+                                .data_mut(|d| d.insert_temp(custom_popup_id, custom_popup_open));
+                        }
+                        let mut custom_close = false;
+                        let mut selected_value: Option<String> = None;
+                        if custom_popup_open {
+                            let win_resp = egui::Window::new(format!(
+                                "custom_popup_win_{}_{}",
+                                repo.path.display(),
+                                sel.id
+                            ))
+                            .id(custom_win_id)
+                            .collapsible(false)
+                            .resizable(false)
+                            .title_bar(false)
+                            .movable(false)
+                            .fixed_pos(btn_resp.rect.left_bottom())
+                            .pivot(egui::Align2::LEFT_TOP)
+                            .show(ui.ctx(), |ui| {
+                                ui.set_min_width(160.0);
+                                ui.label(RichText::new(&sel.display_name).size(11.0).strong());
+                                ui.separator();
+                                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                                    for opt in &sel.options {
+                                        let is_current = current_val
+                                            .map(|v| v == &opt.value)
+                                            .unwrap_or(false);
+                                        let label = if is_current {
+                                            format!("● {}", opt.label)
+                                        } else {
+                                            opt.label.clone()
+                                        };
+                                        if ui.selectable_label(is_current, label).clicked() {
+                                            selected_value = Some(opt.value.clone());
+                                            custom_close = true;
+                                        }
+                                    }
+                                    if sel.options.is_empty() {
+                                        ui.label(
+                                            RichText::new("Keine Optionen").weak().size(11.0),
+                                        );
+                                    }
+                                });
+                            });
+                            if ui.ctx().input(|i| i.pointer.primary_clicked()) {
+                                if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
+                                    let btn_rect = btn_resp.rect;
+                                    let win_rect = win_resp
+                                        .as_ref()
+                                        .map(|r| r.response.rect)
+                                        .unwrap_or(egui::Rect::NOTHING)
+                                        .expand(4.0);
+                                    if !btn_rect.contains(pos) && !win_rect.contains(pos) {
+                                        custom_close = true;
+                                    }
+                                } else {
+                                    custom_close = true;
+                                }
+                            }
+                            if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+                                custom_close = true;
+                            }
+                        }
+                        if custom_close {
+                            ui.ctx().data_mut(|d| d.insert_temp(custom_popup_id, false));
+                        }
+                        if let Some(val) = selected_value {
+                            actions.custom_select =
+                                Some((repo.path.clone(), sel.id.clone(), val));
+                            ui.ctx().data_mut(|d| d.insert_temp(custom_popup_id, false));
+                        }
+                    }
+                }
+
                 // Profile Override Combo (klein, rechts)
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let current_profile = config.get_effective_profile_for_repo(&repo.path);
@@ -942,6 +1071,7 @@ mod tests {
             fetch_branches: None,
             explorer_open: None,
             shell_open: None,
+            custom_select: None,
         };
         assert!(actions.branch_switch.is_none());
         assert!(actions.solution_select.is_none());
@@ -951,6 +1081,7 @@ mod tests {
         assert!(actions.fetch_branches.is_none());
         assert!(actions.explorer_open.is_none());
         assert!(actions.shell_open.is_none());
+        assert!(actions.custom_select.is_none());
     }
 
     #[test]
@@ -964,6 +1095,7 @@ mod tests {
             fetch_branches: None,
             explorer_open: None,
             shell_open: None,
+            custom_select: None,
         };
         actions.branch_switch = Some((PathBuf::from("/tmp/repo"), "main".to_string()));
         assert_eq!(
@@ -1187,5 +1319,12 @@ mod tests {
         assert_eq!(visible2.len(), 2);
         assert_eq!(visible2[0].id, "b");
         assert_eq!(visible2[1].id, "a");
+    }
+
+    #[test]
+    fn repo_list_actions_has_custom_select() {
+        let mut a = RepoListActions { branch_switch: None, solution_select: None, ide_open: None, agent_open: None, profile_override: None, fetch_branches: None, explorer_open: None, shell_open: None, custom_select: None };
+        a.custom_select = Some((PathBuf::from("/tmp/repo"), "db".into(), "prod".into()));
+        assert_eq!(a.custom_select, Some((PathBuf::from("/tmp/repo"), "db".into(), "prod".into())));
     }
 }

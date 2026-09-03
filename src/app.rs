@@ -737,6 +737,7 @@ impl eframe::App for MyApp {
                     fetch_branches: None,
                     explorer_open: None,
                     shell_open: None,
+                    custom_select: None,
                 };
 
                 // Wir brauchen &mut für repo_list, um selektierte Werte zu zeigen, aber hier clonen wir mut
