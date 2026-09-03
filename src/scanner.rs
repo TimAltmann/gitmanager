@@ -87,6 +87,7 @@ pub fn scan_repos(config: &AppConfig) -> Vec<RepoInfo> {
                     cvals.insert(sel.id.clone(), v);
                 }
                 Ok(None) => {
+                    // Internal error, not direct UI string – scanner has no lang context, keep DE as internal diagnostic
                     cerrs.insert(
                         sel.id.clone(),
                         format!("Key '{}' nicht gefunden in {}", sel.key, sel.file_path),

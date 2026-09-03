@@ -1136,18 +1136,17 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             ui.add_space(12.0);
             ui.separator();
             ui.add_space(8.0);
+            let lang = state.draft.language;
             ui.label(
-                RichText::new("Config-Dropdowns für dieses Profil")
+                RichText::new(tr(lang, "config_selector_title"))
                     .size(13.0)
                     .strong(),
             );
             ui.add_space(4.0);
             ui.label(
-                RichText::new(
-                    "XML-Werte aus .config Dateien als Dropdowns in der Repo-Zeile. Jeder Selector liest/schreibt einen Key in file_path (z.B. App.config <add key=\"Database\" value=\"...\"/>).",
-                )
-                .size(11.0)
-                .color(Color32::from_rgb(100, 100, 100)),
+                RichText::new(tr(lang, "config_selector_desc"))
+                    .size(11.0)
+                    .color(Color32::from_rgb(100, 100, 100)),
             );
             ui.add_space(8.0);
             ui.horizontal(|ui| {

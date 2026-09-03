@@ -782,10 +782,13 @@ impl eframe::App for MyApp {
                                 self.start_scan();
                             }
                             Err(e) => {
-                                self.error = Some(format!(
-                                    "Config '{}' speichern fehlgeschlagen: {e}",
-                                    sel.display_name
-                                ));
+                                let raw = tr_fmt(lang, "config_save_failed", &[&sel.display_name, &e]);
+                                let msg = if raw == "config_save_failed" {
+                                    format!("Config '{}' speichern fehlgeschlagen: {e}", sel.display_name)
+                                } else {
+                                    raw
+                                };
+                                self.error = Some(msg);
                             }
                         }
                     }

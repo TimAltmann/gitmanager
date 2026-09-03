@@ -152,10 +152,28 @@ fn find_add_element_value(xml: &str, key: &str, key_attr: &str, val_attr: &str) 
     None
 }
 
+fn is_invalid_file_path(file_path: &str) -> bool {
+    let p = Path::new(file_path);
+    if p.is_absolute() {
+        return true;
+    }
+    // Check for ".." component on both Unix and Windows separators
+    if file_path.split('/').any(|c| c == "..") || file_path.split('\\').any(|c| c == "..") {
+        return true;
+    }
+    false
+}
+
 pub fn read_xml_value(
     repo_path: &Path,
     selector: &ConfigSelector,
 ) -> Result<Option<String>, String> {
+    if is_invalid_file_path(&selector.file_path) {
+        return Err(format!(
+            "Ungültiger Dateipfad: '{}' darf nicht absolut sein oder .. enthalten",
+            selector.file_path
+        ));
+    }
     let file_path = repo_path.join(&selector.file_path);
     let content = std::fs::read_to_string(&file_path)
         .map_err(|e| format!("Konnte {} nicht lesen: {}", file_path.display(), e))?;
@@ -175,6 +193,12 @@ pub fn write_xml_value(
     selector: &ConfigSelector,
     new_value: &str,
 ) -> Result<(), String> {
+    if is_invalid_file_path(&selector.file_path) {
+        return Err(format!(
+            "Ungültiger Dateipfad: '{}' darf nicht absolut sein oder .. enthalten",
+            selector.file_path
+        ));
+    }
     let file_path = repo_path.join(&selector.file_path);
     let content = std::fs::read_to_string(&file_path)
         .map_err(|e| format!("Konnte {} nicht lesen: {}", file_path.display(), e))?;

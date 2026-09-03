@@ -391,6 +391,8 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "allow_custom") => "Eigene Werte erlauben".to_string(),
         (Language::En, "config_saved") => "{} set to '{}'".to_string(),
         (Language::De, "config_saved") => "{} auf '{}' gesetzt".to_string(),
+        (Language::En, "config_save_failed") => "Failed to save config '{}': {}".to_string(),
+        (Language::De, "config_save_failed") => "Config '{}' speichern fehlgeschlagen: {}".to_string(),
         (Language::En, "config_missing") => "Key '{}' not found in {}".to_string(),
         (Language::De, "config_missing") => "Key '{}' nicht gefunden in {}".to_string(),
         (Language::En, "key_attr") => "Key attribute:".to_string(),
