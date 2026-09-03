@@ -374,6 +374,30 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::En, "agent_not_found") => "AI agent '{}' not found".to_string(),
         (Language::De, "agent_not_found") => "AI-Agent '{}' nicht gefunden".to_string(),
 
+        // ── Config Selectors ─────────────────────────────────────────────
+        (Language::En, "config_selector_title") => "Config dropdowns for this profile".to_string(),
+        (Language::De, "config_selector_title") => "Config-Dropdowns für dieses Profil".to_string(),
+        (Language::En, "config_selector_desc") => "XML values from .config files as dropdowns in the repo row. Each selector reads/writes a key in file_path (e.g. App.config <add key=\"Database\" value=\"...\"/>).".to_string(),
+        (Language::De, "config_selector_desc") => "XML-Werte aus .config Dateien als Dropdowns in der Repo-Zeile. Jeder Selector liest/schreibt einen Key in file_path (z.B. App.config <add key=\"Database\" value=\"...\"/>).".to_string(),
+        (Language::En, "add_config_selector") => "Add Config Selector".to_string(),
+        (Language::De, "add_config_selector") => "Selector hinzufügen".to_string(),
+        (Language::En, "config_file") => "Config file:".to_string(),
+        (Language::De, "config_file") => "Config-Datei:".to_string(),
+        (Language::En, "config_key") => "Key:".to_string(),
+        (Language::De, "config_key") => "Key:".to_string(),
+        (Language::En, "config_options") => "Options:".to_string(),
+        (Language::De, "config_options") => "Optionen:".to_string(),
+        (Language::En, "allow_custom") => "Allow custom values".to_string(),
+        (Language::De, "allow_custom") => "Eigene Werte erlauben".to_string(),
+        (Language::En, "config_saved") => "{} set to '{}'".to_string(),
+        (Language::De, "config_saved") => "{} auf '{}' gesetzt".to_string(),
+        (Language::En, "config_missing") => "Key '{}' not found in {}".to_string(),
+        (Language::De, "config_missing") => "Key '{}' nicht gefunden in {}".to_string(),
+        (Language::En, "key_attr") => "Key attribute:".to_string(),
+        (Language::De, "key_attr") => "Key-Attribut:".to_string(),
+        (Language::En, "value_attr") => "Value attribute:".to_string(),
+        (Language::De, "value_attr") => "Value-Attribut:".to_string(),
+
         // fallback for any missing key -> return key itself
         (Language::En, _) => key.to_string(),
         (Language::De, _) => key.to_string(),
@@ -437,6 +461,42 @@ mod tests {
             tr(Language::En, "nonexistent_key_xyz"),
             "nonexistent_key_xyz"
         );
+    }
+
+    #[test]
+    fn tr_config_keys_exist() {
+        let keys = [
+            "config_selector_title",
+            "config_selector_desc",
+            "add_config_selector",
+            "config_file",
+            "config_key",
+            "config_options",
+            "allow_custom",
+            "config_saved",
+            "config_missing",
+            "key_attr",
+            "value_attr",
+        ];
+        for key in keys {
+            assert_ne!(
+                tr(Language::En, key),
+                key,
+                "missing EN key: {key}"
+            );
+            assert_ne!(
+                tr(Language::De, key),
+                key,
+                "missing DE key: {key}"
+            );
+        }
+        // config_saved must support tr_fmt with 2 args without fallback
+        let en = tr_fmt(Language::En, "config_saved", &["DB", "prod"]);
+        assert_ne!(en, "config_saved");
+        assert!(en.contains("DB") && en.contains("prod"), "config_saved EN fmt: {en}");
+        let de = tr_fmt(Language::De, "config_saved", &["DB", "prod"]);
+        assert_ne!(de, "config_saved");
+        assert!(de.contains("DB") && de.contains("prod"), "config_saved DE fmt: {de}");
     }
 
     #[test]
