@@ -678,8 +678,6 @@ fn show_repo_row(
                                 .find(|o| &o.value == v)
                                 .map(|o| o.label.clone())
                                 .unwrap_or_else(|| v.clone())
-                        } else if has_error {
-                            "—".to_string()
                         } else {
                             "—".to_string()
                         };
@@ -698,7 +696,7 @@ fn show_repo_row(
                         let custom_popup_id =
                             egui::Id::new("custom_popup").with(&repo.path).with(&sel.id);
                         let custom_win_id =
-                            egui::Id::new("custom_filter").with(&repo.path).with(&sel.id);
+                            egui::Id::new("custom_win").with(&repo.path).with(&sel.id);
                         let mut custom_popup_open = ui
                             .ctx()
                             .data_mut(|d| d.get_temp::<bool>(custom_popup_id).unwrap_or(false));
