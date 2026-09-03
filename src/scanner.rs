@@ -832,4 +832,74 @@ mod tests {
         let repos = scan_repos(&cfg);
         assert_eq!(repos[0].custom_values.get("db"), Some(&"dev".to_string()));
     }
+
+    #[test]
+    fn scan_repos_e2e_two_repos_custom_values_and_errors() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let repo_with = root.join("repo_with");
+        let repo_without = root.join("repo_without");
+        fs::create_dir(&repo_with).unwrap();
+        fs::create_dir(&repo_without).unwrap();
+        init_repo(&repo_with);
+        init_repo(&repo_without);
+        fs::write(
+            repo_with.join("App.config"),
+            r#"<configuration><appSettings><add key="Database" value="dev"/></appSettings></configuration>"#,
+        )
+        .unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.roots = vec![root.to_path_buf()];
+        cfg.max_depth = 1;
+        cfg.profiles[0].config_selectors.push(ConfigSelector {
+            id: "db".to_string(),
+            display_name: "DB".to_string(),
+            file_path: "App.config".to_string(),
+            key: "Database".to_string(),
+            key_attribute: "key".to_string(),
+            value_attribute: "value".to_string(),
+            kind: crate::config::XmlSelectorKind::AddKeyValue,
+            options: vec![
+                crate::config::ConfigOption {
+                    value: "dev".into(),
+                    label: "Dev".into(),
+                },
+                crate::config::ConfigOption {
+                    value: "prod".into(),
+                    label: "Prod".into(),
+                },
+            ],
+            allow_custom: false,
+        });
+        let repos = scan_repos(&cfg);
+        assert_eq!(repos.len(), 2, "expected 2 repos, got {}", repos.len());
+        let with = repos
+            .iter()
+            .find(|r| r.name == "repo_with")
+            .expect("repo_with missing");
+        let without = repos
+            .iter()
+            .find(|r| r.name == "repo_without")
+            .expect("repo_without missing");
+        assert_eq!(
+            with.custom_values.get("db"),
+            Some(&"dev".to_string()),
+            "with repo should have db=dev"
+        );
+        assert!(
+            !with.custom_errors.contains_key("db"),
+            "with repo should have no error for db, got {:?}",
+            with.custom_errors
+        );
+        assert!(
+            without.custom_errors.contains_key("db"),
+            "without repo should have custom_errors for missing key/file, got custom_values={:?} custom_errors={:?}",
+            without.custom_values,
+            without.custom_errors
+        );
+        assert!(
+            without.custom_values.get("db").is_none(),
+            "without repo should have no custom_values for db"
+        );
+    }
 }

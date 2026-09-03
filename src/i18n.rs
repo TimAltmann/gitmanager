@@ -479,24 +479,22 @@ mod tests {
             "value_attr",
         ];
         for key in keys {
-            assert_ne!(
-                tr(Language::En, key),
-                key,
-                "missing EN key: {key}"
-            );
-            assert_ne!(
-                tr(Language::De, key),
-                key,
-                "missing DE key: {key}"
-            );
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
         }
         // config_saved must support tr_fmt with 2 args without fallback
         let en = tr_fmt(Language::En, "config_saved", &["DB", "prod"]);
         assert_ne!(en, "config_saved");
-        assert!(en.contains("DB") && en.contains("prod"), "config_saved EN fmt: {en}");
+        assert!(
+            en.contains("DB") && en.contains("prod"),
+            "config_saved EN fmt: {en}"
+        );
         let de = tr_fmt(Language::De, "config_saved", &["DB", "prod"]);
         assert_ne!(de, "config_saved");
-        assert!(de.contains("DB") && de.contains("prod"), "config_saved DE fmt: {de}");
+        assert!(
+            de.contains("DB") && de.contains("prod"),
+            "config_saved DE fmt: {de}"
+        );
     }
 
     #[test]

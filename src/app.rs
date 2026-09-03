@@ -1213,8 +1213,11 @@ mod tests {
             options: vec![],
             allow_custom: true,
         };
-        std::fs::write(dir.path().join("App.config"), r#"<add key="Database" value="dev"/>"#)
-            .unwrap();
+        std::fs::write(
+            dir.path().join("App.config"),
+            r#"<add key="Database" value="dev"/>"#,
+        )
+        .unwrap();
         crate::config_parser::write_xml_value(dir.path(), &sel, "prod").unwrap();
         let out = std::fs::read_to_string(dir.path().join("App.config")).unwrap();
         assert!(out.contains(r#"value="prod""#));

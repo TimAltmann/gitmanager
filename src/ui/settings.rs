@@ -1169,26 +1169,28 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                             }
                         }
                         let new_id = format!("selector{}", max_n + 1);
-                        profile.config_selectors.push(crate::config::ConfigSelector {
-                            id: new_id,
-                            display_name: "Neuer Selector".to_string(),
-                            file_path: "App.config".to_string(),
-                            key: "Database".to_string(),
-                            key_attribute: "key".to_string(),
-                            value_attribute: "value".to_string(),
-                            kind: crate::config::XmlSelectorKind::AddKeyValue,
-                            options: vec![
-                                crate::config::ConfigOption {
-                                    value: "dev".to_string(),
-                                    label: "Dev".to_string(),
-                                },
-                                crate::config::ConfigOption {
-                                    value: "prod".to_string(),
-                                    label: "Prod".to_string(),
-                                },
-                            ],
-                            allow_custom: false,
-                        });
+                        profile
+                            .config_selectors
+                            .push(crate::config::ConfigSelector {
+                                id: new_id,
+                                display_name: "Neuer Selector".to_string(),
+                                file_path: "App.config".to_string(),
+                                key: "Database".to_string(),
+                                key_attribute: "key".to_string(),
+                                value_attribute: "value".to_string(),
+                                kind: crate::config::XmlSelectorKind::AddKeyValue,
+                                options: vec![
+                                    crate::config::ConfigOption {
+                                        value: "dev".to_string(),
+                                        label: "Dev".to_string(),
+                                    },
+                                    crate::config::ConfigOption {
+                                        value: "prod".to_string(),
+                                        label: "Prod".to_string(),
+                                    },
+                                ],
+                                allow_custom: false,
+                            });
                     }
                 });
             });
@@ -1256,9 +1258,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                 ui.label("ID:");
                                 let mut id = sel.id.clone();
                                 if ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut id).hint_text("db"),
-                                    )
+                                    .add(egui::TextEdit::singleline(&mut id).hint_text("db"))
                                     .changed()
                                 {
                                     sel.id = id.trim().to_lowercase().replace(' ', "_");
@@ -1278,8 +1278,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                 ui.end_row();
                                 ui.label("Key:");
                                 ui.add(
-                                    egui::TextEdit::singleline(&mut sel.key)
-                                        .hint_text("Database"),
+                                    egui::TextEdit::singleline(&mut sel.key).hint_text("Database"),
                                 );
                                 ui.end_row();
                                 ui.label("Key-Attribut:");
@@ -1315,7 +1314,11 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         .hint_text("Label")
                                         .desired_width(120.0),
                                 );
-                                if ui.small_button("✕").on_hover_text("Option löschen").clicked() {
+                                if ui
+                                    .small_button("✕")
+                                    .on_hover_text("Option löschen")
+                                    .clicked()
+                                {
                                     to_remove_opt = Some(opt_idx);
                                 }
                             });
@@ -1335,10 +1338,12 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         });
                         if sel.options.is_empty() {
                             ui.label(
-                                RichText::new("Keine Optionen – füge Werte hinzu oder erlaube Custom.")
-                                    .size(10.0)
-                                    .color(Color32::from_rgb(140, 140, 140))
-                                    .italics(),
+                                RichText::new(
+                                    "Keine Optionen – füge Werte hinzu oder erlaube Custom.",
+                                )
+                                .size(10.0)
+                                .color(Color32::from_rgb(140, 140, 140))
+                                .italics(),
                             );
                         }
                     });
@@ -1375,26 +1380,28 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     }
                 }
                 let new_id = format!("selector{}", max_n + 1);
-                profile.config_selectors.push(crate::config::ConfigSelector {
-                    id: new_id,
-                    display_name: "Neuer Selector".to_string(),
-                    file_path: "App.config".to_string(),
-                    key: "Database".to_string(),
-                    key_attribute: "key".to_string(),
-                    value_attribute: "value".to_string(),
-                    kind: crate::config::XmlSelectorKind::AddKeyValue,
-                    options: vec![
-                        crate::config::ConfigOption {
-                            value: "dev".to_string(),
-                            label: "Dev".to_string(),
-                        },
-                        crate::config::ConfigOption {
-                            value: "prod".to_string(),
-                            label: "Prod".to_string(),
-                        },
-                    ],
-                    allow_custom: false,
-                });
+                profile
+                    .config_selectors
+                    .push(crate::config::ConfigSelector {
+                        id: new_id,
+                        display_name: "Neuer Selector".to_string(),
+                        file_path: "App.config".to_string(),
+                        key: "Database".to_string(),
+                        key_attribute: "key".to_string(),
+                        value_attribute: "value".to_string(),
+                        kind: crate::config::XmlSelectorKind::AddKeyValue,
+                        options: vec![
+                            crate::config::ConfigOption {
+                                value: "dev".to_string(),
+                                label: "Dev".to_string(),
+                            },
+                            crate::config::ConfigOption {
+                                value: "prod".to_string(),
+                                label: "Prod".to_string(),
+                            },
+                        ],
+                        allow_custom: false,
+                    });
             }
         }
     }

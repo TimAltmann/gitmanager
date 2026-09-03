@@ -31,7 +31,14 @@ fn find_attr_range(tag: &str, attr_name: &str) -> Option<(usize, usize, char)> {
             false
         } else {
             let b = tag.as_bytes()[attr_start - 1] as char;
-            b.is_whitespace() || b == '<' || b == '\'' || b == '"' || b == '/' || b == '\n' || b == '\r' || b == '\t'
+            b.is_whitespace()
+                || b == '<'
+                || b == '\''
+                || b == '"'
+                || b == '/'
+                || b == '\n'
+                || b == '\r'
+                || b == '\t'
         };
         if !before_ok {
             search_pos = attr_start + attr_name.len();
@@ -145,7 +152,10 @@ fn find_add_element_value(xml: &str, key: &str, key_attr: &str, val_attr: &str) 
     None
 }
 
-pub fn read_xml_value(repo_path: &Path, selector: &ConfigSelector) -> Result<Option<String>, String> {
+pub fn read_xml_value(
+    repo_path: &Path,
+    selector: &ConfigSelector,
+) -> Result<Option<String>, String> {
     let file_path = repo_path.join(&selector.file_path);
     let content = std::fs::read_to_string(&file_path)
         .map_err(|e| format!("Konnte {} nicht lesen: {}", file_path.display(), e))?;
@@ -191,7 +201,12 @@ pub fn write_xml_value(
         &selector.value_attribute,
         new_value,
     )
-    .ok_or_else(|| format!("Key '{}' nicht gefunden in {}", selector.key, selector.file_path))?;
+    .ok_or_else(|| {
+        format!(
+            "Key '{}' nicht gefunden in {}",
+            selector.key, selector.file_path
+        )
+    })?;
     // atomic write via tmp+rename
     let tmp_path = PathBuf::from(format!("{}.tmp", file_path.display()));
     {
@@ -245,8 +260,7 @@ mod tests {
     }
     #[test]
     fn read_not_found_returns_none() {
-        let xml =
-            r#"<configuration><appSettings><add key="Other" value="x"/></appSettings></configuration>"#;
+        let xml = r#"<configuration><appSettings><add key="Other" value="x"/></appSettings></configuration>"#;
         assert_eq!(
             find_add_element_value(xml, "Database", "key", "value"),
             None

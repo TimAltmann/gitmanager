@@ -739,27 +739,29 @@ fn show_repo_row(
                                 ui.set_min_width(160.0);
                                 ui.label(RichText::new(&sel.display_name).size(11.0).strong());
                                 ui.separator();
-                                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                                    for opt in &sel.options {
-                                        let is_current = current_val
-                                            .map(|v| v == &opt.value)
-                                            .unwrap_or(false);
-                                        let label = if is_current {
-                                            format!("● {}", opt.label)
-                                        } else {
-                                            opt.label.clone()
-                                        };
-                                        if ui.selectable_label(is_current, label).clicked() {
-                                            selected_value = Some(opt.value.clone());
-                                            custom_close = true;
+                                egui::ScrollArea::vertical()
+                                    .max_height(220.0)
+                                    .show(ui, |ui| {
+                                        for opt in &sel.options {
+                                            let is_current = current_val
+                                                .map(|v| v == &opt.value)
+                                                .unwrap_or(false);
+                                            let label = if is_current {
+                                                format!("● {}", opt.label)
+                                            } else {
+                                                opt.label.clone()
+                                            };
+                                            if ui.selectable_label(is_current, label).clicked() {
+                                                selected_value = Some(opt.value.clone());
+                                                custom_close = true;
+                                            }
                                         }
-                                    }
-                                    if sel.options.is_empty() {
-                                        ui.label(
-                                            RichText::new("Keine Optionen").weak().size(11.0),
-                                        );
-                                    }
-                                });
+                                        if sel.options.is_empty() {
+                                            ui.label(
+                                                RichText::new("Keine Optionen").weak().size(11.0),
+                                            );
+                                        }
+                                    });
                             });
                             if ui.ctx().input(|i| i.pointer.primary_clicked()) {
                                 if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
@@ -784,8 +786,7 @@ fn show_repo_row(
                             ui.ctx().data_mut(|d| d.insert_temp(custom_popup_id, false));
                         }
                         if let Some(val) = selected_value {
-                            actions.custom_select =
-                                Some((repo.path.clone(), sel.id.clone(), val));
+                            actions.custom_select = Some((repo.path.clone(), sel.id.clone(), val));
                             ui.ctx().data_mut(|d| d.insert_temp(custom_popup_id, false));
                         }
                     }
@@ -1321,8 +1322,21 @@ mod tests {
 
     #[test]
     fn repo_list_actions_has_custom_select() {
-        let mut a = RepoListActions { branch_switch: None, solution_select: None, ide_open: None, agent_open: None, profile_override: None, fetch_branches: None, explorer_open: None, shell_open: None, custom_select: None };
+        let mut a = RepoListActions {
+            branch_switch: None,
+            solution_select: None,
+            ide_open: None,
+            agent_open: None,
+            profile_override: None,
+            fetch_branches: None,
+            explorer_open: None,
+            shell_open: None,
+            custom_select: None,
+        };
         a.custom_select = Some((PathBuf::from("/tmp/repo"), "db".into(), "prod".into()));
-        assert_eq!(a.custom_select, Some((PathBuf::from("/tmp/repo"), "db".into(), "prod".into())));
+        assert_eq!(
+            a.custom_select,
+            Some((PathBuf::from("/tmp/repo"), "db".into(), "prod".into()))
+        );
     }
 }
