@@ -288,6 +288,7 @@ fn show_tray_repo_row(
                                     if *b != repo.branch {
                                         actions.branch_switch =
                                             Some((repo.path.clone(), (*b).clone()));
+                                        actions.close_popup = true;
                                     }
                                 }
                             }
@@ -349,6 +350,7 @@ fn show_tray_repo_row(
                     if resp.clicked() {
                         actions.ide_open =
                             Some((repo.path.clone(), ide.id.clone(), file_path));
+                        actions.close_popup = true;
                     }
                 }
                 if tray_ides.is_empty() {
@@ -396,6 +398,7 @@ fn show_tray_repo_row(
                         .clicked()
                 {
                     actions.explorer_open = Some(repo.path.clone());
+                    actions.close_popup = true;
                 }
                 if show_terminal
                     && ui
@@ -410,6 +413,7 @@ fn show_tray_repo_row(
                         .clicked()
                 {
                     actions.shell_open = Some(repo.path.clone());
+                    actions.close_popup = true;
                 }
 
                 // Agents: filter by tray hidden + profile hidden/order, sort by tray order
@@ -437,6 +441,7 @@ fn show_tray_repo_row(
                         .on_hover_text(format!("Agent {} starten", agent.display_name));
                     if resp.clicked() {
                         actions.agent_open = Some((repo.path.clone(), agent.id.clone()));
+                        actions.close_popup = true;
                     }
                 }
                 if filtered_empty && !active_agents.is_empty() {
@@ -448,6 +453,7 @@ fn show_tray_repo_row(
                             .clicked()
                         {
                             actions.agent_open = Some((repo.path.clone(), first.id.clone()));
+                            actions.close_popup = true;
                         }
                     }
                 }

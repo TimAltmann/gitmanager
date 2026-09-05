@@ -485,6 +485,37 @@ impl MyApp {
             if tray_actions.quit {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            // Auto-close on any launch action (branch/IDE/agent/explorer/terminal) — ensures popup closes when launching app
+            if tray_actions.branch_switch.is_some()
+                || tray_actions.ide_open.is_some()
+                || tray_actions.agent_open.is_some()
+                || tray_actions.explorer_open.is_some()
+                || tray_actions.shell_open.is_some()
+            {
+                close_popup = true;
+            }
+            // Focus-loss auto-close: click outside or window lost focus
+            // Check viewport focused (Option<bool>) with fallback to global focused to avoid immediate close on open
+            let is_focused = ctx.input(|i| match i.viewport().focused {
+                Some(f) => f,
+                None => i.focused,
+            });
+            let any_click = ctx.input(|i| i.pointer.any_click());
+            if !is_focused && any_click {
+                close_popup = true;
+            }
+            if ctx.input(|i| {
+                i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::WindowFocused(false)))
+            }) {
+                close_popup = true;
+            }
+            // Simple fallback: if popup is not focused (Alt-Tab, click outside), close it
+            // Using fallback to i.focused prevents immediate close when focused is None on first frame
+            if !is_focused {
+                close_popup = true;
+            }
         });
 
         if close_popup {
