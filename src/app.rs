@@ -7,7 +7,7 @@ use crate::ui::{
     settings::SettingsState,
 };
 use egui::{Color32, RichText, Vec2};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 const ICON_GEAR: egui::ImageSource = egui::include_image!("../assets/icons/gear.svg");
@@ -24,6 +24,13 @@ struct BranchDialog {
     target_branch: String,
     error: Option<String>,
     dirty_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageType {
+    Open,
+    BranchSwitch,
+    ConfigChange,
 }
 
 pub struct MyApp {
@@ -375,6 +382,30 @@ impl MyApp {
         }
     }
 
+    fn record_usage(&mut self, repo_path: &Path, usage_type: UsageType) {
+        let key = crate::config::AppConfig::repo_state_key(repo_path);
+        let usage = self.config.repo_usage.entry(key).or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        match usage_type {
+            UsageType::Open => {
+                usage.last_opened = Some(now);
+                usage.open_count = usage.open_count.wrapping_add(1);
+            }
+            UsageType::BranchSwitch => {
+                usage.last_branch_switch = Some(now);
+                usage.branch_switch_count = usage.branch_switch_count.wrapping_add(1);
+            }
+            UsageType::ConfigChange => {
+                usage.last_config_change = Some(now);
+                usage.config_change_count = usage.config_change_count.wrapping_add(1);
+            }
+        }
+        let _ = self.config.save();
+    }
+
     fn show_tray_popup_viewport(&mut self, ctx: &egui::Context, lang: crate::i18n::Language) {
         if !self.tray_popup_open {
             return;
@@ -446,9 +477,38 @@ impl MyApp {
             .with_minimize_button(false)
             .with_maximize_button(false);
 
-        // Apply tray_icons.max_display limit (filtered by hidden not applicable to repos; hidden controls icons per row in tray_popup.rs)
+        // Apply MRU sorting and tray_icons.max_display limit (filtered by hidden not applicable to repos; hidden controls icons per row in tray_popup.rs)
         let tray_limit = self.config.tray_icons.max_display.clamp(5, 50);
-        let mut repos_clone: Vec<RepoInfo> = self.repos.iter().take(tray_limit).cloned().collect();
+        let mut repos_clone = self.repos.clone();
+        // MRU sort: most recently used first, based on max(last_opened, last_branch_switch, last_config_change)
+        repos_clone.sort_by(|a, b| {
+            let usage_a = self
+                .config
+                .repo_usage
+                .get(&crate::config::AppConfig::repo_state_key(&a.path));
+            let usage_b = self
+                .config
+                .repo_usage
+                .get(&crate::config::AppConfig::repo_state_key(&b.path));
+            let time_a = usage_a
+                .map(|u| {
+                    u.last_opened
+                        .unwrap_or(0)
+                        .max(u.last_branch_switch.unwrap_or(0))
+                        .max(u.last_config_change.unwrap_or(0))
+                })
+                .unwrap_or(0);
+            let time_b = usage_b
+                .map(|u| {
+                    u.last_opened
+                        .unwrap_or(0)
+                        .max(u.last_branch_switch.unwrap_or(0))
+                        .max(u.last_config_change.unwrap_or(0))
+                })
+                .unwrap_or(0);
+            time_b.cmp(&time_a)
+        });
+        repos_clone.truncate(tray_limit);
         let config_clone = self.config.clone();
         let lang_clone = lang;
 
@@ -568,6 +628,7 @@ impl MyApp {
                     }
                 }
             }
+            self.record_usage(&path, UsageType::Open);
             self.tray_popup_open = false;
         }
         if let Some((path, agent_id)) = tray_actions.agent_open {
@@ -602,6 +663,7 @@ impl MyApp {
                 ));
                 self.status_message_time = Some(std::time::Instant::now());
             }
+            self.record_usage(&path, UsageType::Open);
             self.tray_popup_open = false;
         }
         if let Some(path) = tray_actions.explorer_open {
@@ -618,6 +680,7 @@ impl MyApp {
                     self.error = Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"))
                 }
             }
+            self.record_usage(&path, UsageType::Open);
             self.tray_popup_open = false;
         }
         if let Some(path) = tray_actions.shell_open {
@@ -635,6 +698,7 @@ impl MyApp {
                 &[&path.display().to_string()],
             ));
             self.status_message_time = Some(std::time::Instant::now());
+            self.record_usage(&path, UsageType::Open);
             self.tray_popup_open = false;
         }
         if tray_actions.open_settings {
@@ -702,6 +766,7 @@ impl MyApp {
                 self.status_message_time = Some(std::time::Instant::now());
                 self.error = None;
                 self.branch_dialog = None;
+                self.record_usage(&repo_path, UsageType::BranchSwitch);
                 self.start_scan();
             }
             Err(e) => {
@@ -1277,6 +1342,7 @@ impl eframe::App for MyApp {
                                     repo.custom_errors.remove(&selector_id);
                                     repo.dirty = true;
                                 }
+                                self.record_usage(&repo_path, UsageType::ConfigChange);
                                 self.start_scan();
                             }
                             Err(e) => {
@@ -1357,6 +1423,7 @@ impl eframe::App for MyApp {
                             &[&ide_id, &profile.display_name],
                         ));
                     }
+                    self.record_usage(&repo_path, UsageType::Open);
                 }
                 if let Some((repo_path, agent_id)) = actions.agent_open {
                     let agent = self
@@ -1393,6 +1460,7 @@ impl eframe::App for MyApp {
                     } else {
                         self.error = Some(tr_fmt(lang, "agent_not_found", &[&agent_id]));
                     }
+                    self.record_usage(&repo_path, UsageType::Open);
                 }
                 if let Some((repo_path, profile_opt)) = actions.profile_override {
                     self.config
@@ -1444,6 +1512,7 @@ impl eframe::App for MyApp {
                                 Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"));
                         }
                     }
+                    self.record_usage(&repo_path, UsageType::Open);
                 }
                 if let Some(repo_path) = actions.shell_open {
                     let pref = self.config.terminal.preference.clone();
@@ -1461,6 +1530,7 @@ impl eframe::App for MyApp {
                         &[&repo_path.display().to_string()],
                     ));
                     self.status_message_time = Some(std::time::Instant::now());
+                    self.record_usage(&repo_path, UsageType::Open);
                 }
             });
 

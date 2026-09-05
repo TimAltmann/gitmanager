@@ -35,6 +35,23 @@ impl Default for TrayIconConfig {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RepoUsage {
+    /// Unix timestamp wann zuletzt geöffnet (IDE/Explorer/Terminal/Agent)
+    #[serde(default)]
+    pub last_opened: Option<u64>,
+    #[serde(default)]
+    pub last_branch_switch: Option<u64>,
+    #[serde(default)]
+    pub last_config_change: Option<u64>,
+    #[serde(default)]
+    pub open_count: u32,
+    #[serde(default)]
+    pub branch_switch_count: u32,
+    #[serde(default)]
+    pub config_change_count: u32,
+}
 fn default_active_profile() -> String {
     "dotnet".to_string()
 }
@@ -598,6 +615,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub tray_icons: TrayIconConfig,
+
+    #[serde(default)]
+    pub repo_usage: HashMap<String, RepoUsage>,
 }
 
 impl Default for AppConfig {
@@ -625,6 +645,7 @@ impl Default for AppConfig {
             minimize_to_tray: default_minimize_to_tray(),
             tray_branch_limit: default_tray_branch_limit(),
             tray_icons: TrayIconConfig::default(),
+            repo_usage: HashMap::new(),
         }
     }
 }
@@ -975,6 +996,21 @@ impl AppConfig {
                 }
                 // also remove invalid? keep as is for forward compat, but ensure deduped above
             }
+            // RepoUsage introduced together with TrayIconConfig v10 (Task 5 MRU)
+            // Existing configs before v10 have no repo_usage; ensure initialized (empty map if missing)
+            if cfg.repo_usage.is_empty() {
+                cfg.repo_usage = HashMap::new();
+            }
+            // Windows key normalization for repo_usage (case-insensitive)
+            #[cfg(windows)]
+            {
+                let mut normalized: HashMap<String, RepoUsage> = HashMap::new();
+                for (k, v) in cfg.repo_usage.drain() {
+                    let nk = k.to_lowercase();
+                    normalized.entry(nk).or_insert(v);
+                }
+                cfg.repo_usage = normalized;
+            }
             cfg.config_version = 10;
             let _ = cfg.save();
         }
@@ -1015,6 +1051,16 @@ impl AppConfig {
                 normalized.entry(nk).or_insert(v);
             }
             cfg.repo_state = normalized;
+        }
+        // RepoUsage keys similarly normalize on Windows
+        #[cfg(windows)]
+        {
+            let mut normalized: HashMap<String, RepoUsage> = HashMap::new();
+            for (k, v) in cfg.repo_usage.drain() {
+                let nk = k.to_lowercase();
+                normalized.entry(nk).or_insert(v);
+            }
+            cfg.repo_usage = normalized;
         }
 
         // Profile validieren
@@ -1258,7 +1304,7 @@ impl AppConfig {
         self.active_agent_id = self.active_agent_ids.first().cloned();
     }
 
-    fn repo_state_key(path: &Path) -> String {
+    pub fn repo_state_key(path: &Path) -> String {
         // Auf Windows ist das Dateisystem case-insensitiv – Keys normalisieren, sonst gehen
         // Selections verloren wenn Pfade mal "C:\Dev\MyApp" und mal "c:\dev\myapp" lauten (Explorer, Symlink, canonicalize)
         let s = path.to_string_lossy().to_string();
