@@ -1,11 +1,11 @@
 [package]
 name = "gitmanager"
-version = "0.0.4"
+version = "0.1.1"
 edition = "2021"
 description = "Lightweight Git repository manager for Windows - shows folders, branches and dirty status, opens in VS Code"
 authors = ["gitmanager"]
 license = "MIT"
-repository = "https://github.com/gitmanager/gitmanager"
+repository = "https://github.com/TimAltmann/gitmanager"
 keywords = ["git", "manager", "gui", "windows"]
 categories = ["development-tools"]
 
@@ -38,7 +38,7 @@ winres = "0.1.12"
 opt-level = "z"
 lto = true
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 strip = true
 
 [profile.dev]

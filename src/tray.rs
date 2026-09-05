@@ -53,7 +53,7 @@ mod imp {
         let (tray_tx, tray_rx): (Sender<TrayIconEvent>, Receiver<TrayIconEvent>) =
             std::sync::mpsc::channel();
 
-        // Robust handler: forward payload + wake egui. No native menu - only custom popup on left click.
+        // Robust handler: forward payload + wake egui. No native menu - custom popup on left/right click.
         let tray_service_id = egui::ViewportId::from_hash_of("tray_service");
         let ctx_clone = ctx.clone();
         TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {

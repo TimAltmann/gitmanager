@@ -50,13 +50,15 @@ pub fn check_for_update(current_version: &str) -> Option<UpdateInfo> {
     let latest_norm = normalize_version(&latest_raw);
     let current_norm = normalize_version(current_version);
 
-    // Parse semver, fallback to string compare if parse fails
+    // Parse semver; bei Parse-Fehler kein Update (nicht lexikalisch raten)
     let latest_ver = semver::Version::parse(&latest_norm).ok();
     let current_ver = semver::Version::parse(&current_norm).ok();
 
     let is_newer = match (latest_ver, current_ver) {
         (Some(l), Some(c)) => l > c,
-        _ => latest_norm != current_norm && latest_norm > current_norm,
+        // Bei Parse-Fehler kein Update melden statt lexikalisch zu raten
+        // ("0.0.10" < "0.0.9" lexikalisch, Pre-Releases etc.)
+        _ => return None,
     };
 
     if is_newer {
@@ -87,8 +89,7 @@ mod tests {
     fn version_compare_newer() {
         let current = "0.0.4";
         let latest = "v0.0.5";
-        let info = check_for_update(current);
-        // This test would require network, so just test normalize and semver logic
+        // Kein Netzwerk im Unit-Test: nur lokale normalize + semver-Logik prüfen
         let latest_norm = normalize_version(latest);
         let current_norm = normalize_version(current);
         let l = semver::Version::parse(&latest_norm).unwrap();

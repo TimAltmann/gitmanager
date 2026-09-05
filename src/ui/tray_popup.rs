@@ -487,7 +487,6 @@ fn show_tray_repo_row(
                     }
                 }
             });
-
         });
     });
 }

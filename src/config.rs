@@ -67,6 +67,9 @@ fn default_branch_limit() -> usize {
 fn default_minimize_to_tray() -> bool {
     true
 }
+fn default_check_for_updates() -> bool {
+    true
+}
 fn default_tray_branch_limit() -> usize {
     20
 }
@@ -610,6 +613,9 @@ pub struct AppConfig {
     #[serde(default = "default_minimize_to_tray")]
     pub minimize_to_tray: bool,
 
+    #[serde(default = "default_check_for_updates")]
+    pub check_for_updates: bool,
+
     #[serde(default = "default_tray_branch_limit")]
     pub tray_branch_limit: usize,
 
@@ -643,6 +649,7 @@ impl Default for AppConfig {
             language: default_language(),
             branch_display_limit: default_branch_limit(),
             minimize_to_tray: default_minimize_to_tray(),
+            check_for_updates: default_check_for_updates(),
             tray_branch_limit: default_tray_branch_limit(),
             tray_icons: TrayIconConfig::default(),
             repo_usage: HashMap::new(),

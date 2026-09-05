@@ -2805,9 +2805,30 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         }
         ui.label(
             RichText::new(if minimize {
-                "✓ Das Fenster wird beim Schließen ausgeblendet und läuft im Tray weiter (Links-Klick: eigenes Menü, Rechts-Klick: Kontextmenü)."
+                "✓ Das Fenster wird beim Schließen ausgeblendet und läuft im Tray weiter (Links-/Rechts-Klick: eigenes Menü)."
             } else {
                 "Das Fenster wird beim Schließen beendet."
+            })
+            .size(10.0)
+            .color(Color32::from_rgb(120, 120, 120))
+            .italics(),
+        );
+        ui.add_space(4.0);
+        let mut check_updates = state.draft.check_for_updates;
+        if ui
+            .checkbox(
+                &mut check_updates,
+                "Beim Start auf Updates prüfen (GitHub Releases)",
+            )
+            .changed()
+        {
+            state.draft.check_for_updates = check_updates;
+        }
+        ui.label(
+            RichText::new(if check_updates {
+                "✓ Beim Start wird einmalig api.github.com abgefragt (5 s Timeout). Deaktivieren für Offline-/Firmennetze. Änderung wirkt ab Neustart."
+            } else {
+                "Update-Check deaktiviert — keine Netzwerkabfrage beim Start. Änderung wirkt ab Neustart."
             })
             .size(10.0)
             .color(Color32::from_rgb(120, 120, 120))

@@ -34,8 +34,11 @@ fn load_icon() -> Option<std::sync::Arc<egui::IconData>> {
 }
 
 fn main() -> eframe::Result<()> {
-    // Panic hook for tray crashes (logs to file, since Windows release has no console)
-    std::panic::set_hook(Box::new(|info| {
+    // Panic hook für Tray-Crashes (F-17): vorherigen Hook chainen, Crash-Log mit
+    // Timestamp nach %LOCALAPPDATA%/gitmanager (ProjectDirs, bereits Dependency),
+    // Fallback CWD. Überschreibt nicht still, schluckt Schreibfehler nicht.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
         let mut msg = format!("PANIC: {}\n", info);
         if let Some(s) = info.payload().downcast_ref::<&str>() {
             msg.push_str(&format!("payload: {}\n", s));
@@ -50,8 +53,30 @@ fn main() -> eframe::Result<()> {
                 loc.column()
             ));
         }
-        let _ = std::fs::write("gitmanager_crash.log", &msg);
-        eprintln!("{}", msg);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let filename = format!("gitmanager_crash-{}.log", ts);
+        let written = directories::ProjectDirs::from("com", "gitmanager", "gitmanager")
+            .map(|dirs| {
+                let dir = dirs.data_local_dir().to_path_buf();
+                let _ = std::fs::create_dir_all(&dir);
+                let path = dir.join(&filename);
+                std::fs::write(&path, &msg).map(|_| path.display().to_string())
+            });
+        match written {
+            Some(Ok(path)) => eprintln!("{} (crash log: {})", msg, path),
+            _ => {
+                // Fallback CWD, Fehler nicht schlucken ohne Hinweis
+                if let Err(e) = std::fs::write(&filename, &msg) {
+                    eprintln!("{} (crash log failed: {})", msg, e);
+                } else {
+                    eprintln!("{} (crash log: {})", msg, filename);
+                }
+            }
+        }
+        previous_hook(info);
     }));
 
     let icon = load_icon();

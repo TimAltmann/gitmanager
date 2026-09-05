@@ -37,7 +37,6 @@ mod imp {
         pub popup_open: bool,
         pub popup_rect: Option<Rect>,
         pub popup_opened_at: Option<Instant>,
-        pub last_left_toggle: Option<Instant>,
         // Channel to send actions to main app
         pub action_tx: mpsc::Sender<TrayAction>,
     }
@@ -50,7 +49,6 @@ mod imp {
                 popup_open: false,
                 popup_rect: None,
                 popup_opened_at: None,
-                last_left_toggle: None,
                 action_tx,
             }
         }
@@ -72,12 +70,12 @@ mod imp {
     ) {
         let ctx = ui.ctx().clone();
 
-        // Poll tray events (only TrayIconEvent for custom popup; MenuEvent handled directly in app.rs)
+        // Poll tray events (nur TrayIconEvent für Custom-Popup, kein natives Menü)
         poll_tray_events(&shared, &tray_rx, &ctx);
 
         // Show popup if needed - as immediate child of tray service viewport
         let should_show = {
-            let guard = shared.lock().unwrap();
+            let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
             guard.popup_open
         };
 
@@ -89,15 +87,40 @@ mod imp {
         // Request repaint only if popup open or we want to poll quickly
         // For efficiency, use 500ms interval when idle (handler wakes immediately on event), immediate when popup open
         let is_popup_open = {
-            let guard = shared.lock().unwrap();
+            let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
             guard.popup_open
         };
         if is_popup_open {
-            ctx.request_repaint();
+            // Gedrosselt statt Dauer-Repaint (F-18): ~30fps reicht für Popup
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         } else {
             // Poll at 500ms when idle - handler's request_repaint_for wakes immediately on tray event
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
+    }
+
+    fn toggle_popup(
+        shared: &Arc<Mutex<TrayShared>>,
+        ctx: &Context,
+        rect: tray_icon::Rect,
+    ) {
+        let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let ppp = ctx.pixels_per_point();
+        let ppp = if ppp == 0.0 { 1.0 } else { ppp };
+        let tray_rect = Rect::from_min_size(
+            egui::pos2(rect.position.x as f32 / ppp, rect.position.y as f32 / ppp),
+            egui::vec2(rect.size.width as f32 / ppp, rect.size.height as f32 / ppp),
+        );
+        if guard.popup_open {
+            guard.popup_open = false;
+            guard.popup_rect = None;
+            guard.popup_opened_at = None;
+        } else {
+            guard.popup_open = true;
+            guard.popup_rect = Some(tray_rect);
+            guard.popup_opened_at = Some(Instant::now());
+        }
+        ctx.request_repaint();
     }
 
     fn poll_tray_events(
@@ -105,8 +128,7 @@ mod imp {
         tray_rx: &Arc<Mutex<mpsc::Receiver<tray_icon::TrayIconEvent>>>,
         ctx: &Context,
     ) {
-        // Note: MenuEvent handling is now done directly in app.rs poll_tray_events
-        // to avoid extra hop via TrayAction and service throttling.
+        // Nur TrayIconEvent für Custom-Popup (kein natives Menü mehr).
         // This function only handles TrayIconEvent for custom popup.
         use tray_icon::MouseButton;
         use tray_icon::MouseButtonState;
@@ -114,7 +136,7 @@ mod imp {
 
         // Drain tray events
         let events: Vec<TrayIconEvent> = {
-            let guard = tray_rx.lock().unwrap();
+            let guard = tray_rx.lock().unwrap_or_else(|e| e.into_inner());
             let mut v = Vec::new();
             while let Ok(ev) = guard.try_recv() {
                 v.push(ev);
@@ -130,36 +152,28 @@ mod imp {
                     rect,
                     ..
                 } => {
-                    let mut guard = shared.lock().unwrap();
-                    let ppp = ctx.pixels_per_point();
-                    let ppp = if ppp == 0.0 { 1.0 } else { ppp };
-                    let tray_rect = Rect::from_min_size(
-                        egui::pos2(rect.position.x as f32 / ppp, rect.position.y as f32 / ppp),
-                        egui::vec2(rect.size.width as f32 / ppp, rect.size.height as f32 / ppp),
-                    );
-                    if guard.popup_open {
-                        guard.popup_open = false;
-                        guard.popup_rect = None;
-                        guard.popup_opened_at = None;
-                    } else {
-                        guard.popup_open = true;
-                        guard.popup_rect = Some(tray_rect);
-                        guard.popup_opened_at = Some(Instant::now());
-                    }
-                    guard.last_left_toggle = Some(Instant::now());
-                    ctx.request_repaint();
+                    toggle_popup(shared, ctx, rect);
+                }
+                TrayIconEvent::Click {
+                    button: MouseButton::Right,
+                    button_state: MouseButtonState::Up,
+                    rect,
+                    ..
+                } => {
+                    // Rechtsklick togglet ebenfalls das Custom-Popup (kein natives Menü).
+                    toggle_popup(shared, ctx, rect);
                 }
                 TrayIconEvent::Click {
                     button: MouseButton::Right,
                     ..
                 } => {
-                    // Rechtsklick soll nichts tun (kein natives Menü)
+                    // Right Down etc. ignorieren
                 }
                 TrayIconEvent::DoubleClick {
                     button: MouseButton::Left,
                     ..
                 } => {
-                    let mut guard = shared.lock().unwrap();
+                    let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
                     if guard.popup_open {
                         guard.popup_open = false;
                         guard.popup_rect = None;
@@ -173,13 +187,12 @@ mod imp {
                 _ => {}
             }
         }
-
     }
 
     fn show_tray_popup_viewport(shared: &Arc<Mutex<TrayShared>>, ctx: &Context) {
         // Clone needed data
         let (tray_rect, popup_opened_at) = {
-            let guard = shared.lock().unwrap();
+            let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
             let rect = guard.popup_rect.unwrap_or_else(|| {
                 let screen = ctx.input(|i| {
                     i.viewport()
@@ -195,20 +208,23 @@ mod imp {
         };
 
         let (repos_arc, config_arc) = {
-            let guard = shared.lock().unwrap();
+            let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
             (guard.repos.clone(), guard.config.clone())
         };
 
-        // Popup size - add extra height if any repo has solution dropdown
+        // Popup size - add extra height if any *sichtbare* repo has solution dropdown
+        // (nur truncate-Menge prüfen, sonst Höhe bei vielen Repos überschätzt)
         let popup_width: f32 = 360.0;
         let tray_limit = config_arc.tray_icons.max_display.clamp(5, 50);
         let visible_repos = repos_arc.len().min(tray_limit);
-        let has_solution_dropdown = repos_arc.iter().any(|r| r.solutions.len() > 1);
+        let has_solution_dropdown = repos_arc.iter().take(tray_limit).any(|r| r.solutions.len() > 1);
         let row_height: f32 = if has_solution_dropdown { 94.0 } else { 66.0 };
         let popup_height: f32 = (visible_repos as f32 * row_height + 90.0).clamp(280.0, 560.0);
         let popup_size = Vec2::new(popup_width, popup_height);
 
-        // Position calculation
+        // Position calculation (Heuristik F-14: nimmt horizontale, gleich große
+        // Monitore mit Ursprung 0,0 an; monitor_size liefert keine Position.
+        // Korrekt bräuchte winit-Monitor-API. Fallback unten: unten-rechts Primary.)
         let monitor_size = ctx.input(|i| {
             i.viewport()
                 .monitor_size
@@ -293,7 +309,7 @@ mod imp {
                     return;
                 }
                 crate::ui::theme::apply_theme(ctx, &config_clone.theme);
-                egui_extras::install_image_loaders(ctx);
+                // install_image_loaders gehört einmalig in MyApp::new (F-19), nicht pro Frame
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_popup = true;
                 }
@@ -342,7 +358,7 @@ mod imp {
 
         if viewport_result.is_err() {
             eprintln!("Tray popup viewport panicked, closing popup");
-            let mut guard = shared.lock().unwrap();
+            let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
             guard.popup_open = false;
             guard.popup_rect = None;
             guard.popup_opened_at = None;
@@ -351,7 +367,7 @@ mod imp {
 
         // Handle close
         if close_popup {
-            let mut guard = shared.lock().unwrap();
+            let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
             guard.popup_open = false;
             guard.popup_rect = None;
             guard.popup_opened_at = None;
@@ -369,7 +385,7 @@ mod imp {
             || tray_actions.explorer_open.is_some()
             || tray_actions.shell_open.is_some();
         {
-            let guard = shared.lock().unwrap();
+            let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
             if tray_actions.refresh {
                 let _ = guard.action_tx.send(TrayAction::Refresh);
             }
