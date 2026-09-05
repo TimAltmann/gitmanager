@@ -10,6 +10,10 @@ const ICON_CHEVRON_UP: egui::ImageSource =
 const ICON_EYE: egui::ImageSource = egui::include_image!("../../assets/icons/eye.svg");
 const ICON_EYE_OFF: egui::ImageSource = egui::include_image!("../../assets/icons/eye-off.svg");
 const ICON_CROSS: egui::ImageSource = egui::include_image!("../../assets/icons/cross.svg");
+const ICON_PLUS: egui::ImageSource = egui::include_image!("../../assets/icons/plus.svg");
+const ICON_TRASH: egui::ImageSource = egui::include_image!("../../assets/icons/trash.svg");
+const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
+const ICON_WARNING: egui::ImageSource = egui::include_image!("../../assets/icons/warning.svg");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
@@ -20,6 +24,7 @@ enum SettingsTab {
     Appearance,
     Language,
     Icons,
+    TrayIcons,
 }
 
 pub struct SettingsState {
@@ -151,6 +156,7 @@ pub fn show_settings_window(
                     (SettingsTab::Appearance, tr(lang, "tabs_appearance")),
                     (SettingsTab::Language, tr(lang, "tabs_language")),
                     (SettingsTab::Icons, tr(lang, "tabs_icons")),
+                    (SettingsTab::TrayIcons, tr(lang, "tabs_tray_icons")),
                 ] {
                     let is_active = state.selected_tab == tab;
                     if ui
@@ -173,6 +179,7 @@ pub fn show_settings_window(
                     SettingsTab::Appearance => show_appearance_tab(ui, state),
                     SettingsTab::Language => show_language_tab(ui, state),
                     SettingsTab::Icons => show_icons_tab(ui, state),
+                    SettingsTab::TrayIcons => show_tray_icons_tab(ui, state),
                 }
 
                 ui.add_space(12.0);
@@ -426,7 +433,13 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Suchpfade").size(13.0).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("＋ Hinzufügen").clicked() {
+            if ui
+                .add(egui::Button::image_and_text(
+                    egui::Image::new(ICON_PLUS).fit_to_exact_size(Vec2::splat(14.0)),
+                    "Hinzufügen",
+                ))
+                .clicked()
+            {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     state.draft.add_root(path);
                     state.error = None;
@@ -462,10 +475,22 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     state.draft.roots[idx] = PathBuf::from(path_str.clone());
                 }
             }
-            if ui.button("✕").on_hover_text("Entfernen").clicked() {
+            if ui
+                .add(egui::Button::image(
+                    egui::Image::new(ICON_TRASH).fit_to_exact_size(Vec2::splat(14.0)),
+                ))
+                .on_hover_text("Entfernen")
+                .clicked()
+            {
                 to_remove = Some(root.clone());
             }
-            if ui.button("📂").on_hover_text("Durchsuchen").clicked() {
+            if ui
+                .add(egui::Button::image(
+                    egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(14.0)),
+                ))
+                .on_hover_text("Durchsuchen")
+                .clicked()
+            {
                 if let Some(new_path) = rfd::FileDialog::new().pick_folder() {
                     if let Some(idx) = state.draft.roots.iter().position(|p| p == root) {
                         state.draft.roots[idx] = new_path;
@@ -475,11 +500,18 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         });
         ui.add_space(4.0);
         if !root.exists() {
-            ui.label(
-                RichText::new(format!("⚠ Pfad existiert nicht: {}", root.display()))
-                    .size(11.0)
-                    .color(Color32::from_rgb(200, 80, 20)),
-            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Image::new(ICON_WARNING)
+                        .fit_to_exact_size(Vec2::splat(14.0))
+                        .tint(Color32::from_rgb(200, 80, 20)),
+                );
+                ui.label(
+                    RichText::new(format!("Pfad existiert nicht: {}", root.display()))
+                        .size(11.0)
+                        .color(Color32::from_rgb(200, 80, 20)),
+                );
+            });
             ui.add_space(4.0);
         }
     }
@@ -576,6 +608,93 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     );
     ui.add_space(8.0);
 
+    // Tray-Einstellungen
+    ui.separator();
+    ui.add_space(8.0);
+    ui.label(RichText::new("System Tray").size(13.0).strong());
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(
+            "Verhalten wenn das Fenster geschlossen wird und Einstellungen für das Tray-Popup.",
+        )
+        .size(11.0)
+        .color(Color32::from_rgb(100, 100, 100)),
+    );
+    ui.add_space(6.0);
+    {
+        let mut minimize = state.draft.minimize_to_tray;
+        if ui
+            .checkbox(
+                &mut minimize,
+                "Beim Schließen in Tray minimieren (statt beenden)",
+            )
+            .changed()
+        {
+            state.draft.minimize_to_tray = minimize;
+        }
+        ui.label(
+            RichText::new(if minimize {
+                "✓ Das Fenster wird beim Schließen ausgeblendet und läuft im Tray weiter (Links-Klick: eigenes Menü, Rechts-Klick: Kontextmenü)."
+            } else {
+                "Das Fenster wird beim Schließen beendet."
+            })
+            .size(10.0)
+            .color(Color32::from_rgb(120, 120, 120))
+            .italics(),
+        );
+    }
+    ui.add_space(8.0);
+    ui.label(RichText::new("Tray Branch-Limit").size(12.0).strong());
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(
+            "Wie viele Branches maximal im Tray-Popup Dropdown angezeigt werden (5–50, Standard 20).",
+        )
+        .size(11.0)
+        .color(Color32::from_rgb(100, 100, 100)),
+    );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Limit:");
+        let mut limit = state.draft.tray_branch_limit;
+        // ensure at least 5
+        if limit < 5 {
+            limit = 5;
+        }
+        let slider = egui::Slider::new(&mut limit, 5..=50)
+            .text("Branches")
+            .step_by(1.0);
+        if ui.add(slider).changed() {
+            state.draft.tray_branch_limit = limit.clamp(5, 50);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Oder direkt:");
+        let mut l = state.draft.tray_branch_limit;
+        if ui
+            .add(egui::DragValue::new(&mut l).range(5..=50).speed(1.0))
+            .changed()
+        {
+            state.draft.tray_branch_limit = l.clamp(5, 50);
+        }
+        ui.label(
+            RichText::new(format!("(aktuell: {})", state.draft.tray_branch_limit))
+                .size(11.0)
+                .color(Color32::from_rgb(120, 120, 120)),
+        );
+    });
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(format!(
+            "Zeigt bis zu {} Branches im Tray-Popup. Weitere im Hauptfenster.",
+            state.draft.tray_branch_limit
+        ))
+        .size(10.0)
+        .color(Color32::from_rgb(120, 120, 120))
+        .italics(),
+    );
+    ui.add_space(8.0);
+
     // Aktives Profil global
     ui.separator();
     ui.add_space(8.0);
@@ -625,7 +744,13 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                 .strong(),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("＋ Neues Profil").clicked() {
+            if ui
+                .add(egui::Button::image_and_text(
+                    egui::Image::new(ICON_PLUS).fit_to_exact_size(Vec2::splat(14.0)),
+                    "Neues Profil",
+                ))
+                .clicked()
+            {
                 let mut max_n = 0;
                 for p in &state.draft.profiles {
                     if let Some(suffix) = p.id.strip_prefix("custom") {
@@ -653,6 +778,8 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         use_shell: false,
                         allow_unsafe: false,
                         no_args: false,
+
+                        icon: None,
                     }],
                     default_ide_id: Some("vscode".to_string()),
                     ide_order: Vec::new(),
@@ -714,7 +841,13 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     if ui.small_button("Duplizieren").clicked() {
                         to_duplicate = Some(idx);
                     }
-                    if ui.small_button("✕ Löschen").clicked() {
+                    if ui
+                        .add(egui::Button::image_and_text(
+                            egui::Image::new(ICON_TRASH).fit_to_exact_size(Vec2::splat(12.0)),
+                            "Löschen",
+                        ))
+                        .clicked()
+                    {
                         to_delete = Some(idx);
                     }
                     if ui.small_button("Aktiv setzen").clicked() {
@@ -730,12 +863,31 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             let mut new_p = p.clone();
             new_p.id = format!("{}_copy", p.id);
             new_p.display_name = format!("{} (Kopie)", p.display_name);
+            // Copy custom icons to new files so deletion of original doesn't affect copy
+            for ide in &mut new_p.ides {
+                if let Some(old_path) = ide.icon.clone() {
+                    let src = PathBuf::from(&old_path);
+                    if src.exists() {
+                        if let Ok(dest) = crate::config::AppConfig::copy_icon_to_storage(&src) {
+                            ide.icon = Some(dest.display().to_string());
+                        }
+                    }
+                }
+            }
             state.draft.profiles.push(new_p);
             state.selected_profile_idx = Some(state.draft.profiles.len() - 1);
         }
     }
     if let Some(idx) = to_delete {
         if state.draft.profiles.len() > 1 {
+            // Cleanup custom icons of removed profile
+            if let Some(removed) = state.draft.profiles.get(idx) {
+                for ide in &removed.ides {
+                    if let Some(icon) = &ide.icon {
+                        crate::config::AppConfig::remove_icon_file(icon);
+                    }
+                }
+            }
             state.draft.profiles.remove(idx);
             if let Some(sel) = state.selected_profile_idx {
                 if sel == idx {
@@ -804,6 +956,8 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                             use_shell: false,
                             allow_unsafe: false,
                             no_args: false,
+
+                            icon: None,
                         }],
                         default_ide_id: Some("vscode".to_string()),
                         ide_order: Vec::new(),
@@ -913,7 +1067,16 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.small_button("✕").clicked() {
+                                    if ui
+                                        .add(
+                                            egui::Button::image(
+                                                egui::Image::new(ICON_TRASH)
+                                                    .fit_to_exact_size(Vec2::splat(14.0)),
+                                            )
+                                        )
+                                        .on_hover_text("IDE entfernen")
+                                        .clicked()
+                                    {
                                         to_remove_ide = Some(ide_idx);
                                     }
                                 },
@@ -1035,6 +1198,103 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                     }
                                 }
                                 ui.end_row();
+                                ui.label("Icon:");
+                                ui.horizontal(|ui| {
+                                    // Preview 18px – zeigt Custom Icon wenn vorhanden, sonst Default
+                                    let is_custom = ide.icon.is_some();
+                                    let preview_size = Vec2::splat(18.0);
+                                    if let Some(icon_path) = &ide.icon {
+                                        let pb = PathBuf::from(icon_path);
+                                        if pb.exists() {
+                                            let uri = format!(
+                                                "file://{}",
+                                                pb.display().to_string().replace('\\', "/")
+                                            );
+                                            ui.add(
+                                                egui::Image::new(uri)
+                                                    .fit_to_exact_size(preview_size),
+                                            );
+                                        } else {
+                                            ui.add(
+                                                egui::Image::new(ICON_WARNING)
+                                                    .fit_to_exact_size(preview_size)
+                                                    .tint(Color32::from_rgb(200, 80, 20)),
+                                            );
+                                            ui.label(
+                                                RichText::new("nicht gefunden")
+                                                    .size(9.0)
+                                                    .color(Color32::from_rgb(200, 80, 20)),
+                                            );
+                                        }
+                                    } else {
+                                        // Default icon preview
+                                        let default_icon = match ide.id.as_str() {
+                                            "vs2022" | "vs" | "visualstudio" => {
+                                                egui::include_image!("../../assets/icons/visualstudio.svg")
+                                            }
+                                            "rider" | "jetbrains" => {
+                                                egui::include_image!("../../assets/icons/rider.svg")
+                                            }
+                                            _ => {
+                                                egui::include_image!("../../assets/icons/vscode.svg")
+                                            }
+                                        };
+                                        ui.add(
+                                            egui::Image::new(default_icon)
+                                                .fit_to_exact_size(preview_size),
+                                        );
+                                        ui.label(
+                                            RichText::new("(Default)")
+                                                .size(9.0)
+                                                .color(Color32::from_rgb(120, 120, 120)),
+                                        );
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::Button::image(
+                                                egui::Image::new(ICON_FOLDER)
+                                                    .fit_to_exact_size(Vec2::splat(14.0)),
+                                            )
+                                        )
+                                        .on_hover_text("Icon wählen (svg, png, ico, jpg - max 2 MB)")
+                                        .clicked()
+                                    {
+                                        if let Some(src) = rfd::FileDialog::new()
+                                            .add_filter("Icon", &["svg", "png", "ico", "jpg", "jpeg"])
+                                            .pick_file()
+                                        {
+                                            let old = ide.icon.clone();
+                                            match crate::config::AppConfig::copy_icon_to_storage(&src) {
+                                                Ok(dest) => {
+                                                    if let Some(old_path) = old {
+                                                        crate::config::AppConfig::remove_icon_file(&old_path);
+                                                    }
+                                                    ide.icon = Some(dest.display().to_string());
+                                                    state.error = None;
+                                                }
+                                                Err(e) => {
+                                                    state.error = Some(e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if is_custom
+                                        && ui
+                                            .add(
+                                                egui::Button::image(
+                                                    egui::Image::new(ICON_TRASH)
+                                                        .fit_to_exact_size(Vec2::splat(14.0)),
+                                                )
+                                            )
+                                            .on_hover_text("Custom Icon entfernen (zurück zu Default)")
+                                            .clicked()
+                                    {
+                                        if let Some(old) = ide.icon.take() {
+                                            crate::config::AppConfig::remove_icon_file(&old);
+                                        }
+                                    }
+                                });
+                                ui.end_row();
                             });
                         // Preview (mit Substitution und cwd)
                         let prog = ide.effective_program();
@@ -1080,13 +1340,24 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             }
             if let Some(ide_idx) = to_remove_ide {
                 if profile.ides.len() > 1 {
+                    if let Some(removed) = profile.ides.get(ide_idx) {
+                        if let Some(icon) = &removed.icon {
+                            crate::config::AppConfig::remove_icon_file(icon);
+                        }
+                    }
                     profile.ides.remove(ide_idx);
                 } else {
                     state.error = Some("Mindestens eine IDE pro Profil erforderlich".to_string());
                 }
             }
 
-            if ui.button("＋ IDE hinzufügen").clicked() {
+            if ui
+                .add(egui::Button::image_and_text(
+                    egui::Image::new(ICON_PLUS).fit_to_exact_size(Vec2::splat(14.0)),
+                    "IDE hinzufügen",
+                ))
+                .clicked()
+            {
                 let mut max_n = 0;
                 for ide in &profile.ides {
                     if let Some(suffix) = ide.id.strip_prefix("ide") {
@@ -1106,6 +1377,8 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     use_shell: false,
                     allow_unsafe: false,
                     no_args: false,
+
+                    icon: None,
                 });
             }
 
@@ -1156,7 +1429,13 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         .strong(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("＋ Selector hinzufügen").clicked() {
+                    if ui
+                        .add(egui::Button::image_and_text(
+                            egui::Image::new(ICON_PLUS).fit_to_exact_size(Vec2::splat(14.0)),
+                            "Selector hinzufügen",
+                        ))
+                        .clicked()
+                    {
                         let mut max_n = 0;
                         for sel in &profile.config_selectors {
                             if let Some(suffix) = sel.id.strip_prefix("selector") {
@@ -1223,7 +1502,14 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.small_button("✕").on_hover_text("Löschen").clicked() {
+                                    if ui
+                                        .add(egui::Button::image(
+                                            egui::Image::new(ICON_TRASH)
+                                                .fit_to_exact_size(Vec2::splat(12.0)),
+                                        ))
+                                        .on_hover_text("Löschen")
+                                        .clicked()
+                                    {
                                         to_remove_sel = Some(sel_idx);
                                     }
                                     if ui
@@ -1314,7 +1600,10 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         .desired_width(120.0),
                                 );
                                 if ui
-                                    .small_button("✕")
+                                    .add(egui::Button::image(
+                                        egui::Image::new(ICON_TRASH)
+                                            .fit_to_exact_size(Vec2::splat(12.0)),
+                                    ))
                                     .on_hover_text("Option löschen")
                                     .clicked()
                                 {
@@ -1327,7 +1616,14 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                             sel.options.remove(o_idx);
                         }
                         ui.horizontal(|ui| {
-                            if ui.small_button("＋ Option").clicked() {
+                            if ui
+                                .add(egui::Button::image_and_text(
+                                    egui::Image::new(ICON_PLUS)
+                                        .fit_to_exact_size(Vec2::splat(12.0)),
+                                    "Option",
+                                ))
+                                .clicked()
+                            {
                                 let n = sel.options.len() + 1;
                                 sel.options.push(crate::config::ConfigOption {
                                     value: format!("value{}", n),
@@ -1367,7 +1663,13 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                 );
                 ui.add_space(4.0);
             }
-            if ui.button("＋ Selector hinzufügen").clicked() {
+            if ui
+                .add(egui::Button::image_and_text(
+                    egui::Image::new(ICON_PLUS).fit_to_exact_size(Vec2::splat(14.0)),
+                    "Selector hinzufügen",
+                ))
+                .clicked()
+            {
                 let mut max_n = 0;
                 for sel in &profile.config_selectors {
                     if let Some(suffix) = sel.id.strip_prefix("selector") {
@@ -1423,7 +1725,13 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                 .strong(),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("＋ Neuer Agent").clicked() {
+            if ui
+                .add(egui::Button::image_and_text(
+                    egui::Image::new(ICON_PLUS).fit_to_exact_size(Vec2::splat(14.0)),
+                    "Neuer Agent",
+                ))
+                .clicked()
+            {
                 let mut max_n = 0;
                 for a in &state.draft.agents {
                     if let Some(suffix) = a.id.strip_prefix("agent") {
@@ -1442,6 +1750,8 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     command: None,
                     launch_mode: crate::config::AgentLaunchMode::Terminal,
                     terminal_override: None,
+
+                    icon: None,
                 });
                 state.selected_agent_idx = Some(state.draft.agents.len() - 1);
             }
@@ -1489,7 +1799,13 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     if ui.small_button("Duplizieren").clicked() {
                         to_duplicate = Some(idx);
                     }
-                    if ui.small_button("✕ Löschen").clicked() {
+                    if ui
+                        .add(egui::Button::image_and_text(
+                            egui::Image::new(ICON_TRASH).fit_to_exact_size(Vec2::splat(12.0)),
+                            "Löschen",
+                        ))
+                        .clicked()
+                    {
                         to_delete = Some(idx);
                     }
                     if ui.small_button("Aktiv").clicked() {
@@ -1505,12 +1821,25 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             let mut new_a = a.clone();
             new_a.id = format!("{}_copy", a.id);
             new_a.display_name = format!("{} (Kopie)", a.display_name);
+            if let Some(old_path) = new_a.icon.clone() {
+                let src = PathBuf::from(&old_path);
+                if src.exists() {
+                    if let Ok(dest) = crate::config::AppConfig::copy_icon_to_storage(&src) {
+                        new_a.icon = Some(dest.display().to_string());
+                    }
+                }
+            }
             state.draft.agents.push(new_a);
             state.selected_agent_idx = Some(state.draft.agents.len() - 1);
         }
     }
     if let Some(idx) = to_delete {
         if state.draft.agents.len() > 1 {
+            if let Some(removed) = state.draft.agents.get(idx) {
+                if let Some(icon) = &removed.icon {
+                    crate::config::AppConfig::remove_icon_file(icon);
+                }
+            }
             state.draft.agents.remove(idx);
             if let Some(sel) = state.selected_agent_idx {
                 if sel == idx {
@@ -1558,6 +1887,8 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         command: None,
                         launch_mode: crate::config::AgentLaunchMode::Terminal,
                         terminal_override: None,
+
+                        icon: None,
                     });
                     state.selected_agent_idx = Some(state.draft.agents.len() - 1);
                     state.new_agent_name.clear();
@@ -1647,6 +1978,98 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                 }
                             }
                         });
+                    ui.end_row();
+                    ui.label("Icon:");
+                    ui.horizontal(|ui| {
+                        let is_custom = agent.icon.is_some();
+                        let preview_size = Vec2::splat(18.0);
+                        if let Some(icon_path) = &agent.icon {
+                            let pb = PathBuf::from(icon_path);
+                            if pb.exists() {
+                                let uri = format!(
+                                    "file://{}",
+                                    pb.display().to_string().replace('\\', "/")
+                                );
+                                ui.add(egui::Image::new(uri).fit_to_exact_size(preview_size));
+                            } else {
+                                ui.add(
+                                    egui::Image::new(ICON_WARNING)
+                                        .fit_to_exact_size(preview_size)
+                                        .tint(Color32::from_rgb(200, 80, 20)),
+                                );
+                                ui.label(
+                                    RichText::new("nicht gefunden")
+                                        .size(9.0)
+                                        .color(Color32::from_rgb(200, 80, 20)),
+                                );
+                            }
+                        } else {
+                            ui.add(
+                                egui::Image::new(match agent.id.as_str() {
+                                    "claude" => {
+                                        egui::include_image!("../../assets/icons/claude.svg")
+                                    }
+                                    "codex" => egui::include_image!("../../assets/icons/codex.svg"),
+                                    "gemini" => {
+                                        egui::include_image!("../../assets/icons/gemini.svg")
+                                    }
+                                    "copilot" => {
+                                        egui::include_image!("../../assets/icons/copilot.svg")
+                                    }
+                                    "cursor" => {
+                                        egui::include_image!("../../assets/icons/cursor.svg")
+                                    }
+                                    "aider" => egui::include_image!("../../assets/icons/aider.svg"),
+                                    _ => egui::include_image!("../../assets/icons/claude.svg"),
+                                })
+                                .fit_to_exact_size(preview_size),
+                            );
+                            ui.label(
+                                RichText::new("(Default)")
+                                    .size(9.0)
+                                    .color(Color32::from_rgb(120, 120, 120)),
+                            );
+                        }
+                        if ui
+                            .add(egui::Button::image(
+                                egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(14.0)),
+                            ))
+                            .on_hover_text("Icon wählen (svg, png, ico, jpg - max 2 MB)")
+                            .clicked()
+                        {
+                            if let Some(src) = rfd::FileDialog::new()
+                                .add_filter("Icon", &["svg", "png", "ico", "jpg", "jpeg"])
+                                .pick_file()
+                            {
+                                let old = agent.icon.clone();
+                                match crate::config::AppConfig::copy_icon_to_storage(&src) {
+                                    Ok(dest) => {
+                                        if let Some(old_path) = old {
+                                            crate::config::AppConfig::remove_icon_file(&old_path);
+                                        }
+                                        agent.icon = Some(dest.display().to_string());
+                                        state.error = None;
+                                    }
+                                    Err(e) => {
+                                        state.error = Some(e);
+                                    }
+                                }
+                            }
+                        }
+                        if is_custom
+                            && ui
+                                .add(egui::Button::image(
+                                    egui::Image::new(ICON_TRASH)
+                                        .fit_to_exact_size(Vec2::splat(14.0)),
+                                ))
+                                .on_hover_text("Custom Icon entfernen")
+                                .clicked()
+                        {
+                            if let Some(old) = agent.icon.take() {
+                                crate::config::AppConfig::remove_icon_file(&old);
+                            }
+                        }
+                    });
                     ui.end_row();
                 });
             let prog = agent.program.clone();
@@ -2248,6 +2671,218 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     }
 }
 
+const DEFAULT_TRAY_ICON_IDS: &[&str] = &[
+    "vscode", "vs2022", "rider", "folder", "terminal", "claude", "codex", "gemini",
+    "copilot", "cursor", "aider",
+];
+
+fn tray_icon_display_name(id: &str) -> &str {
+    match id {
+        "vscode" => "VS Code",
+        "vs2022" => "Visual Studio",
+        "rider" => "Rider",
+        "folder" => "Explorer",
+        "terminal" => "Terminal",
+        "claude" => "Claude Code",
+        "codex" => "Codex (OpenAI)",
+        "gemini" => "Gemini CLI",
+        "copilot" => "Copilot CLI",
+        "cursor" => "Cursor Agent",
+        "aider" => "Aider",
+        _ => id,
+    }
+}
+
+fn effective_tray_order(draft: &AppConfig) -> Vec<String> {
+    let all: Vec<String> = DEFAULT_TRAY_ICON_IDS.iter().map(|s| s.to_string()).collect();
+    if draft.tray_icons.icon_order.is_empty() {
+        all
+    } else {
+        let mut eff = draft.tray_icons.icon_order.clone();
+        eff.retain(|id| all.contains(id));
+        for id in &all {
+            if !eff.contains(id) {
+                eff.push(id.clone());
+            }
+        }
+        // keep any custom unknown at end (already retained if not in all, but we removed them above; re-append unknowns)
+        for id in &draft.tray_icons.icon_order {
+            if !all.contains(id) && !eff.contains(id) {
+                eff.push(id.clone());
+            }
+        }
+        eff
+    }
+}
+
+fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
+    let lang = state.draft.language;
+    ui.label(RichText::new(tr(lang, "tray_icons_title")).size(13.0).strong());
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(tr(lang, "tray_icons_desc"))
+            .size(11.0)
+            .color(Color32::from_rgb(100, 100, 100)),
+    );
+    ui.add_space(12.0);
+
+    // Max display slider
+    ui.label(RichText::new(tr(lang, "tray_max_display")).size(12.0).strong());
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new("Wie viele Repos maximal im Tray-Popup angezeigt werden (5–50, Standard 10).")
+            .size(11.0)
+            .color(Color32::from_rgb(100, 100, 100)),
+    );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Limit:");
+        let mut limit = state.draft.tray_icons.max_display;
+        if limit < 5 {
+            limit = 5;
+        }
+        let slider = egui::Slider::new(&mut limit, 5..=50)
+            .text("Repos")
+            .step_by(1.0);
+        if ui.add(slider).changed() {
+            state.draft.tray_icons.max_display = limit.clamp(5, 50);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Oder direkt:");
+        let mut l = state.draft.tray_icons.max_display;
+        if ui
+            .add(egui::DragValue::new(&mut l).range(5..=50).speed(1.0))
+            .changed()
+        {
+            state.draft.tray_icons.max_display = l.clamp(5, 50);
+        }
+        ui.label(
+            RichText::new(format!("(aktuell: {})", state.draft.tray_icons.max_display))
+                .size(11.0)
+                .color(Color32::from_rgb(120, 120, 120)),
+        );
+    });
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(format!(
+            "Zeigt bis zu {} Repos im Tray-Popup. Weitere im Hauptfenster.",
+            state.draft.tray_icons.max_display
+        ))
+        .size(10.0)
+        .color(Color32::from_rgb(120, 120, 120))
+        .italics(),
+    );
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(8.0);
+
+    ui.label(RichText::new("Icons (Reihenfolge & Sichtbarkeit)").size(12.0).strong());
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new("Icons neu anordnen (↑/↓) und ausblenden (👁). Ausgeblendete Icons verschwinden ohne Lücke in der Tray-Zeile.")
+            .size(11.0)
+            .color(Color32::from_rgb(100, 100, 100)),
+    );
+    ui.add_space(8.0);
+
+    let effective = effective_tray_order(&state.draft);
+    let mut tray_move: Option<(usize, isize)> = None;
+    let mut tray_toggle: Option<String> = None;
+    for (order_idx, icon_id) in effective.iter().enumerate() {
+        let is_hidden = state.draft.tray_icons.hidden_icon_ids.contains(icon_id);
+        ui.horizontal(|ui| {
+            let eye_icon = if is_hidden { ICON_EYE_OFF } else { ICON_EYE };
+            if ui
+                .add(egui::Button::image(
+                    egui::Image::new(eye_icon).fit_to_exact_size(Vec2::splat(14.0)),
+                ))
+                .on_hover_text(tr(lang, "icons_toggle_visibility"))
+                .clicked()
+            {
+                tray_toggle = Some(icon_id.clone());
+            }
+            let visuals = ui.visuals();
+            ui.label(
+                RichText::new(format!("{} ({})", tray_icon_display_name(icon_id), icon_id))
+                    .size(11.0)
+                    .color(if is_hidden {
+                        visuals.weak_text_color()
+                    } else {
+                        visuals.text_color()
+                    }),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(egui::Button::image(
+                        egui::Image::new(ICON_CHEVRON_DOWN).fit_to_exact_size(Vec2::splat(14.0)),
+                    ))
+                    .clicked()
+                    && order_idx + 1 < effective.len()
+                {
+                    tray_move = Some((order_idx, 1));
+                }
+                if ui
+                    .add(egui::Button::image(
+                        egui::Image::new(ICON_CHEVRON_UP).fit_to_exact_size(Vec2::splat(14.0)),
+                    ))
+                    .clicked()
+                    && order_idx > 0
+                {
+                    tray_move = Some((order_idx, -1));
+                }
+            });
+        });
+        ui.add_space(2.0);
+    }
+    if let Some(id) = tray_toggle {
+        if state.draft.tray_icons.hidden_icon_ids.contains(&id) {
+            state.draft.tray_icons.hidden_icon_ids.retain(|x| x != &id);
+        } else {
+            state.draft.tray_icons.hidden_icon_ids.push(id);
+        }
+        state.draft.tray_icons.hidden_icon_ids.sort();
+        state.draft.tray_icons.hidden_icon_ids.dedup();
+    }
+    if let Some((idx, delta)) = tray_move {
+        if state.draft.tray_icons.icon_order.is_empty() {
+            state.draft.tray_icons.icon_order = effective.clone();
+        }
+        let new_idx = (idx as isize + delta) as usize;
+        if new_idx < state.draft.tray_icons.icon_order.len() {
+            state.draft.tray_icons.icon_order.swap(idx, new_idx);
+        }
+    }
+
+    ui.add_space(8.0);
+    ui.label(
+        RichText::new(format!(
+            "{} hidden: {}",
+            tr(lang, "icons_hidden_info"),
+            if state.draft.tray_icons.hidden_icon_ids.is_empty() {
+                "—".to_string()
+            } else {
+                state.draft.tray_icons.hidden_icon_ids.join(", ")
+            }
+        ))
+        .size(10.0)
+        .color(Color32::from_rgb(120, 120, 120)),
+    );
+    ui.add_space(8.0);
+    if ui.small_button(tr(lang, "icons_reset")).clicked() {
+        state.draft.tray_icons.hidden_icon_ids.clear();
+        state.draft.tray_icons.icon_order.clear();
+        state.draft.tray_icons.max_display = 10;
+    }
+    if state.draft.tray_icons.hidden_icon_ids.len() == DEFAULT_TRAY_ICON_IDS.len() {
+        ui.colored_label(
+            Color32::from_rgb(200, 80, 20),
+            "Warnung: alle Tray-Icons ausgeblendet – es werden keine Icons in der Tray-Zeile angezeigt.",
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2407,6 +3042,8 @@ mod tests {
                 use_shell: false,
                 allow_unsafe: false,
                 no_args: false,
+
+                icon: None,
             }],
             default_ide_id: Some("vscode".to_string()),
             ide_order: Vec::new(),
@@ -2435,6 +3072,8 @@ mod tests {
             command: None,
             launch_mode: crate::config::AgentLaunchMode::Terminal,
             terminal_override: None,
+
+            icon: None,
         });
         state.selected_agent_idx = Some(state.draft.agents.len() - 1);
         assert_eq!(state.draft.agents.len(), len_before + 1);
@@ -2473,6 +3112,8 @@ mod tests {
                 use_shell: false,
                 allow_unsafe: false,
                 no_args: false,
+
+                icon: None,
             }],
             default_ide_id: Some("vscode".to_string()),
             ide_order: Vec::new(),
@@ -2587,6 +3228,8 @@ mod tests {
                     use_shell: false,
                     allow_unsafe: false,
                     no_args: false,
+
+                    icon: None,
                 }],
                 default_ide_id: Some("vscode".to_string()),
                 ide_order: Vec::new(),
@@ -2627,6 +3270,8 @@ mod tests {
                 command: None,
                 launch_mode: crate::config::AgentLaunchMode::Terminal,
                 terminal_override: None,
+
+                icon: None,
             });
             assert_eq!(id, "myagent");
         }
@@ -2649,6 +3294,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         });
         assert_eq!(profile.ides.len(), before + 1);
         // remove until one left should error
@@ -2676,6 +3323,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         };
         assert_eq!(ide.effective_program(), "code");
         assert_eq!(ide.effective_args(), vec!["{file}"]);
@@ -2761,6 +3410,8 @@ mod tests {
                 use_shell: false,
                 allow_unsafe: false,
                 no_args: false,
+
+                icon: None,
             }],
             default_ide_id: Some("vscode".to_string()),
             ide_order: Vec::new(),

@@ -316,14 +316,28 @@ fn show_tray_repo_row(
 
             ui.add_space(4.0);
 
-            // Row 3: Tools tight spacing
+            // Row 3: Tools tight spacing – respects TrayIconConfig (hidden & order)
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let profile = config.get_effective_profile_for_repo(&repo.path);
+                let tray_hidden = &config.tray_icons.hidden_icon_ids;
+                let tray_order = &config.tray_icons.icon_order;
+                let order_idx = |id: &str| {
+                    tray_order
+                        .iter()
+                        .position(|x| x == id)
+                        .unwrap_or(usize::MAX)
+                };
+                // IDEs: filter by tray hidden, sort by tray order, limit 3
                 let visible_ides = profile.visible_ides();
-                // Show up to 3 IDE buttons
-                for ide in visible_ides.iter().take(3) {
-                    // Determine file path to open: selected solution or repo root
+                let mut tray_ides: Vec<&crate::config::IdeConfig> = visible_ides
+                    .into_iter()
+                    .filter(|ide| !tray_hidden.contains(&ide.id))
+                    .collect();
+                if !tray_order.is_empty() {
+                    tray_ides.sort_by_key(|ide| order_idx(&ide.id));
+                }
+                for ide in tray_ides.iter().take(3) {
                     let file_path = repo
                         .selected_solution
                         .clone()
@@ -337,42 +351,85 @@ fn show_tray_repo_row(
                             Some((repo.path.clone(), ide.id.clone(), file_path));
                     }
                 }
-                if visible_ides.is_empty() {
-                    ui.label(
-                        RichText::new("Keine IDE")
-                            .size(9.0)
-                            .color(Color32::from_rgb(140, 140, 140)),
-                    );
+                if tray_ides.is_empty() {
+                    // Only show placeholder if not all hidden? Keep "Keine IDE" only if original visible was empty?
+                    // If filtered all hidden, don't show placeholder to reflect hidden state
+                    let any_visible_original = !profile.visible_ides().is_empty();
+                    if any_visible_original && tray_hidden.iter().any(|h| ["vscode","vs2022","rider"].contains(&h.as_str())) {
+                        // all tray hidden case – show subtle hint instead of "Keine IDE"
+                        ui.label(
+                            RichText::new("—")
+                                .size(9.0)
+                                .color(Color32::from_rgb(180, 180, 180)),
+                        );
+                    } else if !any_visible_original {
+                        ui.label(
+                            RichText::new("Keine IDE")
+                                .size(9.0)
+                                .color(Color32::from_rgb(140, 140, 140)),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("—")
+                                .size(9.0)
+                                .color(Color32::from_rgb(180, 180, 180)),
+                        );
+                    }
                 }
 
-                ui.separator();
-
-                // Folder
-                if ui
-                    .add(egui::Button::image(
-                        egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(12.0)),
-                    ).small())
-                    .on_hover_text("Im Explorer öffnen")
-                    .clicked()
+                // Folder / Terminal – respect hidden
+                let show_folder = !tray_hidden.contains(&"folder".to_string());
+                let show_terminal = !tray_hidden.contains(&"terminal".to_string());
+                if show_folder || show_terminal {
+                    ui.separator();
+                }
+                if show_folder
+                    && ui
+                        .add(
+                            egui::Button::image(
+                                egui::Image::new(ICON_FOLDER)
+                                    .fit_to_exact_size(Vec2::splat(12.0)),
+                            )
+                            .small(),
+                        )
+                        .on_hover_text("Im Explorer öffnen")
+                        .clicked()
                 {
                     actions.explorer_open = Some(repo.path.clone());
                 }
-                // Terminal
-                if ui
-                    .add(egui::Button::image(
-                        egui::Image::new(ICON_TERMINAL).fit_to_exact_size(Vec2::splat(12.0)),
-                    ).small())
-                    .on_hover_text("Terminal öffnen")
-                    .clicked()
+                if show_terminal
+                    && ui
+                        .add(
+                            egui::Button::image(
+                                egui::Image::new(ICON_TERMINAL)
+                                    .fit_to_exact_size(Vec2::splat(12.0)),
+                            )
+                            .small(),
+                        )
+                        .on_hover_text("Terminal öffnen")
+                        .clicked()
                 {
                     actions.shell_open = Some(repo.path.clone());
                 }
 
-                ui.separator();
-
-                // Agents: show up to 2
+                // Agents: filter by tray hidden + profile hidden/order, sort by tray order
                 let active_agents = config.get_active_agents();
-                let filtered = profile.filtered_agents(&config.agents, &config.active_agent_ids);
+                let filtered_raw = profile.filtered_agents(&config.agents, &config.active_agent_ids);
+                let mut filtered: Vec<&crate::config::AgentProfile> = filtered_raw
+                    .into_iter()
+                    .filter(|a| !tray_hidden.contains(&a.id))
+                    .collect();
+                if !tray_order.is_empty() {
+                    filtered.sort_by_key(|a| order_idx(&a.id));
+                }
+                // Only show separator if there will be agent buttons or fallback
+                let filtered_empty = filtered.is_empty();
+                let fallback_needed = filtered_empty
+                    && !active_agents.is_empty()
+                    && !tray_hidden.contains(&active_agents[0].id);
+                if !filtered_empty || fallback_needed {
+                    ui.separator();
+                }
                 for agent in filtered.iter().take(2) {
                     let btn = egui::Button::image(agent_image(agent)).small();
                     let resp = ui
@@ -382,18 +439,15 @@ fn show_tray_repo_row(
                         actions.agent_open = Some((repo.path.clone(), agent.id.clone()));
                     }
                 }
-                if filtered.is_empty() && !active_agents.is_empty() {
-                    // fallback first active
-                    if let Some(a) = active_agents.first() {
+                if filtered_empty && !active_agents.is_empty() {
+                    let first = &active_agents[0];
+                    if !tray_hidden.contains(&first.id) {
                         if ui
-                            .add(
-                                egui::Button::image(agent_image(a))
-                                    .small(),
-                            )
-                            .on_hover_text(format!("Agent {} starten", a.display_name))
+                            .add(egui::Button::image(agent_image(first)).small())
+                            .on_hover_text(format!("Agent {} starten", first.display_name))
                             .clicked()
                         {
-                            actions.agent_open = Some((repo.path.clone(), a.id.clone()));
+                            actions.agent_open = Some((repo.path.clone(), first.id.clone()));
                         }
                     }
                 }

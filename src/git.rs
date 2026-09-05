@@ -1864,6 +1864,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         };
         assert_eq!(ide.effective_program(), "code");
         assert_eq!(ide.effective_args(), vec!["{file}"]);
@@ -1890,6 +1892,8 @@ mod tests {
             use_shell: true,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         };
         let res = launch_ide(&ide, Path::new("/tmp"), Some(Path::new("/tmp/foo.sln")));
         assert!(res.is_err());
@@ -1941,6 +1945,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         };
         let res_path = launch_ide(
             &ide_path,
@@ -1962,6 +1968,8 @@ mod tests {
                 use_shell: true,
                 allow_unsafe: false,
                 no_args: false,
+
+                icon: None,
             };
             assert!(launch_ide(&ide, Path::new("/tmp"), Some(Path::new("/tmp/f"))).is_err());
         }
@@ -1976,6 +1984,8 @@ mod tests {
                 use_shell: false,
                 allow_unsafe: false,
                 no_args: false,
+
+                icon: None,
             };
             let res = launch_ide(&ide, Path::new("/tmp"), Some(Path::new("/tmp/f")));
             assert!(
@@ -1998,6 +2008,8 @@ mod tests {
             command: None,
             launch_mode: crate::config::AgentLaunchMode::Terminal,
             terminal_override: Some(TerminalPreference::Custom("true".to_string())),
+
+            icon: None,
         };
         // Custom("true") should spawn "true" with agent_cmd as arg, which should succeed (true exits 0)
         let dir = tempdir().unwrap();
@@ -2040,6 +2052,8 @@ mod tests {
             command: None,
             launch_mode: crate::config::AgentLaunchMode::Terminal,
             terminal_override: Some(TerminalPreference::Custom("true".to_string())),
+
+            icon: None,
         };
         let dir = tempdir().unwrap();
         // terminal_override should be used even if global is different
@@ -2152,6 +2166,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         };
         let file = Path::new("/tmp/foo.sln");
         let prog = ide.effective_program();
@@ -2185,6 +2201,8 @@ mod tests {
             command: None,
             launch_mode: crate::config::AgentLaunchMode::Terminal,
             terminal_override: None,
+
+            icon: None,
         };
         let script = build_powershell_script(&agent_bare, repo);
         assert_eq!(script, "claude");
@@ -2219,6 +2237,8 @@ mod tests {
                     use_shell: false,
                     allow_unsafe: false,
                     no_args: false,
+
+                    icon: None,
                 },
                 IdeConfig {
                     id: "b".to_string(),
@@ -2229,6 +2249,8 @@ mod tests {
                     use_shell: false,
                     allow_unsafe: false,
                     no_args: false,
+
+                    icon: None,
                 },
             ],
             default_ide_id: None,

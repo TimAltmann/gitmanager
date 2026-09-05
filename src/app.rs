@@ -392,12 +392,10 @@ impl MyApp {
                 egui::vec2(20.0, 20.0),
             )
         });
-        // Popup size – fits tray_branch_limit
+        // Popup size – fits tray limit (max_display for repos, clamp 5..50)
         let popup_width: f32 = 360.0;
-        let visible_repos = self
-            .repos
-            .len()
-            .min(self.config.tray_branch_limit.max(5) * 2);
+        let tray_limit = self.config.tray_icons.max_display.clamp(5, 50);
+        let visible_repos = self.repos.len().min(tray_limit);
         let row_height: f32 = 66.0;
         let popup_height: f32 = (visible_repos as f32 * row_height + 90.0).clamp(280.0, 520.0);
         let popup_size = egui::vec2(popup_width, popup_height);
@@ -448,7 +446,9 @@ impl MyApp {
             .with_minimize_button(false)
             .with_maximize_button(false);
 
-        let mut repos_clone = self.repos.clone();
+        // Apply tray_icons.max_display limit (filtered by hidden not applicable to repos; hidden controls icons per row in tray_popup.rs)
+        let tray_limit = self.config.tray_icons.max_display.clamp(5, 50);
+        let mut repos_clone: Vec<RepoInfo> = self.repos.iter().take(tray_limit).cloned().collect();
         let config_clone = self.config.clone();
         let lang_clone = lang;
 

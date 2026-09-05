@@ -6,6 +6,7 @@ mod config_parser;
 mod git;
 mod i18n;
 mod scanner;
+mod tray;
 mod ui;
 
 use app::MyApp;

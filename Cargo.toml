@@ -22,7 +22,9 @@ walkdir = "2.5"
 rayon = "1.12"
 anyhow = "1.0"
 roxmltree = "0.20"
-image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+image = { version = "0.25", default-features = false, features = ["png", "ico", "jpeg"] }
+[target.'cfg(target_os = "windows")'.dependencies]
+tray-icon = "0.24"
 
 [dev-dependencies]
 tempfile = "3.27"
