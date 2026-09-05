@@ -6,9 +6,14 @@ use crate::ui::{
     repo_list::{show_repo_list, RepoListActions},
     settings::SettingsState,
 };
-use egui::{Color32, RichText};
+use egui::{Color32, RichText, Vec2};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+
+const ICON_GEAR: egui::ImageSource = egui::include_image!("../assets/icons/gear.svg");
+const ICON_REFRESH: egui::ImageSource = egui::include_image!("../assets/icons/refresh.svg");
+const ICON_WARNING: egui::ImageSource = egui::include_image!("../assets/icons/warning.svg");
+const ICON_CROSS: egui::ImageSource = egui::include_image!("../assets/icons/cross.svg");
 
 enum ScanResult {
     Repos(Vec<RepoInfo>),
@@ -41,6 +46,19 @@ pub struct MyApp {
     last_window_size: [f32; 2],
     // Panel collapse state
     top_bar_collapsed: bool,
+    // Tray state
+    #[cfg(target_os = "windows")]
+    tray_icon: Option<tray_icon::TrayIcon>,
+    #[cfg(target_os = "windows")]
+    tray_event_rx: Option<std::sync::mpsc::Receiver<tray_icon::TrayIconEvent>>,
+    #[cfg(target_os = "windows")]
+    menu_event_rx: Option<std::sync::mpsc::Receiver<tray_icon::menu::MenuEvent>>,
+    #[cfg(target_os = "windows")]
+    tray_menu: Option<tray_icon::menu::Menu>,
+    tray_popup_open: bool,
+    tray_popup_rect: Option<egui::Rect>,
+    window_visible: bool,
+    should_quit: bool,
 }
 
 impl MyApp {
@@ -72,7 +90,31 @@ impl MyApp {
             pending_branch_switch: None,
             last_window_size: [0.0; 2],
             top_bar_collapsed: false,
+            #[cfg(target_os = "windows")]
+            tray_icon: None,
+            #[cfg(target_os = "windows")]
+            tray_event_rx: None,
+            #[cfg(target_os = "windows")]
+            menu_event_rx: None,
+            #[cfg(target_os = "windows")]
+            tray_menu: None,
+            tray_popup_open: false,
+            tray_popup_rect: None,
+            window_visible: true,
+            should_quit: false,
         };
+        #[cfg(target_os = "windows")]
+        {
+            // Setup tray icon with robust channel forwarding (preserves rect)
+            if let Some(channels) = crate::tray::create_tray_channels(cc.egui_ctx.clone()) {
+                app.tray_icon = Some(channels.tray_icon);
+                app.tray_event_rx = Some(channels.tray_rx);
+                app.menu_event_rx = Some(channels.menu_rx);
+                app.tray_menu = Some(channels.tray_menu);
+            } else {
+                eprintln!("Tray icon creation failed");
+            }
+        }
         // Auto-Erkennung asynchron (verhindert UI Freeze beim Start)
         {
             let cfg = app.config.clone();
@@ -191,6 +233,386 @@ impl MyApp {
         }
     }
 
+    fn show_main_window(&mut self, ctx: &egui::Context) {
+        self.tray_popup_open = false;
+        self.tray_popup_rect = None;
+        self.window_visible = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn poll_tray_events(&mut self, ctx: &egui::Context) {
+        use tray_icon::MouseButton;
+        use tray_icon::MouseButtonState;
+        use tray_icon::TrayIconEvent;
+        // Use our forwarded channels (preserve rect) – not the global receiver which is disabled after set_event_handler
+        // Tray icon clicks – left Up toggles custom popup, double-click shows main
+        // Dynamic menu attach/detach prevents native menu flash on left click:
+        // left -> set_menu(None), right -> set_menu(Some) (synchronous handler in tray.rs also does this)
+        if let Some(rx) = &self.tray_event_rx {
+            // Need to avoid borrowing self while mutating; drain via try_recv loop
+            // We use a temporary vec to avoid borrow checker issues with ppp
+            let events: Vec<_> = {
+                let mut v = Vec::new();
+                while let Ok(ev) = rx.try_recv() {
+                    v.push(ev);
+                }
+                v
+            };
+            for event in events {
+                match event {
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Down,
+                        ..
+                    } => {
+                        // Detach menu synchronously before Up could trigger native menu
+                        if let Some(icon) = &self.tray_icon {
+                            icon.set_menu(None);
+                        }
+                    }
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        rect,
+                        ..
+                    } => {
+                        // Ensure menu detached before toggling custom popup (also handled in Down)
+                        if let Some(icon) = &self.tray_icon {
+                            icon.set_menu(None);
+                        }
+                        // Left-click released -> toggle popup (right click is native menu, ignore)
+                        let ppp = ctx.pixels_per_point();
+                        let ppp = if ppp == 0.0 { 1.0 } else { ppp };
+                        let tray_rect = egui::Rect::from_min_size(
+                            egui::pos2(rect.position.x as f32 / ppp, rect.position.y as f32 / ppp),
+                            egui::vec2(rect.size.width as f32 / ppp, rect.size.height as f32 / ppp),
+                        );
+                        if self.tray_popup_open {
+                            self.tray_popup_open = false;
+                            self.tray_popup_rect = None;
+                        } else {
+                            self.tray_popup_open = true;
+                            self.tray_popup_rect = Some(tray_rect);
+                        }
+                        ctx.request_repaint();
+                    }
+                    TrayIconEvent::Click {
+                        button: MouseButton::Right,
+                        ..
+                    } => {
+                        // Right click -> re-attach native menu before OS shows it
+                        if let Some(icon) = &self.tray_icon {
+                            if let Some(menu) = &self.tray_menu {
+                                icon.set_menu(Some(Box::new(menu.clone())));
+                            }
+                        }
+                        // Right click -> native menu, close custom popup to avoid overlap
+                        if self.tray_popup_open {
+                            self.tray_popup_open = false;
+                            self.tray_popup_rect = None;
+                            ctx.request_repaint();
+                        }
+                    }
+                    TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        self.show_main_window(ctx);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Menu events from our forwarded channel
+        if let Some(rx) = &self.menu_event_rx {
+            let events: Vec<_> = {
+                let mut v = Vec::new();
+                while let Ok(ev) = rx.try_recv() {
+                    v.push(ev);
+                }
+                v
+            };
+            for event in events {
+                let id = event.id.0.as_str();
+                match id {
+                    crate::tray::MENU_ID_SHOW => self.show_main_window(ctx),
+                    crate::tray::MENU_ID_REFRESH => self.start_scan(),
+                    crate::tray::MENU_ID_SETTINGS => {
+                        self.show_settings = true;
+                        self.settings_state = Some(SettingsState::from_config(&self.config));
+                        self.show_main_window(ctx);
+                    }
+                    crate::tray::MENU_ID_QUIT => {
+                        self.should_quit = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn poll_tray_events(&mut self, _ctx: &egui::Context) {}
+
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            // Only minimize to tray on Windows where tray is available
+            #[cfg(target_os = "windows")]
+            let should_minimize = self.config.minimize_to_tray && !self.should_quit;
+            #[cfg(not(target_os = "windows"))]
+            let should_minimize = false;
+            if should_minimize {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                // Hide instead of closing
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.window_visible = false;
+                self.tray_popup_open = false;
+            }
+        }
+    }
+
+    fn show_tray_popup_viewport(&mut self, ctx: &egui::Context, lang: crate::i18n::Language) {
+        if !self.tray_popup_open {
+            return;
+        }
+        // Clone needed data for closure capture
+        let tray_rect = self.tray_popup_rect.unwrap_or_else(|| {
+            // Fallback: bottom-right of screen if no rect
+            let screen = ctx.input(|i| {
+                i.viewport()
+                    .monitor_size
+                    .unwrap_or(egui::vec2(1920.0, 1080.0))
+            });
+            egui::Rect::from_min_size(
+                egui::pos2(screen.x - 380.0, screen.y - 500.0),
+                egui::vec2(20.0, 20.0),
+            )
+        });
+        // Popup size – fits tray_branch_limit
+        let popup_width: f32 = 360.0;
+        let visible_repos = self
+            .repos
+            .len()
+            .min(self.config.tray_branch_limit.max(5) * 2);
+        let row_height: f32 = 66.0;
+        let popup_height: f32 = (visible_repos as f32 * row_height + 90.0).clamp(280.0, 520.0);
+        let popup_size = egui::vec2(popup_width, popup_height);
+
+        // Calculate position: above tray icon, clamped to current monitor
+        let monitor_size = ctx.input(|i| {
+            i.viewport()
+                .monitor_size
+                .unwrap_or(egui::vec2(1920.0, 1080.0))
+        });
+        let monitor_offset_x = if tray_rect.center().x > monitor_size.x {
+            (tray_rect.center().x / monitor_size.x).floor() * monitor_size.x
+        } else if tray_rect.center().x < 0.0 {
+            (tray_rect.center().x / monitor_size.x).floor() * monitor_size.x
+        } else {
+            0.0
+        };
+        let monitor_offset_y = if tray_rect.center().y > monitor_size.y {
+            (tray_rect.center().y / monitor_size.y).floor() * monitor_size.y
+        } else if tray_rect.center().y < 0.0 {
+            (tray_rect.center().y / monitor_size.y).floor() * monitor_size.y
+        } else {
+            0.0
+        };
+        let screen_rect = egui::Rect::from_min_max(
+            egui::pos2(monitor_offset_x, monitor_offset_y),
+            egui::pos2(
+                monitor_offset_x + monitor_size.x,
+                monitor_offset_y + monitor_size.y,
+            ),
+        );
+        let popup_pos =
+            crate::ui::tray_popup::calculate_popup_position(tray_rect, popup_size, screen_rect);
+
+        let mut close_popup = false;
+        let mut tray_actions = crate::ui::tray_popup::TrayPopupActions::default();
+        let viewport_id = egui::ViewportId::from_hash_of("tray_popup");
+        let builder = egui::ViewportBuilder::default()
+            .with_title("GitManager Tray")
+            .with_inner_size(popup_size)
+            .with_position(popup_pos)
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_resizable(false)
+            .with_taskbar(false)
+            .with_window_level(egui::WindowLevel::AlwaysOnTop)
+            .with_close_button(false)
+            .with_minimize_button(false)
+            .with_maximize_button(false);
+
+        let mut repos_clone = self.repos.clone();
+        let config_clone = self.config.clone();
+        let lang_clone = lang;
+
+        ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
+            if class == egui::ViewportClass::EmbeddedWindow {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.label("Tray popup (embedded) – viewports not supported on this backend");
+                    if ui.button("Schließen").clicked() {
+                        close_popup = true;
+                    }
+                });
+                return;
+            }
+            // Ensure child viewport has theme and image loaders (distinct styling)
+            crate::ui::theme::apply_theme(ctx, &config_clone.theme);
+            egui_extras::install_image_loaders(ctx);
+            if ctx.input(|i| i.viewport().close_requested()) {
+                close_popup = true;
+            }
+            egui::CentralPanel::default().show(ctx, |ui| {
+                crate::ui::tray_popup::show_tray_popup_ui(
+                    ui,
+                    &mut repos_clone,
+                    &config_clone,
+                    &mut tray_actions,
+                );
+            });
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close_popup = true;
+            }
+            if tray_actions.close_popup {
+                close_popup = true;
+            }
+            if tray_actions.quit {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
+
+        if close_popup {
+            self.tray_popup_open = false;
+            self.tray_popup_rect = None;
+        }
+        if tray_actions.refresh {
+            self.start_scan();
+        }
+        if tray_actions.open_main {
+            self.show_main_window(ctx);
+        }
+        if tray_actions.quit {
+            self.should_quit = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if let Some((path, branch)) = tray_actions.branch_switch {
+            self.pending_branch_switch = Some((path, branch));
+        }
+        if let Some((path, ide_id, file)) = tray_actions.ide_open {
+            {
+                let state = self.config.get_repo_state_mut(&path);
+                state.selected_ide = Some(ide_id.clone());
+                let _ = self.config.save();
+            }
+            let profile = self.config.get_effective_profile_for_repo(&path);
+            if let Some(ide) = profile.ides.iter().find(|i| i.id == ide_id) {
+                let file_opt = if ide.no_args {
+                    None
+                } else {
+                    Some(file.as_path())
+                };
+                let display = file_opt
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                match launch_ide(ide, &path, file_opt) {
+                    Ok(()) => {
+                        self.status_message = Some(crate::i18n::tr_fmt(
+                            lang_clone,
+                            "opening_with",
+                            &[&display, &ide.display_name],
+                        ));
+                        self.status_message_time = Some(std::time::Instant::now());
+                    }
+                    Err(e) => {
+                        self.error = Some(format!(
+                            "IDE '{}' konnte nicht gestartet werden: {e:#}",
+                            ide.display_name
+                        ));
+                    }
+                }
+            }
+            self.tray_popup_open = false;
+        }
+        if let Some((path, agent_id)) = tray_actions.agent_open {
+            let agent = self
+                .config
+                .agents
+                .iter()
+                .find(|a| a.id == agent_id)
+                .cloned()
+                .or_else(|| self.config.get_active_agent().cloned());
+            if let Some(agent) = agent {
+                let term_pref = agent
+                    .terminal_override
+                    .clone()
+                    .unwrap_or_else(|| self.config.terminal.preference.clone());
+                let repo_clone = path.clone();
+                let agent_clone = agent.clone();
+                let name = agent.display_name.clone();
+                let err_tx = self.launch_err_tx.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = launch_agent(&agent_clone, &repo_clone, &term_pref) {
+                        let _ = err_tx.send(format!(
+                            "Agent '{}' konnte nicht gestartet werden: {e:#}",
+                            name
+                        ));
+                    }
+                });
+                self.status_message = Some(crate::i18n::tr_fmt(
+                    lang_clone,
+                    "starting_agent_in",
+                    &[&agent.display_name, &path.display().to_string()],
+                ));
+                self.status_message_time = Some(std::time::Instant::now());
+            }
+            self.tray_popup_open = false;
+        }
+        if let Some(path) = tray_actions.explorer_open {
+            match crate::git::open_in_explorer(&path) {
+                Ok(()) => {
+                    self.status_message = Some(crate::i18n::tr_fmt(
+                        lang_clone,
+                        "explorer_opened",
+                        &[&path.display().to_string()],
+                    ));
+                    self.status_message_time = Some(std::time::Instant::now());
+                }
+                Err(e) => {
+                    self.error = Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"))
+                }
+            }
+            self.tray_popup_open = false;
+        }
+        if let Some(path) = tray_actions.shell_open {
+            let pref = self.config.terminal.preference.clone();
+            let repo_clone = path.clone();
+            let err_tx = self.launch_err_tx.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = crate::git::open_shell(&repo_clone, &pref) {
+                    let _ = err_tx.send(format!("Shell konnte nicht geöffnet werden: {e:#}"));
+                }
+            });
+            self.status_message = Some(crate::i18n::tr_fmt(
+                lang_clone,
+                "shell_opened",
+                &[&path.display().to_string()],
+            ));
+            self.status_message_time = Some(std::time::Instant::now());
+            self.tray_popup_open = false;
+        }
+        if tray_actions.open_settings {
+            self.show_settings = true;
+            self.settings_state = Some(SettingsState::from_config(&self.config));
+            self.show_main_window(ctx);
+        }
+    }
+
     fn handle_branch_switch(&mut self, repo_path: PathBuf, target_branch: String) {
         // Prüfe dirty und conflicts
         let repo_path_clone = repo_path.clone();
@@ -284,11 +706,7 @@ impl MyApp {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("📦 {}", tr(lang, "app_title")))
-                            .size(17.0)
-                            .strong(),
-                    );
+                    ui.label(RichText::new(tr(lang, "app_title")).size(17.0).strong());
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new(format!("{} Repositories", self.repos.len()))
@@ -424,7 +842,10 @@ impl MyApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .button(RichText::new(format!("⚙ {}", tr(lang, "settings"))).size(12.0))
+                            .add(egui::Button::image_and_text(
+                                egui::Image::new(ICON_GEAR).fit_to_exact_size(Vec2::splat(14.0)),
+                                RichText::new(tr(lang, "settings")).size(12.0),
+                            ))
                             .on_hover_text(tr(lang, "settings_tooltip"))
                             .clicked()
                         {
@@ -432,12 +853,15 @@ impl MyApp {
                             self.settings_state = Some(SettingsState::from_config(&self.config));
                         }
                         ui.add_space(8.0);
-                        let refresh_label = if self.scanning {
-                            format!("⟳ {}", tr(lang, "scanning"))
+                        let (refresh_icon, refresh_label) = if self.scanning {
+                            (ICON_REFRESH, tr(lang, "scanning"))
                         } else {
-                            format!("↻ {}", tr(lang, "refresh"))
+                            (ICON_REFRESH, tr(lang, "refresh"))
                         };
-                        let btn = egui::Button::new(RichText::new(refresh_label).size(12.0));
+                        let btn = egui::Button::image_and_text(
+                            egui::Image::new(refresh_icon).fit_to_exact_size(Vec2::splat(14.0)),
+                            RichText::new(refresh_label).size(12.0),
+                        );
                         if ui.add_enabled(!self.scanning, btn).clicked() {
                             self.start_scan();
                         }
@@ -653,10 +1077,27 @@ impl MyApp {
 }
 
 impl eframe::App for MyApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Called also when window hidden (Visible(false)), ensures tray stays responsive
+        self.poll_scan(ctx);
+        self.poll_tray_events(ctx);
+        self.handle_close_request(ctx);
+        // Always show popup from logic when open – works whether main window visible or hidden
+        // (ui may not be called every frame when window not focused)
+        if self.tray_popup_open {
+            let lang = self.config.language;
+            self.show_tray_popup_viewport(ctx, lang);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let lang = self.config.language;
         self.poll_scan(&ctx);
+        self.poll_tray_events(&ctx);
+        self.handle_close_request(&ctx);
+        // Popup is handled in logic() (always) – works whether main window visible or hidden
+        // No need to call show_tray_popup_viewport here to avoid double viewport creation per frame
 
         // Track window size for collapsing logic using ctx screen rect (Hysterese: <400 collapsed, >=500 expanded)
         let screen_rect = ctx.viewport_rect();
@@ -682,7 +1123,8 @@ impl eframe::App for MyApp {
                     .inner_margin(egui::Margin::same(12)),
             )
             .show(ui, |ui| {
-                if let Some(err) = &self.error {
+                let err_to_clear = if let Some(err_msg) = self.error.clone() {
+                    let mut do_clear = false;
                     let frame = egui::Frame::new()
                         .fill(Color32::from_rgb(255, 235, 235))
                         .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 100, 100)))
@@ -690,25 +1132,43 @@ impl eframe::App for MyApp {
                         .inner_margin(egui::Margin::symmetric(10, 8));
                     frame.show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Image::new(ICON_WARNING)
+                                    .fit_to_exact_size(Vec2::splat(16.0))
+                                    .tint(Color32::from_rgb(160, 40, 40)),
+                            );
                             ui.label(
                                 RichText::new(format!(
-                                    "⚠ {}: {}",
+                                    "{}: {}",
                                     if lang == Language::En {
                                         "Error"
                                     } else {
                                         "Fehler"
                                     },
-                                    err
+                                    err_msg
                                 ))
                                 .size(12.0)
                                 .color(Color32::from_rgb(160, 40, 40)),
                             );
-                            if ui.small_button("✕").clicked() {
-                                // Will be cleared next frame via status polling
+                            if ui
+                                .add(egui::Button::image(
+                                    egui::Image::new(ICON_CROSS)
+                                        .fit_to_exact_size(Vec2::splat(12.0)),
+                                ))
+                                .on_hover_text("Schließen")
+                                .clicked()
+                            {
+                                do_clear = true;
                             }
                         });
                     });
                     ui.add_space(8.0);
+                    do_clear
+                } else {
+                    false
+                };
+                if err_to_clear {
+                    self.error = None;
                 }
 
                 if self.config.roots.is_empty() && !self.scanning {
@@ -718,11 +1178,18 @@ impl eframe::App for MyApp {
                         .corner_radius(6)
                         .inner_margin(egui::Margin::symmetric(10, 8));
                     frame.show(ui, |ui| {
-                        ui.label(
-                            RichText::new(format!("⚠ {}", tr(lang, "no_search_path")))
-                                .size(12.0)
-                                .color(Color32::from_rgb(120, 90, 20)),
-                        );
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Image::new(ICON_WARNING)
+                                    .fit_to_exact_size(Vec2::splat(14.0))
+                                    .tint(Color32::from_rgb(120, 90, 20)),
+                            );
+                            ui.label(
+                                RichText::new(tr(lang, "no_search_path"))
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(120, 90, 20)),
+                            );
+                        });
                     });
                     ui.add_space(12.0);
                 }
