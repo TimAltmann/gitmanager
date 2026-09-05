@@ -831,14 +831,13 @@ impl MyApp {
                     .tray_popup_opened_at
                     .map(|t| t.elapsed() > std::time::Duration::from_millis(500))
                     .unwrap_or(true)
-                {
-                    if ctx.input(|i| {
+                    && ctx.input(|i| {
                         i.events
                             .iter()
                             .any(|e| matches!(e, egui::Event::WindowFocused(false)))
-                    }) {
-                        close_popup = true;
-                    }
+                    })
+                {
+                    close_popup = true;
                 }
             });
         }));

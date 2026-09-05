@@ -176,8 +176,14 @@ mod imp {
                     button: MouseButton::Left,
                     ..
                 } => {
-                    let guard = shared.lock().unwrap();
+                    let mut guard = shared.lock().unwrap();
+                    if guard.popup_open {
+                        guard.popup_open = false;
+                        guard.popup_rect = None;
+                        guard.popup_opened_at = None;
+                    }
                     let _ = guard.action_tx.send(TrayAction::ShowMainWindow);
+                    drop(guard);
                     ctx.request_repaint();
                     ctx.request_repaint_of(ViewportId::ROOT);
                 }
@@ -197,7 +203,7 @@ mod imp {
 
         for event in menu_events {
             let id = event.id.0.as_str();
-            let guard = shared.lock().unwrap();
+            let mut guard = shared.lock().unwrap();
             let needs_wake = matches!(
                 id,
                 crate::tray::MENU_ID_SHOW
@@ -205,6 +211,19 @@ mod imp {
                     | crate::tray::MENU_ID_SETTINGS
                     | crate::tray::MENU_ID_QUIT
             );
+            // Close custom popup when native menu action selected (avoid overlap)
+            if guard.popup_open
+                && matches!(
+                    id,
+                    crate::tray::MENU_ID_SHOW
+                        | crate::tray::MENU_ID_SETTINGS
+                        | crate::tray::MENU_ID_QUIT
+                )
+            {
+                guard.popup_open = false;
+                guard.popup_rect = None;
+                guard.popup_opened_at = None;
+            }
             match id {
                 crate::tray::MENU_ID_SHOW => {
                     let _ = guard.action_tx.send(TrayAction::ShowMainWindow);
@@ -220,8 +239,10 @@ mod imp {
                 }
                 _ => {}
             }
+            drop(guard);
             if needs_wake {
                 // Wake main viewport immediately (service is 500ms throttled, main needs instant)
+                ctx.request_repaint();
                 ctx.request_repaint_of(ViewportId::ROOT);
             }
         }
@@ -378,14 +399,13 @@ mod imp {
                 if popup_opened_at
                     .map(|t| t.elapsed() > std::time::Duration::from_millis(500))
                     .unwrap_or(true)
-                {
-                    if ctx.input(|i| {
+                    && ctx.input(|i| {
                         i.events
                             .iter()
                             .any(|e| matches!(e, egui::Event::WindowFocused(false)))
-                    }) {
-                        close_popup = true;
-                    }
+                    })
+                {
+                    close_popup = true;
                 }
             });
         }));
