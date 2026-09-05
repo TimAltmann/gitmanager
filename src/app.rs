@@ -6,9 +6,14 @@ use crate::ui::{
     repo_list::{show_repo_list, RepoListActions},
     settings::SettingsState,
 };
-use egui::{Color32, RichText};
-use std::path::PathBuf;
+use egui::{Color32, RichText, Vec2};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+
+const ICON_GEAR: egui::ImageSource = egui::include_image!("../assets/icons/gear.svg");
+const ICON_REFRESH: egui::ImageSource = egui::include_image!("../assets/icons/refresh.svg");
+const ICON_WARNING: egui::ImageSource = egui::include_image!("../assets/icons/warning.svg");
+const ICON_CROSS: egui::ImageSource = egui::include_image!("../assets/icons/cross.svg");
 
 enum ScanResult {
     Repos(Vec<RepoInfo>),
@@ -19,6 +24,13 @@ struct BranchDialog {
     target_branch: String,
     error: Option<String>,
     dirty_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageType {
+    Open,
+    BranchSwitch,
+    ConfigChange,
 }
 
 pub struct MyApp {
@@ -33,6 +45,9 @@ pub struct MyApp {
     launch_err_tx: Sender<String>,
     launch_err_rx: Receiver<String>,
     config_update_rx: Receiver<Result<AppConfig, String>>,
+    update_rx: Receiver<Option<crate::updater::UpdateInfo>>,
+    update_info: Option<crate::updater::UpdateInfo>,
+    show_update_dialog: bool,
     status_message: Option<String>,
     status_message_time: Option<std::time::Instant>,
     branch_dialog: Option<BranchDialog>,
@@ -41,6 +56,21 @@ pub struct MyApp {
     last_window_size: [f32; 2],
     // Panel collapse state
     top_bar_collapsed: bool,
+    // Tray state (Service ist einzige Windows-Quelle, F-01: Fallback gestrichen)
+    #[cfg(target_os = "windows")]
+    tray_icon: Option<tray_icon::TrayIcon>,
+    #[cfg(target_os = "windows")]
+    tray_shared: Option<std::sync::Arc<std::sync::Mutex<crate::tray_service::TrayShared>>>,
+    #[cfg(target_os = "windows")]
+    tray_action_rx: Option<std::sync::mpsc::Receiver<crate::tray_service::TrayAction>>,
+    #[cfg(target_os = "windows")]
+    tray_service_tray_rx: Option<
+        std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<tray_icon::TrayIconEvent>>>,
+    >,
+    #[cfg(target_os = "windows")]
+    last_tray_sync: Option<std::time::Instant>,
+    window_visible: bool,
+    should_quit: bool,
 }
 
 impl MyApp {
@@ -53,6 +83,7 @@ impl MyApp {
         let (tx, rx) = mpsc::channel();
         let (launch_err_tx, launch_err_rx) = mpsc::channel();
         let (config_update_tx, config_update_rx) = mpsc::channel::<Result<AppConfig, String>>();
+        let (update_tx, update_rx) = mpsc::channel::<Option<crate::updater::UpdateInfo>>();
 
         let mut app = Self {
             config,
@@ -66,13 +97,54 @@ impl MyApp {
             launch_err_tx,
             launch_err_rx,
             config_update_rx,
+            update_rx,
+            update_info: None,
+            show_update_dialog: false,
             status_message: None,
             status_message_time: None,
             branch_dialog: None,
             pending_branch_switch: None,
             last_window_size: [0.0; 2],
             top_bar_collapsed: false,
+            #[cfg(target_os = "windows")]
+            tray_icon: None,
+            #[cfg(target_os = "windows")]
+            tray_shared: None,
+            #[cfg(target_os = "windows")]
+            tray_action_rx: None,
+            #[cfg(target_os = "windows")]
+            tray_service_tray_rx: None,
+            #[cfg(target_os = "windows")]
+            last_tray_sync: None,
+            window_visible: true,
+            should_quit: false,
         };
+        #[cfg(target_os = "windows")]
+        {
+            // Setup tray icon - custom popup on left/right click, no native menu
+            if let Some(channels) = crate::tray::create_tray_channels(cc.egui_ctx.clone()) {
+                app.tray_icon = Some(channels.tray_icon);
+                // Create shared state and channels for tray service (efficient Arc sharing)
+                let (action_tx, action_rx) = mpsc::channel();
+                let shared = std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::tray_service::TrayShared::new(action_tx),
+                ));
+                // Wrap receiver in Arc<Mutex> for Sync required by deferred viewport
+                let tray_rx_arc = std::sync::Arc::new(std::sync::Mutex::new(channels.tray_rx));
+                // Initial sync of data (efficient: clones once at startup)
+                {
+                    if let Ok(mut guard) = shared.lock() {
+                        guard.update_data(app.repos.clone(), app.config.clone());
+                    }
+                }
+                app.tray_shared = Some(shared);
+                app.tray_action_rx = Some(action_rx);
+                app.tray_service_tray_rx = Some(tray_rx_arc);
+                app.last_tray_sync = Some(std::time::Instant::now());
+            } else {
+                eprintln!("Tray icon creation failed");
+            }
+        }
         // Auto-Erkennung asynchron (verhindert UI Freeze beim Start)
         {
             let cfg = app.config.clone();
@@ -115,6 +187,26 @@ impl MyApp {
                 }
             });
         }
+        // Update checker (async, 2s delay to not affect startup)
+        // Nur wenn in den Settings aktiviert (F-06 Opt-out, Default AN)
+        {
+            let current_version = env!("CARGO_PKG_VERSION").to_string();
+            let enabled = app.config.check_for_updates;
+            std::thread::spawn(move || {
+                if !enabled {
+                    let _ = update_tx.send(None);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let update = crate::updater::check_for_update(&current_version);
+                if update.is_none() {
+                    // Still-fail bewusst: kein Retry/Popup, nur Thread-Ende
+                    // (Proxy/MITM mit webpki-roots schlägt hier still fehl)
+                    eprintln!("Update-Check: keine Info (offline/404/deaktiviert?)");
+                }
+                let _ = update_tx.send(update);
+            });
+        }
         app.start_scan();
         // Initial size matches viewport default (1080x680) – used for collapse logic
         app.last_window_size = [1080.0, 680.0];
@@ -141,6 +233,7 @@ impl MyApp {
             let ScanResult::Repos(repos) = result;
             self.repos = repos;
             self.error = None;
+            self.sync_tray_service();
             ctx.request_repaint();
         }
         while let Ok(err) = self.launch_err_rx.try_recv() {
@@ -154,6 +247,7 @@ impl MyApp {
                 Ok(cfg) => {
                     self.config = cfg;
                     self.error = None;
+                    self.sync_tray_service();
                     // Settings offen: nicht kompletten Draft verwerfen, nur auto-erkannte Programme mergen
                     if self.show_settings {
                         if let Some(state) = self.settings_state.as_mut() {
@@ -174,6 +268,13 @@ impl MyApp {
                 }
             }
         }
+        while let Ok(update) = self.update_rx.try_recv() {
+            if let Some(info) = update {
+                self.update_info = Some(info);
+                self.show_update_dialog = true;
+                ctx.request_repaint();
+            }
+        }
         if self.scanning {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -186,9 +287,284 @@ impl MyApp {
             }
         }
         // Pending branch switch nach Scan? Eigentlich direkt
+        // F-05: Bei Tray-BranchSwitch mit hidden Window zuerst Hauptfenster einblenden,
+        // sonst wäre der Dirty-Dialog in ui() unsichtbar.
         if let Some((path, branch)) = self.pending_branch_switch.take() {
+            if !self.window_visible {
+                self.show_main_window(ctx);
+            }
             self.handle_branch_switch(path, branch);
         }
+    }
+
+    fn show_main_window(&mut self, ctx: &egui::Context) {
+        self.window_visible = true;
+        self.should_quit = false;
+        // Also clear popup in dedicated tray service (efficient: shared state)
+        #[cfg(target_os = "windows")]
+        if let Some(shared) = &self.tray_shared {
+            if let Ok(mut guard) = shared.try_lock() {
+                guard.popup_open = false;
+                guard.popup_rect = None;
+                guard.popup_opened_at = None;
+            }
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn poll_tray_events(&mut self, _ctx: &egui::Context) {
+        // F-01: Fallback gestrichen — TrayService-Viewport ist einzige Windows-Quelle.
+        // Historie: früher wurde hier tray_event_rx gedraint und tray_popup_open getoggelt
+        // (Links Up toggle, Rechts tot, DoubleClick ShowMain). Jetzt alles in tray_service.rs.
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn poll_tray_events(&mut self, _ctx: &egui::Context) {}
+
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            // Only minimize to tray on Windows where tray is available
+            #[cfg(target_os = "windows")]
+            let should_minimize = self.config.minimize_to_tray && !self.should_quit;
+            #[cfg(not(target_os = "windows"))]
+            let should_minimize = false;
+            if should_minimize {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                // Hide instead of closing - tray service keeps popup alive
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.window_visible = false;
+                #[cfg(target_os = "windows")]
+                if let Some(shared) = &self.tray_shared {
+                    if let Ok(mut guard) = shared.try_lock() {
+                        guard.popup_open = false;
+                        guard.popup_rect = None;
+                        guard.popup_opened_at = None;
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn sync_tray_service(&mut self) {
+        // Efficient: immediate sync using Arc to avoid clones on read (only clones Vec once)
+        if let Some(shared) = &self.tray_shared {
+            if let Ok(mut guard) = shared.try_lock() {
+                guard.update_data(self.repos.clone(), self.config.clone());
+                self.last_tray_sync = Some(std::time::Instant::now());
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn maybe_sync_tray_service(&mut self) {
+        // Throttled sync for periodic updates - efficient check every 500ms
+        let should_sync = if let Some(t) = self.last_tray_sync {
+            t.elapsed() > std::time::Duration::from_millis(500)
+        } else {
+            true
+        };
+        if should_sync {
+            self.sync_tray_service();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn poll_tray_service_actions(&mut self, ctx: &egui::Context) {
+        let actions: Vec<crate::tray_service::TrayAction> = if let Some(rx) = &self.tray_action_rx {
+            let mut v = Vec::new();
+            while let Ok(a) = rx.try_recv() {
+                v.push(a);
+            }
+            v
+        } else {
+            Vec::new()
+        };
+        for action in actions {
+            match action {
+                crate::tray_service::TrayAction::ShowMainWindow => self.show_main_window(ctx),
+                crate::tray_service::TrayAction::Refresh => self.start_scan(),
+                crate::tray_service::TrayAction::OpenSettings => {
+                    self.show_settings = true;
+                    self.settings_state = Some(SettingsState::from_config(&self.config));
+                    self.show_main_window(ctx);
+                }
+                crate::tray_service::TrayAction::Quit => {
+                    self.should_quit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                crate::tray_service::TrayAction::BranchSwitch(path, branch) => {
+                    self.pending_branch_switch = Some((path, branch));
+                }
+                crate::tray_service::TrayAction::SolutionSelect(repo_path, sln_path) => {
+                    let state = self.config.get_repo_state_mut(&repo_path);
+                    state.selected_solution = Some(sln_path.clone());
+                    if let Err(e) = self.config.save() {
+                        self.error = Some(crate::i18n::tr_fmt(
+                            self.config.language,
+                            "save_failed",
+                            &[&format!("{e:#}")],
+                        ));                    } else {
+                        if let Some(repo) = self.repos.iter_mut().find(|r| r.path == repo_path) {
+                            repo.selected_solution = Some(sln_path.clone());
+                        }
+                        self.status_message = Some(crate::i18n::tr_fmt(
+                            self.config.language,
+                            "solution_selected",
+                            &[&repo_path.display().to_string()],
+                        ));
+                        self.status_message_time = Some(std::time::Instant::now());
+                        self.sync_tray_service();
+                    }
+                }
+                crate::tray_service::TrayAction::IdeOpen(path, ide_id, file) => {
+                    {
+                        let state = self.config.get_repo_state_mut(&path);
+                        state.selected_ide = Some(ide_id.clone());
+                        let _ = self.config.save();
+                    }
+                    let profile = self.config.get_effective_profile_for_repo(&path);
+                    if let Some(ide) = profile.ides.iter().find(|i| i.id == ide_id) {
+                        let file_opt = if ide.no_args {
+                            None
+                        } else {
+                            Some(file.as_path())
+                        };
+                        let display = file_opt
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| path.display().to_string());
+                        match launch_ide(ide, &path, file_opt) {
+                            Ok(()) => {
+                                self.status_message = Some(crate::i18n::tr_fmt(
+                                    self.config.language,
+                                    "opening_with",
+                                    &[&display, &ide.display_name],
+                                ));
+                                self.status_message_time = Some(std::time::Instant::now());
+                            }
+                            Err(e) => {
+                                self.error = Some(format!(
+                                    "IDE '{}' konnte nicht gestartet werden: {e:#}",
+                                    ide.display_name
+                                ));
+                            }
+                        }
+                    }
+                    self.record_usage(&path, UsageType::Open);
+                }
+                crate::tray_service::TrayAction::AgentOpen(path, agent_id) => {
+                    let agent = self
+                        .config
+                        .agents
+                        .iter()
+                        .find(|a| a.id == agent_id)
+                        .cloned()
+                        .or_else(|| self.config.get_active_agent().cloned());
+                    if let Some(agent) = agent {
+                        let term_pref = agent
+                            .terminal_override
+                            .clone()
+                            .unwrap_or_else(|| self.config.terminal.preference.clone());
+                        let repo_clone = path.clone();
+                        let agent_clone = agent.clone();
+                        let name = agent.display_name.clone();
+                        let err_tx = self.launch_err_tx.clone();
+                        std::thread::spawn(move || {
+                            if let Err(e) = launch_agent(&agent_clone, &repo_clone, &term_pref) {
+                                let _ = err_tx.send(format!(
+                                    "Agent '{}' konnte nicht gestartet werden: {e:#}",
+                                    name
+                                ));
+                            }
+                        });
+                        self.status_message = Some(crate::i18n::tr_fmt(
+                            self.config.language,
+                            "starting_agent_in",
+                            &[&agent.display_name, &path.display().to_string()],
+                        ));
+                        self.status_message_time = Some(std::time::Instant::now());
+                    }
+                    self.record_usage(&path, UsageType::Open);
+                }
+                crate::tray_service::TrayAction::ExplorerOpen(path) => {
+                    match crate::git::open_in_explorer(&path) {
+                        Ok(()) => {
+                            self.status_message = Some(crate::i18n::tr_fmt(
+                                self.config.language,
+                                "explorer_opened",
+                                &[&path.display().to_string()],
+                            ));
+                            self.status_message_time = Some(std::time::Instant::now());
+                        }
+                        Err(e) => {
+                            self.error =
+                                Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"))
+                        }
+                    }
+                    self.record_usage(&path, UsageType::Open);
+                }
+                crate::tray_service::TrayAction::ShellOpen(path) => {
+                    let pref = self.config.terminal.preference.clone();
+                    let repo_clone = path.clone();
+                    let err_tx = self.launch_err_tx.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = crate::git::open_shell(&repo_clone, &pref) {
+                            let _ =
+                                err_tx.send(format!("Shell konnte nicht geöffnet werden: {e:#}"));
+                        }
+                    });
+                    self.status_message = Some(crate::i18n::tr_fmt(
+                        self.config.language,
+                        "shell_opened",
+                        &[&path.display().to_string()],
+                    ));
+                    self.status_message_time = Some(std::time::Instant::now());
+                    self.record_usage(&path, UsageType::Open);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn show_tray_service_viewport(&mut self, ctx: &egui::Context) {
+        // Efficient: create dedicated tray service viewport - runs independently even when main hidden
+        if let (Some(shared), Some(tray_rx)) =
+            (self.tray_shared.clone(), self.tray_service_tray_rx.clone())
+        {
+            crate::tray_service::create_tray_service_viewport(ctx, shared, tray_rx);
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn sync_tray_service(&mut self) {}
+
+    fn record_usage(&mut self, repo_path: &Path, usage_type: UsageType) {
+        let key = crate::config::AppConfig::repo_state_key(repo_path);
+        let usage = self.config.repo_usage.entry(key).or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        match usage_type {
+            UsageType::Open => {
+                usage.last_opened = Some(now);
+                usage.open_count = usage.open_count.wrapping_add(1);
+            }
+            UsageType::BranchSwitch => {
+                usage.last_branch_switch = Some(now);
+                usage.branch_switch_count = usage.branch_switch_count.wrapping_add(1);
+            }
+            UsageType::ConfigChange => {
+                usage.last_config_change = Some(now);
+                usage.config_change_count = usage.config_change_count.wrapping_add(1);
+            }
+        }
+        let _ = self.config.save();
+        self.sync_tray_service();
     }
 
     fn handle_branch_switch(&mut self, repo_path: PathBuf, target_branch: String) {
@@ -249,6 +625,7 @@ impl MyApp {
                 self.status_message_time = Some(std::time::Instant::now());
                 self.error = None;
                 self.branch_dialog = None;
+                self.record_usage(&repo_path, UsageType::BranchSwitch);
                 self.start_scan();
             }
             Err(e) => {
@@ -284,11 +661,7 @@ impl MyApp {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("📦 {}", tr(lang, "app_title")))
-                            .size(17.0)
-                            .strong(),
-                    );
+                    ui.label(RichText::new(tr(lang, "app_title")).size(17.0).strong());
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new(format!("{} Repositories", self.repos.len()))
@@ -424,7 +797,10 @@ impl MyApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .button(RichText::new(format!("⚙ {}", tr(lang, "settings"))).size(12.0))
+                            .add(egui::Button::image_and_text(
+                                egui::Image::new(ICON_GEAR).fit_to_exact_size(Vec2::splat(14.0)),
+                                RichText::new(tr(lang, "settings")).size(12.0),
+                            ))
                             .on_hover_text(tr(lang, "settings_tooltip"))
                             .clicked()
                         {
@@ -432,12 +808,15 @@ impl MyApp {
                             self.settings_state = Some(SettingsState::from_config(&self.config));
                         }
                         ui.add_space(8.0);
-                        let refresh_label = if self.scanning {
-                            format!("⟳ {}", tr(lang, "scanning"))
+                        let (refresh_icon, refresh_label) = if self.scanning {
+                            (ICON_REFRESH, tr(lang, "scanning"))
                         } else {
-                            format!("↻ {}", tr(lang, "refresh"))
+                            (ICON_REFRESH, tr(lang, "refresh"))
                         };
-                        let btn = egui::Button::new(RichText::new(refresh_label).size(12.0));
+                        let btn = egui::Button::image_and_text(
+                            egui::Image::new(refresh_icon).fit_to_exact_size(Vec2::splat(14.0)),
+                            RichText::new(refresh_label).size(12.0),
+                        );
                         if ui.add_enabled(!self.scanning, btn).clicked() {
                             self.start_scan();
                         }
@@ -542,7 +921,7 @@ impl MyApp {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            RichText::new("v0.2.0")
+                            RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                                 .size(10.0)
                                 .color(Color32::from_rgb(160, 160, 160)),
                         );
@@ -650,13 +1029,99 @@ impl MyApp {
             self.execute_branch_switch(path, branch, force, stash);
         }
     }
+
+    fn show_update_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_update_dialog {
+            return;
+        }
+        let info = match &self.update_info {
+            Some(i) => i.clone(),
+            None => {
+                self.show_update_dialog = false;
+                return;
+            }
+        };
+        let lang = self.config.language;
+        let mut close = false;
+        let mut open_link = false;
+        egui::Window::new(tr(lang, "update_available_title"))
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut self.show_update_dialog)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{}: {} → {}",
+                        tr(lang, "update_available_msg"),
+                        info.current_version,
+                        info.latest_version
+                    ))
+                    .size(12.0),
+                );
+                if let Some(body) = &info.body {
+                    if !body.trim().is_empty() {
+                        ui.add_space(4.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(80.0)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(body)
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(80, 80, 80)),
+                                );
+                            });
+                    }
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr(lang, "cancel")).clicked() {
+                        close = true;
+                    }
+                    if ui.button(tr(lang, "open_link")).clicked() {
+                        open_link = true;
+                        close = true;
+                    }
+                });
+            });
+        if open_link {
+            ctx.open_url(egui::OpenUrl::new_tab(&info.url));
+        }
+        // Hinweis: Hauptfenster-Close wird allein in handle_close_request behandelt.
+        // Das Dialog-X wird via .open() von egui gesetzt.
+        if close {
+            self.show_update_dialog = false;
+        }
+    }
 }
 
 impl eframe::App for MyApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Called also when window hidden (Visible(false)), ensures tray stays responsive.
+        // F-11: poll_scan + handle_close_request nur hier (nicht zusätzlich in ui),
+        // sonst doppelte Channel-Drains und doppeltes Visible(false).
+        // F-01: Service ist einzige Windows-Quelle, kein Fallback mehr.
+        self.poll_scan(ctx);
+        #[cfg(target_os = "windows")]
+        {
+            if self.tray_shared.is_some() {
+                // Dedicated tray service handles tray events efficiently in its own viewport
+                self.maybe_sync_tray_service();
+                self.poll_tray_service_actions(ctx);
+                self.show_tray_service_viewport(ctx);
+            } else {
+                // Kein Tray-Service (Erstellung fehlgeschlagen): kein Popup.
+                // Früherer Fallback (tray_event_rx + show_tray_popup_viewport) gestrichen.
+            }
+        }
+        self.handle_close_request(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let lang = self.config.language;
-        self.poll_scan(&ctx);
+        // F-11: kein poll_scan / poll_tray_events / handle_close_request hier —
+        // alles läuft in logic(), auch bei hidden Window.
+        // Popup wird in logic() via TrayService-Viewport gemanagt.
 
         // Track window size for collapsing logic using ctx screen rect (Hysterese: <400 collapsed, >=500 expanded)
         let screen_rect = ctx.viewport_rect();
@@ -674,6 +1139,7 @@ impl eframe::App for MyApp {
         self.show_top_bar(ui);
         self.show_status_bar(ui);
         self.show_branch_dialog(&ctx);
+        self.show_update_dialog(&ctx);
 
         egui::CentralPanel::default()
             .frame(
@@ -682,7 +1148,8 @@ impl eframe::App for MyApp {
                     .inner_margin(egui::Margin::same(12)),
             )
             .show(ui, |ui| {
-                if let Some(err) = &self.error {
+                let err_to_clear = if let Some(err_msg) = self.error.clone() {
+                    let mut do_clear = false;
                     let frame = egui::Frame::new()
                         .fill(Color32::from_rgb(255, 235, 235))
                         .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 100, 100)))
@@ -690,25 +1157,43 @@ impl eframe::App for MyApp {
                         .inner_margin(egui::Margin::symmetric(10, 8));
                     frame.show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Image::new(ICON_WARNING)
+                                    .fit_to_exact_size(Vec2::splat(16.0))
+                                    .tint(Color32::from_rgb(160, 40, 40)),
+                            );
                             ui.label(
                                 RichText::new(format!(
-                                    "⚠ {}: {}",
+                                    "{}: {}",
                                     if lang == Language::En {
                                         "Error"
                                     } else {
                                         "Fehler"
                                     },
-                                    err
+                                    err_msg
                                 ))
                                 .size(12.0)
                                 .color(Color32::from_rgb(160, 40, 40)),
                             );
-                            if ui.small_button("✕").clicked() {
-                                // Will be cleared next frame via status polling
+                            if ui
+                                .add(egui::Button::image(
+                                    egui::Image::new(ICON_CROSS)
+                                        .fit_to_exact_size(Vec2::splat(12.0)),
+                                ))
+                                .on_hover_text("Schließen")
+                                .clicked()
+                            {
+                                do_clear = true;
                             }
                         });
                     });
                     ui.add_space(8.0);
+                    do_clear
+                } else {
+                    false
+                };
+                if err_to_clear {
+                    self.error = None;
                 }
 
                 if self.config.roots.is_empty() && !self.scanning {
@@ -718,11 +1203,18 @@ impl eframe::App for MyApp {
                         .corner_radius(6)
                         .inner_margin(egui::Margin::symmetric(10, 8));
                     frame.show(ui, |ui| {
-                        ui.label(
-                            RichText::new(format!("⚠ {}", tr(lang, "no_search_path")))
-                                .size(12.0)
-                                .color(Color32::from_rgb(120, 90, 20)),
-                        );
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Image::new(ICON_WARNING)
+                                    .fit_to_exact_size(Vec2::splat(14.0))
+                                    .tint(Color32::from_rgb(120, 90, 20)),
+                            );
+                            ui.label(
+                                RichText::new(tr(lang, "no_search_path"))
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(120, 90, 20)),
+                            );
+                        });
                     });
                     ui.add_space(12.0);
                 }
@@ -779,6 +1271,7 @@ impl eframe::App for MyApp {
                                     repo.custom_errors.remove(&selector_id);
                                     repo.dirty = true;
                                 }
+                                self.record_usage(&repo_path, UsageType::ConfigChange);
                                 self.start_scan();
                             }
                             Err(e) => {
@@ -859,6 +1352,7 @@ impl eframe::App for MyApp {
                             &[&ide_id, &profile.display_name],
                         ));
                     }
+                    self.record_usage(&repo_path, UsageType::Open);
                 }
                 if let Some((repo_path, agent_id)) = actions.agent_open {
                     let agent = self
@@ -895,6 +1389,7 @@ impl eframe::App for MyApp {
                     } else {
                         self.error = Some(tr_fmt(lang, "agent_not_found", &[&agent_id]));
                     }
+                    self.record_usage(&repo_path, UsageType::Open);
                 }
                 if let Some((repo_path, profile_opt)) = actions.profile_override {
                     self.config
@@ -946,6 +1441,7 @@ impl eframe::App for MyApp {
                                 Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"));
                         }
                     }
+                    self.record_usage(&repo_path, UsageType::Open);
                 }
                 if let Some(repo_path) = actions.shell_open {
                     let pref = self.config.terminal.preference.clone();
@@ -963,6 +1459,7 @@ impl eframe::App for MyApp {
                         &[&repo_path.display().to_string()],
                     ));
                     self.status_message_time = Some(std::time::Instant::now());
+                    self.record_usage(&repo_path, UsageType::Open);
                 }
             });
 
@@ -970,30 +1467,33 @@ impl eframe::App for MyApp {
             if self.settings_state.is_none() {
                 self.settings_state = Some(SettingsState::from_config(&self.config));
             }
-            let mut save: Option<AppConfig> = None;
-            let mut state = self.settings_state.take().unwrap();
-            let mut open = self.show_settings;
-            crate::ui::settings::show_settings_window(&ctx, &mut state, &mut open, &mut save);
-            self.show_settings = open;
+            if let Some(mut state) = self.settings_state.take() {
+                let mut save: Option<AppConfig> = None;
+                let mut open = self.show_settings;
+                crate::ui::settings::show_settings_window(&ctx, &mut state, &mut open, &mut save);
+                self.show_settings = open;
 
-            if let Some(new_cfg) = save {
-                // Theme sofort anwenden
-                crate::ui::theme::apply_theme(&ctx, &new_cfg.theme);
-                let lang = new_cfg.language;
-                self.config = new_cfg;
-                self.settings_state = Some(SettingsState::from_config(&self.config));
-                self.show_settings = false;
-                self.status_message = Some(tr(lang, "saved_scan_restart"));
-                self.status_message_time = Some(std::time::Instant::now());
-                self.start_scan();
-            } else {
-                if self.show_settings {
+                if let Some(new_cfg) = save {
+                    // Theme sofort anwenden
+                    crate::ui::theme::apply_theme(&ctx, &new_cfg.theme);
+                    let lang = new_cfg.language;
+                    self.config = new_cfg;
+                    self.settings_state = Some(SettingsState::from_config(&self.config));
+                    self.show_settings = false;
+                    self.status_message = Some(tr(lang, "saved_scan_restart"));
+                    self.status_message_time = Some(std::time::Instant::now());
+                    self.start_scan();
+                } else if self.show_settings {
                     self.settings_state = Some(state);
                 } else {
                     self.settings_state = None;
                 }
-            }
-            if !self.show_settings {
+                if !self.show_settings {
+                    self.settings_state = None;
+                }
+            } else {
+                // Defensive: state missing despite initialization above
+                self.show_settings = false;
                 self.settings_state = None;
             }
         }

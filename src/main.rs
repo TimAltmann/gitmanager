@@ -6,7 +6,10 @@ mod config_parser;
 mod git;
 mod i18n;
 mod scanner;
+mod tray;
+mod tray_service;
 mod ui;
+mod updater;
 
 use app::MyApp;
 
@@ -31,6 +34,51 @@ fn load_icon() -> Option<std::sync::Arc<egui::IconData>> {
 }
 
 fn main() -> eframe::Result<()> {
+    // Panic hook für Tray-Crashes (F-17): vorherigen Hook chainen, Crash-Log mit
+    // Timestamp nach %LOCALAPPDATA%/gitmanager (ProjectDirs, bereits Dependency),
+    // Fallback CWD. Überschreibt nicht still, schluckt Schreibfehler nicht.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let mut msg = format!("PANIC: {}\n", info);
+        if let Some(s) = info.payload().downcast_ref::<&str>() {
+            msg.push_str(&format!("payload: {}\n", s));
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            msg.push_str(&format!("payload: {}\n", s));
+        }
+        if let Some(loc) = info.location() {
+            msg.push_str(&format!(
+                "at {}:{}:{}\n",
+                loc.file(),
+                loc.line(),
+                loc.column()
+            ));
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let filename = format!("gitmanager_crash-{}.log", ts);
+        let written = directories::ProjectDirs::from("com", "gitmanager", "gitmanager")
+            .map(|dirs| {
+                let dir = dirs.data_local_dir().to_path_buf();
+                let _ = std::fs::create_dir_all(&dir);
+                let path = dir.join(&filename);
+                std::fs::write(&path, &msg).map(|_| path.display().to_string())
+            });
+        match written {
+            Some(Ok(path)) => eprintln!("{} (crash log: {})", msg, path),
+            _ => {
+                // Fallback CWD, Fehler nicht schlucken ohne Hinweis
+                if let Err(e) = std::fs::write(&filename, &msg) {
+                    eprintln!("{} (crash log failed: {})", msg, e);
+                } else {
+                    eprintln!("{} (crash log: {})", msg, filename);
+                }
+            }
+        }
+        previous_hook(info);
+    }));
+
     let icon = load_icon();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1080.0, 680.0])

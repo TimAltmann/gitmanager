@@ -106,7 +106,7 @@ Config lives at `%APPDATA%\gitmanager\config\config.json` (resolved via `directo
 
 ```json
 {
-  "config_version": 7,
+  "config_version": 8,
   "roots": ["C:\\Dev"],
   "max_depth": 2,
   "active_profile_id": "dotnet",

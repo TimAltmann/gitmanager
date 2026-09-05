@@ -23,6 +23,8 @@ const ICON_GIT_BRANCH: egui::ImageSource =
     egui::include_image!("../../assets/icons/git-branch.svg");
 const ICON_GIT_COMMIT: egui::ImageSource =
     egui::include_image!("../../assets/icons/git-commit.svg");
+const ICON_SEARCH: egui::ImageSource = egui::include_image!("../../assets/icons/search.svg");
+const ICON_REFRESH: egui::ImageSource = egui::include_image!("../../assets/icons/refresh.svg");
 
 fn ide_icon_for(ide_id: &str) -> egui::ImageSource<'static> {
     match ide_id {
@@ -43,6 +45,29 @@ fn agent_icon_for(agent_id: &str) -> egui::ImageSource<'static> {
         "aider" => ICON_AIDER,
         _ => ICON_CLAUDE,
     }
+}
+
+fn ide_image(ide: &crate::config::IdeConfig) -> egui::Image<'static> {
+    if let Some(path) = &ide.icon {
+        let pb = std::path::PathBuf::from(path);
+        if pb.exists() {
+            // Nutze file:// URI – wird von egui_extras async geladen und gecached, kein blockierendes read() im UI-Thread
+            let uri = format!("file://{}", pb.display().to_string().replace('\\', "/"));
+            return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(18.0));
+        }
+    }
+    egui::Image::new(ide_icon_for(&ide.id)).fit_to_exact_size(Vec2::splat(18.0))
+}
+
+fn agent_image(agent: &crate::config::AgentProfile) -> egui::Image<'static> {
+    if let Some(path) = &agent.icon {
+        let pb = std::path::PathBuf::from(path);
+        if pb.exists() {
+            let uri = format!("file://{}", pb.display().to_string().replace('\\', "/"));
+            return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(18.0));
+        }
+    }
+    egui::Image::new(agent_icon_for(&agent.id)).fit_to_exact_size(Vec2::splat(18.0))
 }
 
 /// Helper: Dropdown-Button mit rechtsbündigem Chevron *innerhalb* des Buttons.
@@ -280,6 +305,11 @@ fn show_repo_row(
                             .show(ui.ctx(), |ui| {
                                 ui.set_min_width(260.0);
                                 ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::Image::new(ICON_SEARCH)
+                                            .fit_to_exact_size(Vec2::splat(12.0))
+                                            .tint(ui.visuals().weak_text_color()),
+                                    );
                                     ui.label(
                                         RichText::new(tr(config.language, "search_label"))
                                             .size(11.0),
@@ -310,7 +340,10 @@ fn show_repo_row(
                                         branch_filter_changed = true;
                                     }
                                     if ui
-                                        .small_button("↻")
+                                        .add(egui::Button::image(
+                                            egui::Image::new(ICON_REFRESH)
+                                                .fit_to_exact_size(Vec2::splat(12.0)),
+                                        ))
                                         .on_hover_text(tr(
                                             config.language,
                                             "branch_refresh_tooltip",
@@ -539,6 +572,11 @@ fn show_repo_row(
                             .show(ui.ctx(), |ui| {
                                 ui.set_min_width(260.0);
                                 ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::Image::new(ICON_SEARCH)
+                                            .fit_to_exact_size(Vec2::splat(12.0))
+                                            .tint(ui.visuals().weak_text_color()),
+                                    );
                                     ui.label(
                                         RichText::new(tr(config.language, "search_label"))
                                             .size(11.0),
@@ -875,10 +913,7 @@ fn show_repo_row(
                         }
                     };
                     for agent in agents_to_show.iter().rev() {
-                        let icon = agent_icon_for(&agent.id);
-                        let btn = egui::Button::image(
-                            egui::Image::new(icon).fit_to_exact_size(Vec2::splat(18.0)),
-                        );
+                        let btn = egui::Button::image(agent_image(agent));
                         let resp = ui.add(btn).on_hover_text(
                             tr(config.language, "open_in_terminal")
                                 .replace("{}", &agent.display_name),
@@ -901,10 +936,7 @@ fn show_repo_row(
                     // IDE Buttons (Icons) – per Profil hidden/order
                     let ides_to_show = effective_profile.visible_ides();
                     for ide in ides_to_show.iter().take(4) {
-                        let icon = ide_icon_for(&ide.id);
-                        let btn = egui::Button::image(
-                            egui::Image::new(icon).fit_to_exact_size(Vec2::splat(18.0)),
-                        );
+                        let btn = egui::Button::image(ide_image(ide));
                         let preview_path = if ide.no_args {
                             format!("{} (cwd: {})", ide.display_name, repo.path.display())
                         } else {
@@ -1296,6 +1328,8 @@ mod tests {
                     use_shell: false,
                     allow_unsafe: false,
                     no_args: false,
+
+                    icon: None,
                 },
                 crate::config::IdeConfig {
                     id: "b".to_string(),
@@ -1306,6 +1340,8 @@ mod tests {
                     use_shell: false,
                     allow_unsafe: false,
                     no_args: false,
+
+                    icon: None,
                 },
             ],
             default_ide_id: None,
