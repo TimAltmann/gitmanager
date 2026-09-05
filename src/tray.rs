@@ -95,16 +95,19 @@ mod imp {
             std::sync::mpsc::channel();
 
         // Robust handlers: forward payload + wake egui. This disables the global receiver() but we use our own channels.
-        // Use cloned Context for repaint.
+        // Use cloned Context for repaint. Also wake tray service viewport for dedicated handling.
+        let tray_service_id = egui::ViewportId::from_hash_of("tray_service");
         let ctx_clone = ctx.clone();
         TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {
             let _ = tray_tx.send(ev);
             ctx_clone.request_repaint();
+            ctx_clone.request_repaint_of(tray_service_id);
         }));
         let ctx_clone2 = ctx;
         MenuEvent::set_event_handler(Some(move |ev: MenuEvent| {
             let _ = menu_tx.send(ev);
             ctx_clone2.request_repaint();
+            ctx_clone2.request_repaint_of(tray_service_id);
         }));
 
         Some(TrayChannels {
@@ -114,72 +117,7 @@ mod imp {
             tray_menu: menu,
         })
     }
-
-    // Keep old helpers for compatibility but now they delegate
-    pub fn create_tray_icon() -> Option<TrayIcon> {
-        // Fallback: create without channels (not used anymore)
-        let (rgba, w, h) = load_tray_icon_data()?;
-        let icon = tray_icon::Icon::from_rgba(rgba, w, h).ok()?;
-        let menu = Menu::new();
-        let show_item = MenuItem::with_id(
-            MenuId::new(MENU_ID_SHOW),
-            "Hauptfenster anzeigen",
-            true,
-            None,
-        );
-        let refresh_item = MenuItem::with_id(
-            MenuId::new(MENU_ID_REFRESH),
-            "Repositories aktualisieren",
-            true,
-            None,
-        );
-        let settings_item =
-            MenuItem::with_id(MenuId::new(MENU_ID_SETTINGS), "Einstellungen", true, None);
-        let quit_item = MenuItem::with_id(MenuId::new(MENU_ID_QUIT), "Beenden", true, None);
-        let _ = menu.append(&show_item);
-        let _ = menu.append(&refresh_item);
-        let _ = menu.append(&PredefinedMenuItem::separator());
-        let _ = menu.append(&settings_item);
-        let _ = menu.append(&PredefinedMenuItem::separator());
-        let _ = menu.append(&quit_item);
-        let tray = TrayIconBuilder::new()
-            .with_tooltip("GitManager")
-            .with_icon(icon)
-            .with_menu(Box::new(menu))
-            .build()
-            .ok()?;
-        Some(tray)
-    }
-
-    pub fn setup_event_handlers(_ctx: egui::Context) {
-        // Deprecated: use create_tray_channels instead
-    }
-
-    pub use tray_icon::menu::MenuEvent as TrayMenuEvent;
-    pub use tray_icon::TrayIconEvent as TrayEvent;
-    pub use tray_icon::{MouseButton, MouseButtonState};
 }
 
 #[cfg(target_os = "windows")]
 pub use imp::*;
-
-#[cfg(not(target_os = "windows"))]
-#[allow(dead_code)]
-mod imp_dummy {
-    // Dummy types for non-windows to allow compilation
-    pub const MENU_ID_SHOW: &str = "";
-    pub const MENU_ID_REFRESH: &str = "";
-    pub const MENU_ID_SETTINGS: &str = "";
-    pub const MENU_ID_QUIT: &str = "";
-    pub fn create_tray_icon() -> Option<()> {
-        None
-    }
-    pub fn setup_event_handlers(_ctx: egui::Context) {}
-}
-
-#[cfg(not(target_os = "windows"))]
-#[allow(unused_imports)]
-pub use imp_dummy::{
-    create_tray_icon, setup_event_handlers, MENU_ID_QUIT, MENU_ID_REFRESH, MENU_ID_SETTINGS,
-    MENU_ID_SHOW,
-};

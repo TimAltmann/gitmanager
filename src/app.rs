@@ -65,6 +65,20 @@ pub struct MyApp {
     menu_event_rx: Option<std::sync::mpsc::Receiver<tray_icon::menu::MenuEvent>>,
     #[cfg(target_os = "windows")]
     tray_menu: Option<tray_icon::menu::Menu>,
+    #[cfg(target_os = "windows")]
+    tray_shared: Option<std::sync::Arc<std::sync::Mutex<crate::tray_service::TrayShared>>>,
+    #[cfg(target_os = "windows")]
+    tray_action_rx: Option<std::sync::mpsc::Receiver<crate::tray_service::TrayAction>>,
+    #[cfg(target_os = "windows")]
+    tray_service_tray_rx: Option<
+        std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<tray_icon::TrayIconEvent>>>,
+    >,
+    #[cfg(target_os = "windows")]
+    tray_service_menu_rx: Option<
+        std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<tray_icon::menu::MenuEvent>>>,
+    >,
+    #[cfg(target_os = "windows")]
+    last_tray_sync: Option<std::time::Instant>,
     tray_popup_open: bool,
     tray_popup_rect: Option<egui::Rect>,
     window_visible: bool,
@@ -115,6 +129,16 @@ impl MyApp {
             menu_event_rx: None,
             #[cfg(target_os = "windows")]
             tray_menu: None,
+            #[cfg(target_os = "windows")]
+            tray_shared: None,
+            #[cfg(target_os = "windows")]
+            tray_action_rx: None,
+            #[cfg(target_os = "windows")]
+            tray_service_tray_rx: None,
+            #[cfg(target_os = "windows")]
+            tray_service_menu_rx: None,
+            #[cfg(target_os = "windows")]
+            last_tray_sync: None,
             tray_popup_open: false,
             tray_popup_rect: None,
             window_visible: true,
@@ -126,11 +150,31 @@ impl MyApp {
         #[cfg(target_os = "windows")]
         {
             // Setup tray icon with robust channel forwarding (preserves rect)
+            // Use dedicated tray service viewport for efficient, persistent tray handling
             if let Some(channels) = crate::tray::create_tray_channels(cc.egui_ctx.clone()) {
                 app.tray_icon = Some(channels.tray_icon);
-                app.tray_event_rx = Some(channels.tray_rx);
-                app.menu_event_rx = Some(channels.menu_rx);
                 app.tray_menu = Some(channels.tray_menu);
+                // Create shared state and channels for tray service (efficient Arc sharing)
+                let (action_tx, action_rx) = mpsc::channel();
+                let shared = std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::tray_service::TrayShared::new(action_tx),
+                ));
+                // Wrap receivers in Arc<Mutex> for Sync required by deferred viewport
+                let tray_rx_arc = std::sync::Arc::new(std::sync::Mutex::new(channels.tray_rx));
+                let menu_rx_arc = std::sync::Arc::new(std::sync::Mutex::new(channels.menu_rx));
+                // Initial sync of data (efficient: clones once at startup)
+                {
+                    if let Ok(mut guard) = shared.lock() {
+                        guard.update_data(app.repos.clone(), app.config.clone());
+                    }
+                }
+                app.tray_shared = Some(shared);
+                app.tray_action_rx = Some(action_rx);
+                app.tray_service_tray_rx = Some(tray_rx_arc);
+                app.tray_service_menu_rx = Some(menu_rx_arc);
+                app.last_tray_sync = Some(std::time::Instant::now());
+                // Keep old channels as None since we use service (fallback not needed)
+                // But keep tray_event_rx/menu_event_rx as None to indicate service mode
             } else {
                 eprintln!("Tray icon creation failed");
             }
@@ -212,6 +256,7 @@ impl MyApp {
             let ScanResult::Repos(repos) = result;
             self.repos = repos;
             self.error = None;
+            self.sync_tray_service();
             ctx.request_repaint();
         }
         while let Ok(err) = self.launch_err_rx.try_recv() {
@@ -225,6 +270,7 @@ impl MyApp {
                 Ok(cfg) => {
                     self.config = cfg;
                     self.error = None;
+                    self.sync_tray_service();
                     // Settings offen: nicht kompletten Draft verwerfen, nur auto-erkannte Programme mergen
                     if self.show_settings {
                         if let Some(state) = self.settings_state.as_mut() {
@@ -275,6 +321,15 @@ impl MyApp {
         self.tray_popup_opened_at = None;
         self.window_visible = true;
         self.should_quit = false;
+        // Also clear popup in dedicated tray service (efficient: shared state)
+        #[cfg(target_os = "windows")]
+        if let Some(shared) = &self.tray_shared {
+            if let Ok(mut guard) = shared.try_lock() {
+                guard.popup_open = false;
+                guard.popup_rect = None;
+                guard.popup_opened_at = None;
+            }
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -283,6 +338,12 @@ impl MyApp {
 
     #[cfg(target_os = "windows")]
     fn poll_tray_events(&mut self, ctx: &egui::Context) {
+        // If dedicated tray service is active, it handles events efficiently in its own viewport
+        // Skip old polling to avoid duplicate handling and save resources
+        #[cfg(target_os = "windows")]
+        if self.tray_shared.is_some() {
+            return;
+        }
         use tray_icon::MouseButton;
         use tray_icon::MouseButtonState;
         use tray_icon::TrayIconEvent;
@@ -403,13 +464,195 @@ impl MyApp {
             let should_minimize = false;
             if should_minimize {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                // Hide instead of closing
+                // Hide instead of closing - tray service keeps popup alive
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 self.window_visible = false;
                 self.tray_popup_open = false;
+                #[cfg(target_os = "windows")]
+                if let Some(shared) = &self.tray_shared {
+                    if let Ok(mut guard) = shared.try_lock() {
+                        guard.popup_open = false;
+                        guard.popup_rect = None;
+                        guard.popup_opened_at = None;
+                    }
+                }
             }
         }
     }
+
+    #[cfg(target_os = "windows")]
+    fn sync_tray_service(&mut self) {
+        // Efficient: immediate sync using Arc to avoid clones on read (only clones Vec once)
+        if let Some(shared) = &self.tray_shared {
+            if let Ok(mut guard) = shared.try_lock() {
+                guard.update_data(self.repos.clone(), self.config.clone());
+                self.last_tray_sync = Some(std::time::Instant::now());
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn maybe_sync_tray_service(&mut self) {
+        // Throttled sync for periodic updates - efficient check every 500ms
+        let should_sync = if let Some(t) = self.last_tray_sync {
+            t.elapsed() > std::time::Duration::from_millis(500)
+        } else {
+            true
+        };
+        if should_sync {
+            self.sync_tray_service();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn poll_tray_service_actions(&mut self, ctx: &egui::Context) {
+        let actions: Vec<crate::tray_service::TrayAction> = if let Some(rx) = &self.tray_action_rx {
+            let mut v = Vec::new();
+            while let Ok(a) = rx.try_recv() {
+                v.push(a);
+            }
+            v
+        } else {
+            Vec::new()
+        };
+        for action in actions {
+            match action {
+                crate::tray_service::TrayAction::ShowMainWindow => self.show_main_window(ctx),
+                crate::tray_service::TrayAction::Refresh => self.start_scan(),
+                crate::tray_service::TrayAction::OpenSettings => {
+                    self.show_settings = true;
+                    self.settings_state = Some(SettingsState::from_config(&self.config));
+                    self.show_main_window(ctx);
+                }
+                crate::tray_service::TrayAction::Quit => {
+                    self.should_quit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                crate::tray_service::TrayAction::BranchSwitch(path, branch) => {
+                    self.pending_branch_switch = Some((path, branch));
+                }
+                crate::tray_service::TrayAction::IdeOpen(path, ide_id, file) => {
+                    {
+                        let state = self.config.get_repo_state_mut(&path);
+                        state.selected_ide = Some(ide_id.clone());
+                        let _ = self.config.save();
+                    }
+                    let profile = self.config.get_effective_profile_for_repo(&path);
+                    if let Some(ide) = profile.ides.iter().find(|i| i.id == ide_id) {
+                        let file_opt = if ide.no_args {
+                            None
+                        } else {
+                            Some(file.as_path())
+                        };
+                        let display = file_opt
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| path.display().to_string());
+                        match launch_ide(ide, &path, file_opt) {
+                            Ok(()) => {
+                                self.status_message = Some(crate::i18n::tr_fmt(
+                                    self.config.language,
+                                    "opening_with",
+                                    &[&display, &ide.display_name],
+                                ));
+                                self.status_message_time = Some(std::time::Instant::now());
+                            }
+                            Err(e) => {
+                                self.error = Some(format!(
+                                    "IDE '{}' konnte nicht gestartet werden: {e:#}",
+                                    ide.display_name
+                                ));
+                            }
+                        }
+                    }
+                    self.record_usage(&path, UsageType::Open);
+                }
+                crate::tray_service::TrayAction::AgentOpen(path, agent_id) => {
+                    let agent = self
+                        .config
+                        .agents
+                        .iter()
+                        .find(|a| a.id == agent_id)
+                        .cloned()
+                        .or_else(|| self.config.get_active_agent().cloned());
+                    if let Some(agent) = agent {
+                        let term_pref = agent
+                            .terminal_override
+                            .clone()
+                            .unwrap_or_else(|| self.config.terminal.preference.clone());
+                        let repo_clone = path.clone();
+                        let agent_clone = agent.clone();
+                        let name = agent.display_name.clone();
+                        let err_tx = self.launch_err_tx.clone();
+                        std::thread::spawn(move || {
+                            if let Err(e) = launch_agent(&agent_clone, &repo_clone, &term_pref) {
+                                let _ = err_tx.send(format!(
+                                    "Agent '{}' konnte nicht gestartet werden: {e:#}",
+                                    name
+                                ));
+                            }
+                        });
+                        self.status_message = Some(crate::i18n::tr_fmt(
+                            self.config.language,
+                            "starting_agent_in",
+                            &[&agent.display_name, &path.display().to_string()],
+                        ));
+                        self.status_message_time = Some(std::time::Instant::now());
+                    }
+                    self.record_usage(&path, UsageType::Open);
+                }
+                crate::tray_service::TrayAction::ExplorerOpen(path) => {
+                    match crate::git::open_in_explorer(&path) {
+                        Ok(()) => {
+                            self.status_message = Some(crate::i18n::tr_fmt(
+                                self.config.language,
+                                "explorer_opened",
+                                &[&path.display().to_string()],
+                            ));
+                            self.status_message_time = Some(std::time::Instant::now());
+                        }
+                        Err(e) => {
+                            self.error =
+                                Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"))
+                        }
+                    }
+                    self.record_usage(&path, UsageType::Open);
+                }
+                crate::tray_service::TrayAction::ShellOpen(path) => {
+                    let pref = self.config.terminal.preference.clone();
+                    let repo_clone = path.clone();
+                    let err_tx = self.launch_err_tx.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = crate::git::open_shell(&repo_clone, &pref) {
+                            let _ =
+                                err_tx.send(format!("Shell konnte nicht geöffnet werden: {e:#}"));
+                        }
+                    });
+                    self.status_message = Some(crate::i18n::tr_fmt(
+                        self.config.language,
+                        "shell_opened",
+                        &[&path.display().to_string()],
+                    ));
+                    self.status_message_time = Some(std::time::Instant::now());
+                    self.record_usage(&path, UsageType::Open);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn show_tray_service_viewport(&mut self, ctx: &egui::Context) {
+        // Efficient: create dedicated tray service viewport - runs independently even when main hidden
+        if let (Some(shared), Some(tray_rx), Some(menu_rx)) = (
+            self.tray_shared.clone(),
+            self.tray_service_tray_rx.clone(),
+            self.tray_service_menu_rx.clone(),
+        ) {
+            crate::tray_service::create_tray_service_viewport(ctx, shared, tray_rx, menu_rx);
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn sync_tray_service(&mut self) {}
 
     fn record_usage(&mut self, repo_path: &Path, usage_type: UsageType) {
         let key = crate::config::AppConfig::repo_state_key(repo_path);
@@ -433,6 +676,7 @@ impl MyApp {
             }
         }
         let _ = self.config.save();
+        self.sync_tray_service();
     }
 
     fn show_tray_popup_viewport(&mut self, ctx: &egui::Context, lang: crate::i18n::Language) {
@@ -541,61 +785,61 @@ impl MyApp {
 
         let viewport_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
-            if class == egui::ViewportClass::EmbeddedWindow {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.label("Tray popup (embedded) – viewports not supported on this backend");
-                    if ui.button("Schließen").clicked() {
-                        close_popup = true;
-                    }
-                });
-                return;
-            }
-            // Ensure child viewport has theme and image loaders (distinct styling)
-            crate::ui::theme::apply_theme(ctx, &config_clone.theme);
-            egui_extras::install_image_loaders(ctx);
-            if ctx.input(|i| i.viewport().close_requested()) {
-                close_popup = true;
-            }
-            egui::CentralPanel::default().show(ctx, |ui| {
-                crate::ui::tray_popup::show_tray_popup_ui(
-                    ui,
-                    &mut repos_clone,
-                    &config_clone,
-                    &mut tray_actions,
-                );
-            });
-            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                close_popup = true;
-            }
-            if tray_actions.close_popup {
-                close_popup = true;
-            }
-            if tray_actions.quit {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-            // Auto-close on any launch action (branch/IDE/agent/explorer/terminal) — ensures popup closes when launching app
-            if tray_actions.branch_switch.is_some()
-                || tray_actions.ide_open.is_some()
-                || tray_actions.agent_open.is_some()
-                || tray_actions.explorer_open.is_some()
-                || tray_actions.shell_open.is_some()
-            {
-                close_popup = true;
-            }
-            // Focus-loss auto-close: only on WindowFocused(false) with 500ms debounce
-            if self
-                .tray_popup_opened_at
-                .map(|t| t.elapsed() > std::time::Duration::from_millis(500))
-                .unwrap_or(true)
-            {
-                if ctx.input(|i| {
-                    i.events
-                        .iter()
-                        .any(|e| matches!(e, egui::Event::WindowFocused(false)))
-                }) {
+                if class == egui::ViewportClass::EmbeddedWindow {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.label("Tray popup (embedded) – viewports not supported on this backend");
+                        if ui.button("Schließen").clicked() {
+                            close_popup = true;
+                        }
+                    });
+                    return;
+                }
+                // Ensure child viewport has theme and image loaders (distinct styling)
+                crate::ui::theme::apply_theme(ctx, &config_clone.theme);
+                egui_extras::install_image_loaders(ctx);
+                if ctx.input(|i| i.viewport().close_requested()) {
                     close_popup = true;
                 }
-            }
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    crate::ui::tray_popup::show_tray_popup_ui(
+                        ui,
+                        &mut repos_clone,
+                        &config_clone,
+                        &mut tray_actions,
+                    );
+                });
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    close_popup = true;
+                }
+                if tray_actions.close_popup {
+                    close_popup = true;
+                }
+                if tray_actions.quit {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                // Auto-close on any launch action (branch/IDE/agent/explorer/terminal) — ensures popup closes when launching app
+                if tray_actions.branch_switch.is_some()
+                    || tray_actions.ide_open.is_some()
+                    || tray_actions.agent_open.is_some()
+                    || tray_actions.explorer_open.is_some()
+                    || tray_actions.shell_open.is_some()
+                {
+                    close_popup = true;
+                }
+                // Focus-loss auto-close: only on WindowFocused(false) with 500ms debounce
+                if self
+                    .tray_popup_opened_at
+                    .map(|t| t.elapsed() > std::time::Duration::from_millis(500))
+                    .unwrap_or(true)
+                {
+                    if ctx.input(|i| {
+                        i.events
+                            .iter()
+                            .any(|e| matches!(e, egui::Event::WindowFocused(false)))
+                    }) {
+                        close_popup = true;
+                    }
+                }
             });
         }));
         if viewport_result.is_err() {
@@ -1230,13 +1474,15 @@ impl MyApp {
                 if let Some(body) = &info.body {
                     if !body.trim().is_empty() {
                         ui.add_space(4.0);
-                        egui::ScrollArea::vertical().max_height(80.0).show(ui, |ui| {
-                            ui.label(
-                                RichText::new(body)
-                                    .size(11.0)
-                                    .color(Color32::from_rgb(80, 80, 80)),
-                            );
-                        });
+                        egui::ScrollArea::vertical()
+                            .max_height(80.0)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(body)
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(80, 80, 80)),
+                                );
+                            });
                     }
                 }
                 ui.add_space(8.0);
@@ -1263,24 +1509,52 @@ impl eframe::App for MyApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Called also when window hidden (Visible(false)), ensures tray stays responsive
         self.poll_scan(ctx);
-        self.poll_tray_events(ctx);
-        self.handle_close_request(ctx);
-        // Always show popup from logic when open – works whether main window visible or hidden
-        // (ui may not be called every frame when window not focused)
-        if self.tray_popup_open {
-            let lang = self.config.language;
-            self.show_tray_popup_viewport(ctx, lang);
+        #[cfg(target_os = "windows")]
+        {
+            if self.tray_shared.is_some() {
+                // Dedicated tray service handles tray events efficiently in its own viewport
+                self.maybe_sync_tray_service();
+                self.poll_tray_service_actions(ctx);
+                self.show_tray_service_viewport(ctx);
+                // Fallback old popup not needed when service active
+            } else {
+                self.poll_tray_events(ctx);
+                if self.tray_popup_open {
+                    let lang = self.config.language;
+                    self.show_tray_popup_viewport(ctx, lang);
+                }
+            }
         }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.poll_tray_events(ctx);
+            if self.tray_popup_open {
+                let lang = self.config.language;
+                self.show_tray_popup_viewport(ctx, lang);
+            }
+        }
+        self.handle_close_request(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let lang = self.config.language;
         self.poll_scan(&ctx);
-        self.poll_tray_events(&ctx);
+        #[cfg(target_os = "windows")]
+        {
+            // Service handled efficiently in logic() only to avoid duplicate work
+            if self.tray_shared.is_none() {
+                self.poll_tray_events(&ctx);
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.poll_tray_events(&ctx);
+        }
         self.handle_close_request(&ctx);
         // Popup is handled in logic() (always) – works whether main window visible or hidden
-        // No need to call show_tray_popup_viewport here to avoid double viewport creation per frame
+        // For service mode, popup is managed by tray service viewport
+        // For fallback, popup handled in logic above
 
         // Track window size for collapsing logic using ctx screen rect (Hysterese: <400 collapsed, >=500 expanded)
         let screen_rect = ctx.viewport_rect();

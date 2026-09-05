@@ -7,6 +7,7 @@ mod git;
 mod i18n;
 mod scanner;
 mod tray;
+mod tray_service;
 mod ui;
 mod updater;
 
@@ -42,7 +43,12 @@ fn main() -> eframe::Result<()> {
             msg.push_str(&format!("payload: {}\n", s));
         }
         if let Some(loc) = info.location() {
-            msg.push_str(&format!("at {}:{}:{}\n", loc.file(), loc.line(), loc.column()));
+            msg.push_str(&format!(
+                "at {}:{}:{}\n",
+                loc.file(),
+                loc.line(),
+                loc.column()
+            ));
         }
         let _ = std::fs::write("gitmanager_crash.log", &msg);
         eprintln!("{}", msg);

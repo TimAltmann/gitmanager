@@ -19,7 +19,10 @@ struct GithubRelease {
 
 fn normalize_version(v: &str) -> String {
     let v = v.trim();
-    let v = v.strip_prefix('v').or_else(|| v.strip_prefix('V')).unwrap_or(v);
+    let v = v
+        .strip_prefix('v')
+        .or_else(|| v.strip_prefix('V'))
+        .unwrap_or(v);
     v.to_string()
 }
 
