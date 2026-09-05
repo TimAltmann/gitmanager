@@ -64,6 +64,7 @@ fn agent_image(agent: &crate::config::AgentProfile) -> egui::Image<'static> {
 #[derive(Default)]
 pub struct TrayPopupActions {
     pub branch_switch: Option<(std::path::PathBuf, String)>,
+    pub solution_select: Option<(std::path::PathBuf, std::path::PathBuf)>,
     pub ide_open: Option<(std::path::PathBuf, String, std::path::PathBuf)>,
     pub agent_open: Option<(std::path::PathBuf, String)>,
     pub explorer_open: Option<std::path::PathBuf>,
@@ -312,7 +313,38 @@ fn show_tray_repo_row(
 
             ui.add_space(4.0);
 
-            // Row 3: Tools tight spacing – respects TrayIconConfig (hidden & order)
+            // Row 3: Solution dropdown (only for .NET / when multiple solutions) - own line under branch
+            if repo.solutions.len() > 1 {
+                let selected_text = repo
+                    .selected_solution
+                    .as_ref()
+                    .and_then(|p| {
+                        repo.solutions
+                            .iter()
+                            .find(|s| &s.path == p)
+                            .map(|s| s.relative.clone())
+                    })
+                    .unwrap_or_else(|| "–".to_string());
+                let combo_width = ui.available_width();
+                egui::ComboBox::from_id_salt(("tray_solution", repo.path.clone()))
+                    .selected_text(selected_text)
+                    .width(combo_width)
+                    .show_ui(ui, |ui| {
+                        for sol in &repo.solutions {
+                            let is_sel = Some(&sol.path) == repo.selected_solution.as_ref();
+                            if ui.selectable_label(is_sel, &sol.relative).clicked()
+                                && Some(&sol.path) != repo.selected_solution.as_ref()
+                            {
+                                actions.solution_select =
+                                    Some((repo.path.clone(), sol.path.clone()));
+                                actions.close_popup = true;
+                            }
+                        }
+                    });
+                ui.add_space(4.0);
+            }
+
+            // Row 4: Tools tight spacing – respects TrayIconConfig (hidden & order)
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let profile = config.get_effective_profile_for_repo(&repo.path);
@@ -456,43 +488,6 @@ fn show_tray_repo_row(
                 }
             });
 
-            // Optional: show solution selector if more than 1
-            if repo.solutions.len() > 1 {
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("📄")
-                            .size(10.0)
-                            .color(Color32::from_rgb(120, 120, 120)),
-                    );
-                    let selected_text = repo
-                        .selected_solution
-                        .as_ref()
-                        .and_then(|p| {
-                            repo.solutions
-                                .iter()
-                                .find(|s| &s.path == p)
-                                .map(|s| s.relative.clone())
-                        })
-                        .unwrap_or_else(|| "–".to_string());
-                    let trunc = if selected_text.len() > 28 {
-                        format!("{}…", &selected_text[..27])
-                    } else {
-                        selected_text
-                    };
-                    ui.label(
-                        RichText::new(trunc)
-                            .size(9.0)
-                            .color(Color32::from_rgb(100, 100, 100)),
-                    )
-                    .on_hover_text(
-                        repo.selected_solution
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default(),
-                    );
-                });
-            }
         });
     });
 }

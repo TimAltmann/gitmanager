@@ -1,22 +1,11 @@
 #[cfg(target_os = "windows")]
 mod imp {
     use std::sync::mpsc::{Receiver, Sender};
-    use tray_icon::menu::MenuId;
-    use tray_icon::{
-        menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-        TrayIcon, TrayIconBuilder, TrayIconEvent,
-    };
-
-    pub const MENU_ID_SHOW: &str = "tray_show_main";
-    pub const MENU_ID_REFRESH: &str = "tray_refresh";
-    pub const MENU_ID_SETTINGS: &str = "tray_settings";
-    pub const MENU_ID_QUIT: &str = "tray_quit";
+    use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 
     pub struct TrayChannels {
         pub tray_rx: Receiver<TrayIconEvent>,
-        pub menu_rx: Receiver<MenuEvent>,
         pub tray_icon: TrayIcon,
-        pub tray_menu: Menu,
     }
 
     fn load_tray_icon_data() -> Option<(Vec<u8>, u32, u32)> {
@@ -54,48 +43,17 @@ mod imp {
         let (rgba, w, h) = load_tray_icon_data()?;
         let icon = tray_icon::Icon::from_rgba(rgba, w, h).ok()?;
 
-        let menu = Menu::new();
-        let show_item = MenuItem::with_id(
-            MenuId::new(MENU_ID_SHOW),
-            "Hauptfenster anzeigen",
-            true,
-            None,
-        );
-        let refresh_item = MenuItem::with_id(
-            MenuId::new(MENU_ID_REFRESH),
-            "Repositories aktualisieren",
-            true,
-            None,
-        );
-        let settings_item =
-            MenuItem::with_id(MenuId::new(MENU_ID_SETTINGS), "Einstellungen", true, None);
-        let quit_item = MenuItem::with_id(MenuId::new(MENU_ID_QUIT), "Beenden", true, None);
-
-        let _ = menu.append(&show_item);
-        let _ = menu.append(&refresh_item);
-        let _ = menu.append(&PredefinedMenuItem::separator());
-        let _ = menu.append(&settings_item);
-        let _ = menu.append(&PredefinedMenuItem::separator());
-        let _ = menu.append(&quit_item);
-
         let tray = TrayIconBuilder::new()
             .with_tooltip("GitManager")
             .with_icon(icon)
             .with_menu_on_left_click(false)
             .build()
             .ok()?;
-        // Attach menu dynamically via set_menu (tray created without with_menu per Task 2 spec).
-        // Use set_menu to keep Menu stored in TrayChannels for later detach/attach in poll_tray_events.
-        // Also disables left-click menu via with_menu_on_left_click(false) as defense-in-depth.
-        tray.set_menu(Some(Box::new(menu.clone())));
 
         let (tray_tx, tray_rx): (Sender<TrayIconEvent>, Receiver<TrayIconEvent>) =
             std::sync::mpsc::channel();
-        let (menu_tx, menu_rx): (Sender<MenuEvent>, Receiver<MenuEvent>) =
-            std::sync::mpsc::channel();
 
-        // Robust handlers: forward payload + wake egui. This disables the global receiver() but we use our own channels.
-        // Use cloned Context for repaint. Also wake tray service viewport for dedicated handling.
+        // Robust handler: forward payload + wake egui. No native menu - only custom popup on left click.
         let tray_service_id = egui::ViewportId::from_hash_of("tray_service");
         let ctx_clone = ctx.clone();
         TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {
@@ -103,18 +61,10 @@ mod imp {
             ctx_clone.request_repaint();
             ctx_clone.request_repaint_of(tray_service_id);
         }));
-        let ctx_clone2 = ctx;
-        MenuEvent::set_event_handler(Some(move |ev: MenuEvent| {
-            let _ = menu_tx.send(ev);
-            ctx_clone2.request_repaint();
-            ctx_clone2.request_repaint_of(tray_service_id);
-        }));
 
         Some(TrayChannels {
             tray_rx,
-            menu_rx,
             tray_icon: tray,
-            tray_menu: menu,
         })
     }
 }

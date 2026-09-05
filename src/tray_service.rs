@@ -20,6 +20,7 @@ mod imp {
         OpenSettings,
         Quit,
         BranchSwitch(PathBuf, String),
+        SolutionSelect(PathBuf, PathBuf),
         IdeOpen(PathBuf, String, PathBuf),
         AgentOpen(PathBuf, String),
         ExplorerOpen(PathBuf),
@@ -68,12 +69,11 @@ mod imp {
         _class: ViewportClass,
         shared: Arc<Mutex<TrayShared>>,
         tray_rx: Arc<Mutex<mpsc::Receiver<tray_icon::TrayIconEvent>>>,
-        menu_rx: Arc<Mutex<mpsc::Receiver<tray_icon::menu::MenuEvent>>>,
     ) {
         let ctx = ui.ctx().clone();
 
-        // Poll tray events (efficient: try_recv loop, no blocking)
-        poll_tray_events(&shared, &tray_rx, &menu_rx, &ctx);
+        // Poll tray events (only TrayIconEvent for custom popup; MenuEvent handled directly in app.rs)
+        poll_tray_events(&shared, &tray_rx, &ctx);
 
         // Show popup if needed - as immediate child of tray service viewport
         let should_show = {
@@ -103,9 +103,11 @@ mod imp {
     fn poll_tray_events(
         shared: &Arc<Mutex<TrayShared>>,
         tray_rx: &Arc<Mutex<mpsc::Receiver<tray_icon::TrayIconEvent>>>,
-        menu_rx: &Arc<Mutex<mpsc::Receiver<tray_icon::menu::MenuEvent>>>,
         ctx: &Context,
     ) {
+        // Note: MenuEvent handling is now done directly in app.rs poll_tray_events
+        // to avoid extra hop via TrayAction and service throttling.
+        // This function only handles TrayIconEvent for custom popup.
         use tray_icon::MouseButton;
         use tray_icon::MouseButtonState;
         use tray_icon::TrayIconEvent;
@@ -151,26 +153,7 @@ mod imp {
                     button: MouseButton::Right,
                     ..
                 } => {
-                    // Debounce: ignore Right that follows Left within 300ms
-                    let should_ignore = {
-                        let guard = shared.lock().unwrap();
-                        if let Some(t) = guard.last_left_toggle {
-                            t.elapsed() < std::time::Duration::from_millis(300)
-                        } else {
-                            false
-                        }
-                    };
-                    if should_ignore {
-                        continue;
-                    }
-                    // Close custom popup to avoid overlap with native menu
-                    let mut guard = shared.lock().unwrap();
-                    if guard.popup_open {
-                        guard.popup_open = false;
-                        guard.popup_rect = None;
-                        guard.popup_opened_at = None;
-                        ctx.request_repaint();
-                    }
+                    // Rechtsklick soll nichts tun (kein natives Menü)
                 }
                 TrayIconEvent::DoubleClick {
                     button: MouseButton::Left,
@@ -191,61 +174,6 @@ mod imp {
             }
         }
 
-        // Drain menu events
-        let menu_events: Vec<tray_icon::menu::MenuEvent> = {
-            let guard = menu_rx.lock().unwrap();
-            let mut v = Vec::new();
-            while let Ok(ev) = guard.try_recv() {
-                v.push(ev);
-            }
-            v
-        };
-
-        for event in menu_events {
-            let id = event.id.0.as_str();
-            let mut guard = shared.lock().unwrap();
-            let needs_wake = matches!(
-                id,
-                crate::tray::MENU_ID_SHOW
-                    | crate::tray::MENU_ID_REFRESH
-                    | crate::tray::MENU_ID_SETTINGS
-                    | crate::tray::MENU_ID_QUIT
-            );
-            // Close custom popup when native menu action selected (avoid overlap)
-            if guard.popup_open
-                && matches!(
-                    id,
-                    crate::tray::MENU_ID_SHOW
-                        | crate::tray::MENU_ID_SETTINGS
-                        | crate::tray::MENU_ID_QUIT
-                )
-            {
-                guard.popup_open = false;
-                guard.popup_rect = None;
-                guard.popup_opened_at = None;
-            }
-            match id {
-                crate::tray::MENU_ID_SHOW => {
-                    let _ = guard.action_tx.send(TrayAction::ShowMainWindow);
-                }
-                crate::tray::MENU_ID_REFRESH => {
-                    let _ = guard.action_tx.send(TrayAction::Refresh);
-                }
-                crate::tray::MENU_ID_SETTINGS => {
-                    let _ = guard.action_tx.send(TrayAction::OpenSettings);
-                }
-                crate::tray::MENU_ID_QUIT => {
-                    let _ = guard.action_tx.send(TrayAction::Quit);
-                }
-                _ => {}
-            }
-            drop(guard);
-            if needs_wake {
-                // Wake main viewport immediately (service is 500ms throttled, main needs instant)
-                ctx.request_repaint();
-                ctx.request_repaint_of(ViewportId::ROOT);
-            }
-        }
     }
 
     fn show_tray_popup_viewport(shared: &Arc<Mutex<TrayShared>>, ctx: &Context) {
@@ -271,12 +199,13 @@ mod imp {
             (guard.repos.clone(), guard.config.clone())
         };
 
-        // Popup size
+        // Popup size - add extra height if any repo has solution dropdown
         let popup_width: f32 = 360.0;
         let tray_limit = config_arc.tray_icons.max_display.clamp(5, 50);
         let visible_repos = repos_arc.len().min(tray_limit);
-        let row_height: f32 = 66.0;
-        let popup_height: f32 = (visible_repos as f32 * row_height + 90.0).clamp(280.0, 520.0);
+        let has_solution_dropdown = repos_arc.iter().any(|r| r.solutions.len() > 1);
+        let row_height: f32 = if has_solution_dropdown { 94.0 } else { 66.0 };
+        let popup_height: f32 = (visible_repos as f32 * row_height + 90.0).clamp(280.0, 560.0);
         let popup_size = Vec2::new(popup_width, popup_height);
 
         // Position calculation
@@ -389,6 +318,7 @@ mod imp {
                     close_popup = true;
                 }
                 if tray_actions.branch_switch.is_some()
+                    || tray_actions.solution_select.is_some()
                     || tray_actions.ide_open.is_some()
                     || tray_actions.agent_open.is_some()
                     || tray_actions.explorer_open.is_some()
@@ -433,6 +363,7 @@ mod imp {
             || tray_actions.quit
             || tray_actions.refresh
             || tray_actions.branch_switch.is_some()
+            || tray_actions.solution_select.is_some()
             || tray_actions.ide_open.is_some()
             || tray_actions.agent_open.is_some()
             || tray_actions.explorer_open.is_some()
@@ -450,6 +381,11 @@ mod imp {
             }
             if let Some((path, branch)) = tray_actions.branch_switch {
                 let _ = guard.action_tx.send(TrayAction::BranchSwitch(path, branch));
+            }
+            if let Some((repo_path, sln_path)) = tray_actions.solution_select {
+                let _ = guard
+                    .action_tx
+                    .send(TrayAction::SolutionSelect(repo_path, sln_path));
             }
             if let Some((path, ide_id, file)) = tray_actions.ide_open {
                 let _ = guard
@@ -479,7 +415,6 @@ mod imp {
         ctx: &Context,
         shared: Arc<Mutex<TrayShared>>,
         tray_rx: Arc<Mutex<mpsc::Receiver<tray_icon::TrayIconEvent>>>,
-        menu_rx: Arc<Mutex<mpsc::Receiver<tray_icon::menu::MenuEvent>>>,
     ) {
         let viewport_id = ViewportId::from_hash_of("tray_service");
         // Hidden service viewport: 1x1 off-screen, but visible to OS so not throttled
@@ -499,7 +434,7 @@ mod imp {
             .with_maximize_button(false);
 
         ctx.show_viewport_deferred(viewport_id, builder, move |ui, class| {
-            tray_service_callback(ui, class, shared.clone(), tray_rx.clone(), menu_rx.clone());
+            tray_service_callback(ui, class, shared.clone(), tray_rx.clone());
         });
     }
 }

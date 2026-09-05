@@ -62,20 +62,12 @@ pub struct MyApp {
     #[cfg(target_os = "windows")]
     tray_event_rx: Option<std::sync::mpsc::Receiver<tray_icon::TrayIconEvent>>,
     #[cfg(target_os = "windows")]
-    menu_event_rx: Option<std::sync::mpsc::Receiver<tray_icon::menu::MenuEvent>>,
-    #[cfg(target_os = "windows")]
-    tray_menu: Option<tray_icon::menu::Menu>,
-    #[cfg(target_os = "windows")]
     tray_shared: Option<std::sync::Arc<std::sync::Mutex<crate::tray_service::TrayShared>>>,
     #[cfg(target_os = "windows")]
     tray_action_rx: Option<std::sync::mpsc::Receiver<crate::tray_service::TrayAction>>,
     #[cfg(target_os = "windows")]
     tray_service_tray_rx: Option<
         std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<tray_icon::TrayIconEvent>>>,
-    >,
-    #[cfg(target_os = "windows")]
-    tray_service_menu_rx: Option<
-        std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<tray_icon::menu::MenuEvent>>>,
     >,
     #[cfg(target_os = "windows")]
     last_tray_sync: Option<std::time::Instant>,
@@ -126,17 +118,11 @@ impl MyApp {
             #[cfg(target_os = "windows")]
             tray_event_rx: None,
             #[cfg(target_os = "windows")]
-            menu_event_rx: None,
-            #[cfg(target_os = "windows")]
-            tray_menu: None,
-            #[cfg(target_os = "windows")]
             tray_shared: None,
             #[cfg(target_os = "windows")]
             tray_action_rx: None,
             #[cfg(target_os = "windows")]
             tray_service_tray_rx: None,
-            #[cfg(target_os = "windows")]
-            tray_service_menu_rx: None,
             #[cfg(target_os = "windows")]
             last_tray_sync: None,
             tray_popup_open: false,
@@ -149,19 +135,16 @@ impl MyApp {
         };
         #[cfg(target_os = "windows")]
         {
-            // Setup tray icon with robust channel forwarding (preserves rect)
-            // Use dedicated tray service viewport for efficient, persistent tray handling
+            // Setup tray icon - only custom popup on left click, no native menu
             if let Some(channels) = crate::tray::create_tray_channels(cc.egui_ctx.clone()) {
                 app.tray_icon = Some(channels.tray_icon);
-                app.tray_menu = Some(channels.tray_menu);
                 // Create shared state and channels for tray service (efficient Arc sharing)
                 let (action_tx, action_rx) = mpsc::channel();
                 let shared = std::sync::Arc::new(std::sync::Mutex::new(
                     crate::tray_service::TrayShared::new(action_tx),
                 ));
-                // Wrap receivers in Arc<Mutex> for Sync required by deferred viewport
+                // Wrap receiver in Arc<Mutex> for Sync required by deferred viewport
                 let tray_rx_arc = std::sync::Arc::new(std::sync::Mutex::new(channels.tray_rx));
-                let menu_rx_arc = std::sync::Arc::new(std::sync::Mutex::new(channels.menu_rx));
                 // Initial sync of data (efficient: clones once at startup)
                 {
                     if let Ok(mut guard) = shared.lock() {
@@ -171,10 +154,7 @@ impl MyApp {
                 app.tray_shared = Some(shared);
                 app.tray_action_rx = Some(action_rx);
                 app.tray_service_tray_rx = Some(tray_rx_arc);
-                app.tray_service_menu_rx = Some(menu_rx_arc);
                 app.last_tray_sync = Some(std::time::Instant::now());
-                // Keep old channels as None since we use service (fallback not needed)
-                // But keep tray_event_rx/menu_event_rx as None to indicate service mode
             } else {
                 eprintln!("Tray icon creation failed");
             }
@@ -399,19 +379,7 @@ impl MyApp {
                         button: MouseButton::Right,
                         ..
                     } => {
-                        // Debounce: ignore Right that follows Left within 300ms (prevents double-menu flash)
-                        if let Some(t) = self.last_left_toggle {
-                            if t.elapsed() < std::time::Duration::from_millis(300) {
-                                continue;
-                            }
-                        }
-                        // Right click -> native menu (already attached via with_menu_on_left_click(false)), close custom popup to avoid overlap
-                        if self.tray_popup_open {
-                            self.tray_popup_open = false;
-                            self.tray_popup_rect = None;
-                            self.tray_popup_opened_at = None;
-                            ctx.request_repaint();
-                        }
+                        // Rechtsklick soll nichts tun (kein natives Menü mehr)
                     }
                     TrayIconEvent::DoubleClick {
                         button: MouseButton::Left,
@@ -423,33 +391,7 @@ impl MyApp {
                 }
             }
         }
-        // Menu events from our forwarded channel
-        if let Some(rx) = &self.menu_event_rx {
-            let events: Vec<_> = {
-                let mut v = Vec::new();
-                while let Ok(ev) = rx.try_recv() {
-                    v.push(ev);
-                }
-                v
-            };
-            for event in events {
-                let id = event.id.0.as_str();
-                match id {
-                    crate::tray::MENU_ID_SHOW => self.show_main_window(ctx),
-                    crate::tray::MENU_ID_REFRESH => self.start_scan(),
-                    crate::tray::MENU_ID_SETTINGS => {
-                        self.show_settings = true;
-                        self.settings_state = Some(SettingsState::from_config(&self.config));
-                        self.show_main_window(ctx);
-                    }
-                    crate::tray::MENU_ID_QUIT => {
-                        self.should_quit = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    _ => {}
-                }
-            }
-        }
+
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -530,6 +472,25 @@ impl MyApp {
                 }
                 crate::tray_service::TrayAction::BranchSwitch(path, branch) => {
                     self.pending_branch_switch = Some((path, branch));
+                }
+                crate::tray_service::TrayAction::SolutionSelect(repo_path, sln_path) => {
+                    let state = self.config.get_repo_state_mut(&repo_path);
+                    state.selected_solution = Some(sln_path.clone());
+                    if let Err(e) = self.config.save() {
+                        self.error =
+                            Some(crate::i18n::tr_fmt(self.config.language, "save_failed", &[&format!("{e:#}")]));
+                    } else {
+                        if let Some(repo) = self.repos.iter_mut().find(|r| r.path == repo_path) {
+                            repo.selected_solution = Some(sln_path.clone());
+                        }
+                        self.status_message = Some(crate::i18n::tr_fmt(
+                            self.config.language,
+                            "solution_selected",
+                            &[&repo_path.display().to_string()],
+                        ));
+                        self.status_message_time = Some(std::time::Instant::now());
+                        self.sync_tray_service();
+                    }
                 }
                 crate::tray_service::TrayAction::IdeOpen(path, ide_id, file) => {
                     {
@@ -642,12 +603,11 @@ impl MyApp {
     #[cfg(target_os = "windows")]
     fn show_tray_service_viewport(&mut self, ctx: &egui::Context) {
         // Efficient: create dedicated tray service viewport - runs independently even when main hidden
-        if let (Some(shared), Some(tray_rx), Some(menu_rx)) = (
+        if let (Some(shared), Some(tray_rx)) = (
             self.tray_shared.clone(),
             self.tray_service_tray_rx.clone(),
-            self.tray_service_menu_rx.clone(),
         ) {
-            crate::tray_service::create_tray_service_viewport(ctx, shared, tray_rx, menu_rx);
+            crate::tray_service::create_tray_service_viewport(ctx, shared, tray_rx);
         }
     }
 
