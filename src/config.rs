@@ -983,10 +983,13 @@ impl AppConfig {
             // icon_order dedup preserve order
             {
                 let mut seen = std::collections::HashSet::new();
-                cfg.tray_icons.icon_order.retain(|id| seen.insert(id.clone()));
+                cfg.tray_icons
+                    .icon_order
+                    .retain(|id| seen.insert(id.clone()));
             }
             if cfg.tray_icons.icon_order.is_empty() {
-                cfg.tray_icons.icon_order = DEFAULT_TRAY_ICONS.iter().map(|s| s.to_string()).collect();
+                cfg.tray_icons.icon_order =
+                    DEFAULT_TRAY_ICONS.iter().map(|s| s.to_string()).collect();
             } else {
                 // ensure all default icons present (append missing)
                 for id in DEFAULT_TRAY_ICONS {
@@ -1030,7 +1033,9 @@ impl AppConfig {
         cfg.tray_icons.hidden_icon_ids.dedup();
         {
             let mut seen = std::collections::HashSet::new();
-            cfg.tray_icons.icon_order.retain(|id| seen.insert(id.clone()));
+            cfg.tray_icons
+                .icon_order
+                .retain(|id| seen.insert(id.clone()));
         }
         if cfg.max_depth == 0 {
             cfg.max_depth = 2;

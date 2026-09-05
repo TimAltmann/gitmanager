@@ -437,20 +437,18 @@ impl MyApp {
                 .monitor_size
                 .unwrap_or(egui::vec2(1920.0, 1080.0))
         });
-        let monitor_offset_x = if tray_rect.center().x > monitor_size.x {
-            (tray_rect.center().x / monitor_size.x).floor() * monitor_size.x
-        } else if tray_rect.center().x < 0.0 {
-            (tray_rect.center().x / monitor_size.x).floor() * monitor_size.x
-        } else {
-            0.0
-        };
-        let monitor_offset_y = if tray_rect.center().y > monitor_size.y {
-            (tray_rect.center().y / monitor_size.y).floor() * monitor_size.y
-        } else if tray_rect.center().y < 0.0 {
-            (tray_rect.center().y / monitor_size.y).floor() * monitor_size.y
-        } else {
-            0.0
-        };
+        let monitor_offset_x =
+            if tray_rect.center().x > monitor_size.x || tray_rect.center().x < 0.0 {
+                (tray_rect.center().x / monitor_size.x).floor() * monitor_size.x
+            } else {
+                0.0
+            };
+        let monitor_offset_y =
+            if tray_rect.center().y > monitor_size.y || tray_rect.center().y < 0.0 {
+                (tray_rect.center().y / monitor_size.y).floor() * monitor_size.y
+            } else {
+                0.0
+            };
         let screen_rect = egui::Rect::from_min_max(
             egui::pos2(monitor_offset_x, monitor_offset_y),
             egui::pos2(
@@ -1538,30 +1536,33 @@ impl eframe::App for MyApp {
             if self.settings_state.is_none() {
                 self.settings_state = Some(SettingsState::from_config(&self.config));
             }
-            let mut save: Option<AppConfig> = None;
-            let mut state = self.settings_state.take().unwrap();
-            let mut open = self.show_settings;
-            crate::ui::settings::show_settings_window(&ctx, &mut state, &mut open, &mut save);
-            self.show_settings = open;
+            if let Some(mut state) = self.settings_state.take() {
+                let mut save: Option<AppConfig> = None;
+                let mut open = self.show_settings;
+                crate::ui::settings::show_settings_window(&ctx, &mut state, &mut open, &mut save);
+                self.show_settings = open;
 
-            if let Some(new_cfg) = save {
-                // Theme sofort anwenden
-                crate::ui::theme::apply_theme(&ctx, &new_cfg.theme);
-                let lang = new_cfg.language;
-                self.config = new_cfg;
-                self.settings_state = Some(SettingsState::from_config(&self.config));
-                self.show_settings = false;
-                self.status_message = Some(tr(lang, "saved_scan_restart"));
-                self.status_message_time = Some(std::time::Instant::now());
-                self.start_scan();
-            } else {
-                if self.show_settings {
+                if let Some(new_cfg) = save {
+                    // Theme sofort anwenden
+                    crate::ui::theme::apply_theme(&ctx, &new_cfg.theme);
+                    let lang = new_cfg.language;
+                    self.config = new_cfg;
+                    self.settings_state = Some(SettingsState::from_config(&self.config));
+                    self.show_settings = false;
+                    self.status_message = Some(tr(lang, "saved_scan_restart"));
+                    self.status_message_time = Some(std::time::Instant::now());
+                    self.start_scan();
+                } else if self.show_settings {
                     self.settings_state = Some(state);
                 } else {
                     self.settings_state = None;
                 }
-            }
-            if !self.show_settings {
+                if !self.show_settings {
+                    self.settings_state = None;
+                }
+            } else {
+                // Defensive: state missing despite initialization above
+                self.show_settings = false;
                 self.settings_state = None;
             }
         }

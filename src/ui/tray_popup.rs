@@ -61,6 +61,7 @@ fn agent_image(agent: &crate::config::AgentProfile) -> egui::Image<'static> {
     egui::Image::new(agent_icon_for(&agent.id)).fit_to_exact_size(Vec2::splat(16.0))
 }
 
+#[derive(Default)]
 pub struct TrayPopupActions {
     pub branch_switch: Option<(std::path::PathBuf, String)>,
     pub ide_open: Option<(std::path::PathBuf, String, std::path::PathBuf)>,
@@ -72,23 +73,6 @@ pub struct TrayPopupActions {
     pub open_settings: bool,
     pub quit: bool,
     pub close_popup: bool,
-}
-
-impl Default for TrayPopupActions {
-    fn default() -> Self {
-        Self {
-            branch_switch: None,
-            ide_open: None,
-            agent_open: None,
-            explorer_open: None,
-            shell_open: None,
-            refresh: false,
-            open_main: false,
-            open_settings: false,
-            quit: false,
-            close_popup: false,
-        }
-    }
 }
 
 /// Shows the tray popup UI inside the given viewport Ui.
@@ -128,7 +112,11 @@ pub fn show_tray_popup_ui(
                         egui::Image::new(ICON_GEAR).fit_to_exact_size(Vec2::splat(12.0)),
                     )
                     .small();
-                    if ui.add(settings_btn).on_hover_text("Settings öffnen").clicked() {
+                    if ui
+                        .add(settings_btn)
+                        .on_hover_text("Settings öffnen")
+                        .clicked()
+                    {
                         actions.open_settings = true;
                         actions.open_main = true;
                     }
@@ -239,7 +227,10 @@ fn show_tray_repo_row(
     let visuals = ui.visuals().clone();
     let frame = egui::Frame::new()
         .fill(visuals.widgets.inactive.bg_fill)
-        .stroke(egui::Stroke::new(1.0, visuals.widgets.inactive.fg_stroke.color))
+        .stroke(egui::Stroke::new(
+            1.0,
+            visuals.widgets.inactive.fg_stroke.color,
+        ))
         .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(8, 6));
 
@@ -284,12 +275,11 @@ fn show_tray_repo_row(
                         .show_ui(ui, |ui| {
                             for b in display_branches {
                                 let is_sel = *b == repo.branch;
-                                if ui.selectable_label(is_sel, b.as_str()).clicked() {
-                                    if *b != repo.branch {
-                                        actions.branch_switch =
-                                            Some((repo.path.clone(), (*b).clone()));
-                                        actions.close_popup = true;
-                                    }
+                                if ui.selectable_label(is_sel, b.as_str()).clicked()
+                                    && *b != repo.branch
+                                {
+                                    actions.branch_switch = Some((repo.path.clone(), (*b).clone()));
+                                    actions.close_popup = true;
                                 }
                             }
                             if branches.len() > limit {
@@ -348,8 +338,7 @@ fn show_tray_repo_row(
                         .add(btn)
                         .on_hover_text(format!("In {} öffnen", ide.display_name));
                     if resp.clicked() {
-                        actions.ide_open =
-                            Some((repo.path.clone(), ide.id.clone(), file_path));
+                        actions.ide_open = Some((repo.path.clone(), ide.id.clone(), file_path));
                         actions.close_popup = true;
                     }
                 }
@@ -357,7 +346,11 @@ fn show_tray_repo_row(
                     // Only show placeholder if not all hidden? Keep "Keine IDE" only if original visible was empty?
                     // If filtered all hidden, don't show placeholder to reflect hidden state
                     let any_visible_original = !profile.visible_ides().is_empty();
-                    if any_visible_original && tray_hidden.iter().any(|h| ["vscode","vs2022","rider"].contains(&h.as_str())) {
+                    if any_visible_original
+                        && tray_hidden
+                            .iter()
+                            .any(|h| ["vscode", "vs2022", "rider"].contains(&h.as_str()))
+                    {
                         // all tray hidden case – show subtle hint instead of "Keine IDE"
                         ui.label(
                             RichText::new("—")
@@ -389,8 +382,7 @@ fn show_tray_repo_row(
                     && ui
                         .add(
                             egui::Button::image(
-                                egui::Image::new(ICON_FOLDER)
-                                    .fit_to_exact_size(Vec2::splat(12.0)),
+                                egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(12.0)),
                             )
                             .small(),
                         )
@@ -418,7 +410,8 @@ fn show_tray_repo_row(
 
                 // Agents: filter by tray hidden + profile hidden/order, sort by tray order
                 let active_agents = config.get_active_agents();
-                let filtered_raw = profile.filtered_agents(&config.agents, &config.active_agent_ids);
+                let filtered_raw =
+                    profile.filtered_agents(&config.agents, &config.active_agent_ids);
                 let mut filtered: Vec<&crate::config::AgentProfile> = filtered_raw
                     .into_iter()
                     .filter(|a| !tray_hidden.contains(&a.id))
@@ -446,15 +439,14 @@ fn show_tray_repo_row(
                 }
                 if filtered_empty && !active_agents.is_empty() {
                     let first = &active_agents[0];
-                    if !tray_hidden.contains(&first.id) {
-                        if ui
+                    if !tray_hidden.contains(&first.id)
+                        && ui
                             .add(egui::Button::image(agent_image(first)).small())
                             .on_hover_text(format!("Agent {} starten", first.display_name))
                             .clicked()
-                        {
-                            actions.agent_open = Some((repo.path.clone(), first.id.clone()));
-                            actions.close_popup = true;
-                        }
+                    {
+                        actions.agent_open = Some((repo.path.clone(), first.id.clone()));
+                        actions.close_popup = true;
                     }
                 }
             });

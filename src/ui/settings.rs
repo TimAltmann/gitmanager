@@ -2672,8 +2672,8 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
 }
 
 const DEFAULT_TRAY_ICON_IDS: &[&str] = &[
-    "vscode", "vs2022", "rider", "folder", "terminal", "claude", "codex", "gemini",
-    "copilot", "cursor", "aider",
+    "vscode", "vs2022", "rider", "folder", "terminal", "claude", "codex", "gemini", "copilot",
+    "cursor", "aider",
 ];
 
 fn tray_icon_display_name(id: &str) -> &str {
@@ -2694,7 +2694,10 @@ fn tray_icon_display_name(id: &str) -> &str {
 }
 
 fn effective_tray_order(draft: &AppConfig) -> Vec<String> {
-    let all: Vec<String> = DEFAULT_TRAY_ICON_IDS.iter().map(|s| s.to_string()).collect();
+    let all: Vec<String> = DEFAULT_TRAY_ICON_IDS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     if draft.tray_icons.icon_order.is_empty() {
         all
     } else {
@@ -2717,7 +2720,11 @@ fn effective_tray_order(draft: &AppConfig) -> Vec<String> {
 
 fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     let lang = state.draft.language;
-    ui.label(RichText::new(tr(lang, "tray_icons_title")).size(13.0).strong());
+    ui.label(
+        RichText::new(tr(lang, "tray_icons_title"))
+            .size(13.0)
+            .strong(),
+    );
     ui.add_space(4.0);
     ui.label(
         RichText::new(tr(lang, "tray_icons_desc"))
@@ -2727,12 +2734,18 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.add_space(12.0);
 
     // Max display slider
-    ui.label(RichText::new(tr(lang, "tray_max_display")).size(12.0).strong());
+    ui.label(
+        RichText::new(tr(lang, "tray_max_display"))
+            .size(12.0)
+            .strong(),
+    );
     ui.add_space(4.0);
     ui.label(
-        RichText::new("Wie viele Repos maximal im Tray-Popup angezeigt werden (5–50, Standard 10).")
-            .size(11.0)
-            .color(Color32::from_rgb(100, 100, 100)),
+        RichText::new(
+            "Wie viele Repos maximal im Tray-Popup angezeigt werden (5–50, Standard 10).",
+        )
+        .size(11.0)
+        .color(Color32::from_rgb(100, 100, 100)),
     );
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -2778,7 +2791,11 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.separator();
     ui.add_space(8.0);
 
-    ui.label(RichText::new("Icons (Reihenfolge & Sichtbarkeit)").size(12.0).strong());
+    ui.label(
+        RichText::new("Icons (Reihenfolge & Sichtbarkeit)")
+            .size(12.0)
+            .strong(),
+    );
     ui.add_space(4.0);
     ui.label(
         RichText::new("Icons neu anordnen (↑/↓) und ausblenden (👁). Ausgeblendete Icons verschwinden ohne Lücke in der Tray-Zeile.")
