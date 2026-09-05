@@ -101,12 +101,22 @@ pub fn show_tray_popup_ui(
                         .color(Color32::from_rgb(120, 120, 120)),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let refresh_btn = egui::Button::image(
-                        egui::Image::new(ICON_REFRESH).fit_to_exact_size(Vec2::splat(12.0)),
-                    )
-                    .small();
-                    if ui.add(refresh_btn).on_hover_text("Refresh").clicked() {
-                        actions.refresh = true;
+                    // Order in code is reverse of visual (right_to_left): first added = rightmost
+                    // Desired visual: Refresh (left) | Settings (middle) | Close (right)
+                    // So code order: Close, Settings, Refresh
+                    if ui
+                        .add(
+                            egui::Button::image(
+                                egui::Image::new(ICON_CROSS)
+                                    .fit_to_exact_size(Vec2::splat(12.0))
+                                    .tint(ui.visuals().text_color()),
+                            )
+                            .small(),
+                        )
+                        .on_hover_text("Schließen (Esc)")
+                        .clicked()
+                    {
+                        actions.close_popup = true;
                     }
                     let settings_btn = egui::Button::image(
                         egui::Image::new(ICON_GEAR).fit_to_exact_size(Vec2::splat(12.0)),
@@ -120,17 +130,12 @@ pub fn show_tray_popup_ui(
                         actions.open_settings = true;
                         actions.open_main = true;
                     }
-                    if ui
-                        .add(
-                            egui::Button::image(
-                                egui::Image::new(ICON_CROSS).fit_to_exact_size(Vec2::splat(12.0)),
-                            )
-                            .small(),
-                        )
-                        .on_hover_text("Schließen (Esc)")
-                        .clicked()
-                    {
-                        actions.close_popup = true;
+                    let refresh_btn = egui::Button::image(
+                        egui::Image::new(ICON_REFRESH).fit_to_exact_size(Vec2::splat(12.0)),
+                    )
+                    .small();
+                    if ui.add(refresh_btn).on_hover_text("Refresh").clicked() {
+                        actions.refresh = true;
                     }
                 });
             });

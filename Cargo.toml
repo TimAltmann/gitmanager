@@ -1,6 +1,6 @@
 [package]
 name = "gitmanager"
-version = "0.1.0"
+version = "0.0.4"
 edition = "2021"
 description = "Lightweight Git repository manager for Windows - shows folders, branches and dirty status, opens in VS Code"
 authors = ["gitmanager"]
@@ -23,6 +23,8 @@ rayon = "1.12"
 anyhow = "1.0"
 roxmltree = "0.20"
 image = { version = "0.25", default-features = false, features = ["png", "ico", "jpeg"] }
+ureq = { version = "2.9", features = ["json"] }
+semver = "1.0"
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-icon = "0.24"
 

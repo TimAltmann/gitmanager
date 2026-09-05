@@ -608,93 +608,6 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     );
     ui.add_space(8.0);
 
-    // Tray-Einstellungen
-    ui.separator();
-    ui.add_space(8.0);
-    ui.label(RichText::new("System Tray").size(13.0).strong());
-    ui.add_space(4.0);
-    ui.label(
-        RichText::new(
-            "Verhalten wenn das Fenster geschlossen wird und Einstellungen für das Tray-Popup.",
-        )
-        .size(11.0)
-        .color(Color32::from_rgb(100, 100, 100)),
-    );
-    ui.add_space(6.0);
-    {
-        let mut minimize = state.draft.minimize_to_tray;
-        if ui
-            .checkbox(
-                &mut minimize,
-                "Beim Schließen in Tray minimieren (statt beenden)",
-            )
-            .changed()
-        {
-            state.draft.minimize_to_tray = minimize;
-        }
-        ui.label(
-            RichText::new(if minimize {
-                "✓ Das Fenster wird beim Schließen ausgeblendet und läuft im Tray weiter (Links-Klick: eigenes Menü, Rechts-Klick: Kontextmenü)."
-            } else {
-                "Das Fenster wird beim Schließen beendet."
-            })
-            .size(10.0)
-            .color(Color32::from_rgb(120, 120, 120))
-            .italics(),
-        );
-    }
-    ui.add_space(8.0);
-    ui.label(RichText::new("Tray Branch-Limit").size(12.0).strong());
-    ui.add_space(4.0);
-    ui.label(
-        RichText::new(
-            "Wie viele Branches maximal im Tray-Popup Dropdown angezeigt werden (5–50, Standard 20).",
-        )
-        .size(11.0)
-        .color(Color32::from_rgb(100, 100, 100)),
-    );
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label("Limit:");
-        let mut limit = state.draft.tray_branch_limit;
-        // ensure at least 5
-        if limit < 5 {
-            limit = 5;
-        }
-        let slider = egui::Slider::new(&mut limit, 5..=50)
-            .text("Branches")
-            .step_by(1.0);
-        if ui.add(slider).changed() {
-            state.draft.tray_branch_limit = limit.clamp(5, 50);
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label("Oder direkt:");
-        let mut l = state.draft.tray_branch_limit;
-        if ui
-            .add(egui::DragValue::new(&mut l).range(5..=50).speed(1.0))
-            .changed()
-        {
-            state.draft.tray_branch_limit = l.clamp(5, 50);
-        }
-        ui.label(
-            RichText::new(format!("(aktuell: {})", state.draft.tray_branch_limit))
-                .size(11.0)
-                .color(Color32::from_rgb(120, 120, 120)),
-        );
-    });
-    ui.add_space(4.0);
-    ui.label(
-        RichText::new(format!(
-            "Zeigt bis zu {} Branches im Tray-Popup. Weitere im Hauptfenster.",
-            state.draft.tray_branch_limit
-        ))
-        .size(10.0)
-        .color(Color32::from_rgb(120, 120, 120))
-        .italics(),
-    );
-    ui.add_space(8.0);
-
     // Aktives Profil global
     ui.separator();
     ui.add_space(8.0);
@@ -2873,6 +2786,87 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     }
 
     ui.add_space(8.0);
+
+    // System Tray Verhalten (moved from General)
+    ui.separator();
+    ui.add_space(8.0);
+    ui.label(RichText::new("System Tray Verhalten").size(12.0).strong());
+    ui.add_space(4.0);
+    {
+        let mut minimize = state.draft.minimize_to_tray;
+        if ui
+            .checkbox(
+                &mut minimize,
+                "Beim Schließen in Tray minimieren (statt beenden)",
+            )
+            .changed()
+        {
+            state.draft.minimize_to_tray = minimize;
+        }
+        ui.label(
+            RichText::new(if minimize {
+                "✓ Das Fenster wird beim Schließen ausgeblendet und läuft im Tray weiter (Links-Klick: eigenes Menü, Rechts-Klick: Kontextmenü)."
+            } else {
+                "Das Fenster wird beim Schließen beendet."
+            })
+            .size(10.0)
+            .color(Color32::from_rgb(120, 120, 120))
+            .italics(),
+        );
+    }
+    ui.add_space(8.0);
+    ui.label(RichText::new("Tray Branch-Limit").size(12.0).strong());
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(
+            "Wie viele Branches maximal im Tray-Popup Dropdown angezeigt werden (5–50, Standard 20).",
+        )
+        .size(11.0)
+        .color(Color32::from_rgb(100, 100, 100)),
+    );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Limit:");
+        let mut limit = state.draft.tray_branch_limit;
+        if limit < 5 {
+            limit = 5;
+        }
+        let slider = egui::Slider::new(&mut limit, 5..=50)
+            .text("Branches")
+            .step_by(1.0);
+        if ui.add(slider).changed() {
+            state.draft.tray_branch_limit = limit.clamp(5, 50);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Oder direkt:");
+        let mut l = state.draft.tray_branch_limit;
+        if ui
+            .add(egui::DragValue::new(&mut l).range(5..=50).speed(1.0))
+            .changed()
+        {
+            state.draft.tray_branch_limit = l.clamp(5, 50);
+        }
+        ui.label(
+            RichText::new(format!("(aktuell: {})", state.draft.tray_branch_limit))
+                .size(11.0)
+                .color(Color32::from_rgb(120, 120, 120)),
+        );
+    });
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(format!(
+            "Zeigt bis zu {} Branches im Tray-Popup. Weitere im Hauptfenster.",
+            state.draft.tray_branch_limit
+        ))
+        .size(10.0)
+        .color(Color32::from_rgb(120, 120, 120))
+        .italics(),
+    );
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+
     ui.label(
         RichText::new(format!(
             "{} hidden: {}",

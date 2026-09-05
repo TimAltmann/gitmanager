@@ -45,6 +45,9 @@ pub struct MyApp {
     launch_err_tx: Sender<String>,
     launch_err_rx: Receiver<String>,
     config_update_rx: Receiver<Result<AppConfig, String>>,
+    update_rx: Receiver<Option<crate::updater::UpdateInfo>>,
+    update_info: Option<crate::updater::UpdateInfo>,
+    show_update_dialog: bool,
     status_message: Option<String>,
     status_message_time: Option<std::time::Instant>,
     branch_dialog: Option<BranchDialog>,
@@ -66,6 +69,9 @@ pub struct MyApp {
     tray_popup_rect: Option<egui::Rect>,
     window_visible: bool,
     should_quit: bool,
+    #[cfg(target_os = "windows")]
+    last_left_toggle: Option<std::time::Instant>,
+    tray_popup_opened_at: Option<std::time::Instant>,
 }
 
 impl MyApp {
@@ -78,6 +84,7 @@ impl MyApp {
         let (tx, rx) = mpsc::channel();
         let (launch_err_tx, launch_err_rx) = mpsc::channel();
         let (config_update_tx, config_update_rx) = mpsc::channel::<Result<AppConfig, String>>();
+        let (update_tx, update_rx) = mpsc::channel::<Option<crate::updater::UpdateInfo>>();
 
         let mut app = Self {
             config,
@@ -91,6 +98,9 @@ impl MyApp {
             launch_err_tx,
             launch_err_rx,
             config_update_rx,
+            update_rx,
+            update_info: None,
+            show_update_dialog: false,
             status_message: None,
             status_message_time: None,
             branch_dialog: None,
@@ -109,6 +119,9 @@ impl MyApp {
             tray_popup_rect: None,
             window_visible: true,
             should_quit: false,
+            #[cfg(target_os = "windows")]
+            last_left_toggle: None,
+            tray_popup_opened_at: None,
         };
         #[cfg(target_os = "windows")]
         {
@@ -162,6 +175,15 @@ impl MyApp {
                         }
                     }
                 }
+            });
+        }
+        // Update checker (async, 2s delay to not affect startup)
+        {
+            let current_version = env!("CARGO_PKG_VERSION").to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let update = crate::updater::check_for_update(&current_version);
+                let _ = update_tx.send(update);
             });
         }
         app.start_scan();
@@ -223,6 +245,13 @@ impl MyApp {
                 }
             }
         }
+        while let Ok(update) = self.update_rx.try_recv() {
+            if let Some(info) = update {
+                self.update_info = Some(info);
+                self.show_update_dialog = true;
+                ctx.request_repaint();
+            }
+        }
         if self.scanning {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -243,7 +272,10 @@ impl MyApp {
     fn show_main_window(&mut self, ctx: &egui::Context) {
         self.tray_popup_open = false;
         self.tray_popup_rect = None;
+        self.tray_popup_opened_at = None;
         self.window_visible = true;
+        self.should_quit = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         ctx.request_repaint();
@@ -275,10 +307,7 @@ impl MyApp {
                         button_state: MouseButtonState::Down,
                         ..
                     } => {
-                        // Detach menu synchronously before Up could trigger native menu
-                        if let Some(icon) = &self.tray_icon {
-                            icon.set_menu(None);
-                        }
+                        // Left Down: no menu handling, just ensure custom will open on Up
                     }
                     TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -286,10 +315,6 @@ impl MyApp {
                         rect,
                         ..
                     } => {
-                        // Ensure menu detached before toggling custom popup (also handled in Down)
-                        if let Some(icon) = &self.tray_icon {
-                            icon.set_menu(None);
-                        }
                         // Left-click released -> toggle popup (right click is native menu, ignore)
                         let ppp = ctx.pixels_per_point();
                         let ppp = if ppp == 0.0 { 1.0 } else { ppp };
@@ -300,26 +325,30 @@ impl MyApp {
                         if self.tray_popup_open {
                             self.tray_popup_open = false;
                             self.tray_popup_rect = None;
+                            self.tray_popup_opened_at = None;
                         } else {
                             self.tray_popup_open = true;
                             self.tray_popup_rect = Some(tray_rect);
+                            self.tray_popup_opened_at = Some(std::time::Instant::now());
                         }
+                        self.last_left_toggle = Some(std::time::Instant::now());
                         ctx.request_repaint();
                     }
                     TrayIconEvent::Click {
                         button: MouseButton::Right,
                         ..
                     } => {
-                        // Right click -> re-attach native menu before OS shows it
-                        if let Some(icon) = &self.tray_icon {
-                            if let Some(menu) = &self.tray_menu {
-                                icon.set_menu(Some(Box::new(menu.clone())));
+                        // Debounce: ignore Right that follows Left within 300ms (prevents double-menu flash)
+                        if let Some(t) = self.last_left_toggle {
+                            if t.elapsed() < std::time::Duration::from_millis(300) {
+                                continue;
                             }
                         }
-                        // Right click -> native menu, close custom popup to avoid overlap
+                        // Right click -> native menu (already attached via with_menu_on_left_click(false)), close custom popup to avoid overlap
                         if self.tray_popup_open {
                             self.tray_popup_open = false;
                             self.tray_popup_rect = None;
+                            self.tray_popup_opened_at = None;
                             ctx.request_repaint();
                         }
                     }
@@ -510,7 +539,8 @@ impl MyApp {
         let config_clone = self.config.clone();
         let lang_clone = lang;
 
-        ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
+        let viewport_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
             if class == egui::ViewportClass::EmbeddedWindow {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ui.label("Tray popup (embedded) – viewports not supported on this backend");
@@ -552,33 +582,34 @@ impl MyApp {
             {
                 close_popup = true;
             }
-            // Focus-loss auto-close: click outside or window lost focus
-            // Check viewport focused (Option<bool>) with fallback to global focused to avoid immediate close on open
-            let is_focused = ctx.input(|i| match i.viewport().focused {
-                Some(f) => f,
-                None => i.focused,
+            // Focus-loss auto-close: only on WindowFocused(false) with 500ms debounce
+            if self
+                .tray_popup_opened_at
+                .map(|t| t.elapsed() > std::time::Duration::from_millis(500))
+                .unwrap_or(true)
+            {
+                if ctx.input(|i| {
+                    i.events
+                        .iter()
+                        .any(|e| matches!(e, egui::Event::WindowFocused(false)))
+                }) {
+                    close_popup = true;
+                }
+            }
             });
-            let any_click = ctx.input(|i| i.pointer.any_click());
-            if !is_focused && any_click {
-                close_popup = true;
-            }
-            if ctx.input(|i| {
-                i.events
-                    .iter()
-                    .any(|e| matches!(e, egui::Event::WindowFocused(false)))
-            }) {
-                close_popup = true;
-            }
-            // Simple fallback: if popup is not focused (Alt-Tab, click outside), close it
-            // Using fallback to i.focused prevents immediate close when focused is None on first frame
-            if !is_focused {
-                close_popup = true;
-            }
-        });
+        }));
+        if viewport_result.is_err() {
+            eprintln!("Tray popup viewport panicked, closing popup");
+            self.tray_popup_open = false;
+            self.tray_popup_rect = None;
+            self.tray_popup_opened_at = None;
+            return;
+        }
 
         if close_popup {
             self.tray_popup_open = false;
             self.tray_popup_rect = None;
+            self.tray_popup_opened_at = None;
         }
         if tray_actions.refresh {
             self.start_scan();
@@ -1168,6 +1199,64 @@ impl MyApp {
             self.execute_branch_switch(path, branch, force, stash);
         }
     }
+
+    fn show_update_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_update_dialog {
+            return;
+        }
+        let info = match &self.update_info {
+            Some(i) => i.clone(),
+            None => {
+                self.show_update_dialog = false;
+                return;
+            }
+        };
+        let lang = self.config.language;
+        let mut close = false;
+        let mut open_link = false;
+        egui::Window::new(tr(lang, "update_available_title"))
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{}: {} → {}",
+                        tr(lang, "update_available_msg"),
+                        info.current_version,
+                        info.latest_version
+                    ))
+                    .size(12.0),
+                );
+                if let Some(body) = &info.body {
+                    if !body.trim().is_empty() {
+                        ui.add_space(4.0);
+                        egui::ScrollArea::vertical().max_height(80.0).show(ui, |ui| {
+                            ui.label(
+                                RichText::new(body)
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(80, 80, 80)),
+                            );
+                        });
+                    }
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr(lang, "cancel")).clicked() {
+                        close = true;
+                    }
+                    if ui.button(tr(lang, "open_link")).clicked() {
+                        open_link = true;
+                        close = true;
+                    }
+                });
+            });
+        if open_link {
+            ctx.open_url(egui::OpenUrl::new_tab(&info.url));
+        }
+        if close || ctx.input(|i| i.viewport().close_requested()) {
+            self.show_update_dialog = false;
+        }
+    }
 }
 
 impl eframe::App for MyApp {
@@ -1209,6 +1298,7 @@ impl eframe::App for MyApp {
         self.show_top_bar(ui);
         self.show_status_bar(ui);
         self.show_branch_dialog(&ctx);
+        self.show_update_dialog(&ctx);
 
         egui::CentralPanel::default()
             .frame(
