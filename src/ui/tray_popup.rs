@@ -76,11 +76,44 @@ pub struct TrayPopupActions {
     pub close_popup: bool,
 }
 
+/// Max. Zeichen für Labels im Tray-Popup (Branch/Solution).
+/// Das Popup ist 360px breit (~320px nutzbar); längere Texte würden die
+/// ComboBox-Buttons und damit die Viewport-Breite über das Fenster treiben.
+pub const TRAY_LABEL_MAX_CHARS: usize = 40;
+
+/// Kürzt `s` char-safe auf max. `max_chars` Zeichen (inkl. Ellipse).
+/// Kurze Texte kommen unverändert zurück, der volle Text gehört in den Tooltip.
+pub fn truncate_label(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+/// Entscheidet, ob das Tray-Popup nach den Actions geschlossen wird.
+/// Branch-/Solution-Wechsel und Refresh halten das Popup bewusst offen,
+/// damit mehrere Wechsel hintereinander möglich sind; alles andere
+/// (explizites Close, Main/Settings/Quit, externe Launches) schließt.
+pub fn should_close_tray_popup(a: &TrayPopupActions) -> bool {
+    a.close_popup
+        || a.open_main
+        || a.open_settings
+        || a.quit
+        || a.ide_open.is_some()
+        || a.agent_open.is_some()
+        || a.explorer_open.is_some()
+        || a.shell_open.is_some()
+}
+
 /// Shows the tray popup UI inside the given viewport Ui.
 /// Returns actions triggered by the user.
 pub fn show_tray_popup_ui(
     ui: &mut egui::Ui,
-    repos: &mut [RepoInfo],
+    repos: &[RepoInfo],
     config: &AppConfig,
     actions: &mut TrayPopupActions,
 ) {
@@ -210,7 +243,7 @@ pub fn show_tray_popup_ui(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.add_space(2.0);
-                    for repo in repos.iter_mut() {
+                    for repo in repos.iter() {
                         show_tray_repo_row(ui, repo, config, actions);
                         ui.add_space(4.0);
                     }
@@ -226,7 +259,7 @@ pub fn show_tray_popup_ui(
 
 fn show_tray_repo_row(
     ui: &mut egui::Ui,
-    repo: &mut RepoInfo,
+    repo: &RepoInfo,
     config: &AppConfig,
     actions: &mut TrayPopupActions,
 ) {
@@ -273,7 +306,7 @@ fn show_tray_repo_row(
                 let limit = config.tray_branch_limit.clamp(5, 50);
                 if !branches.is_empty() {
                     let display_branches: Vec<&String> = branches.iter().take(limit).collect();
-                    let current = repo.branch.clone();
+                    let current = truncate_label(&repo.branch, TRAY_LABEL_MAX_CHARS);
                     let combo_width = ui.available_width();
                     egui::ComboBox::from_id_salt(("tray_branch", repo.path.clone()))
                         .selected_text(&current)
@@ -281,11 +314,17 @@ fn show_tray_repo_row(
                         .show_ui(ui, |ui| {
                             for b in display_branches {
                                 let is_sel = *b == repo.branch;
-                                if ui.selectable_label(is_sel, b.as_str()).clicked()
+                                if ui
+                                    .selectable_label(
+                                        is_sel,
+                                        truncate_label(b, TRAY_LABEL_MAX_CHARS),
+                                    )
+                                    .on_hover_text(b.as_str())
+                                    .clicked()
                                     && *b != repo.branch
                                 {
+                                    // Popup bleibt bewusst offen (mehrere Wechsel möglich).
                                     actions.branch_switch = Some((repo.path.clone(), (*b).clone()));
-                                    actions.close_popup = true;
                                 }
                             }
                             if branches.len() > limit {
@@ -300,14 +339,17 @@ fn show_tray_repo_row(
                                     .italics(),
                                 );
                             }
-                        });
+                        })
+                        .response
+                        .on_hover_text(&repo.branch);
                 } else {
                     ui.label(
-                        RichText::new(&repo.branch)
+                        RichText::new(truncate_label(&repo.branch, TRAY_LABEL_MAX_CHARS))
                             .size(10.0)
                             .color(Color32::from_rgb(100, 100, 100))
                             .italics(),
-                    );
+                    )
+                    .on_hover_text(&repo.branch);
                 }
             }
 
@@ -315,7 +357,7 @@ fn show_tray_repo_row(
 
             // Row 3: Solution dropdown (only for .NET / when multiple solutions) - own line under branch
             if repo.solutions.len() > 1 {
-                let selected_text = repo
+                let selected_full = repo
                     .selected_solution
                     .as_ref()
                     .and_then(|p| {
@@ -325,6 +367,7 @@ fn show_tray_repo_row(
                             .map(|s| s.relative.clone())
                     })
                     .unwrap_or_else(|| "–".to_string());
+                let selected_text = truncate_label(&selected_full, TRAY_LABEL_MAX_CHARS);
                 let combo_width = ui.available_width();
                 egui::ComboBox::from_id_salt(("tray_solution", repo.path.clone()))
                     .selected_text(selected_text)
@@ -332,15 +375,23 @@ fn show_tray_repo_row(
                     .show_ui(ui, |ui| {
                         for sol in &repo.solutions {
                             let is_sel = Some(&sol.path) == repo.selected_solution.as_ref();
-                            if ui.selectable_label(is_sel, &sol.relative).clicked()
+                            if ui
+                                .selectable_label(
+                                    is_sel,
+                                    truncate_label(&sol.relative, TRAY_LABEL_MAX_CHARS),
+                                )
+                                .on_hover_text(&sol.relative)
+                                .clicked()
                                 && Some(&sol.path) != repo.selected_solution.as_ref()
                             {
+                                // Popup bleibt bewusst offen (mehrere Wechsel möglich).
                                 actions.solution_select =
                                     Some((repo.path.clone(), sol.path.clone()));
-                                actions.close_popup = true;
                             }
                         }
-                    });
+                    })
+                    .response
+                    .on_hover_text(&selected_full);
                 ui.add_space(4.0);
             }
 
@@ -518,6 +569,50 @@ pub fn calculate_popup_position(
     egui::pos2(x, y)
 }
 
+/// MRU timestamp for a repo (max of last_opened/branch_switch/config_change).
+pub fn mru_timestamp(config: &AppConfig, repo_path: &std::path::Path) -> u64 {
+    config
+        .repo_usage
+        .get(&AppConfig::repo_state_key(repo_path))
+        .map(|u| {
+            u.last_opened
+                .unwrap_or(0)
+                .max(u.last_branch_switch.unwrap_or(0))
+                .max(u.last_config_change.unwrap_or(0))
+        })
+        .unwrap_or(0)
+}
+
+/// Sorts repos by MRU (newest first). Pure helper for testability (M1).
+#[allow(dead_code)]
+pub fn sort_repos_mru(repos: &mut [RepoInfo], config: &AppConfig) {
+    repos.sort_by_key(|a| std::cmp::Reverse(mru_timestamp(config, &a.path)));
+}
+
+/// True when any *visible* repo needs a solution dropdown row.
+pub fn has_visible_solution_dropdown(visible_repos: &[RepoInfo]) -> bool {
+    visible_repos.iter().any(|r| r.solutions.len() > 1)
+}
+
+/// Popup height for N visible rows (66px normal, 94px with dropdown + 90px chrome).
+pub fn popup_height(visible_count: usize, has_dropdown: bool) -> f32 {
+    let row_height: f32 = if has_dropdown { 94.0 } else { 66.0 };
+    (visible_count as f32 * row_height + 90.0).clamp(280.0, 560.0)
+}
+
+/// Returns only the visible Top-N repos, MRU-sorted (N1: avoids full Vec deep-clone
+/// per frame; clones only what is actually displayed).
+pub fn sorted_visible_repos(repos: &[RepoInfo], config: &AppConfig, limit: usize) -> Vec<RepoInfo> {
+    let mut idx: Vec<usize> = (0..repos.len()).collect();
+    idx.sort_by(|&a, &b| {
+        mru_timestamp(config, &repos[b].path).cmp(&mru_timestamp(config, &repos[a].path))
+    });
+    idx.into_iter()
+        .take(limit)
+        .map(|i| repos[i].clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +648,126 @@ mod tests {
         let screen = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1920.0, 1080.0));
         let pos = calculate_popup_position(tray, popup, screen);
         assert!(pos.x + popup.x <= 1920.0 - 4.0);
+    }
+
+    #[test]
+    fn popup_height_uses_visible_dropdown_only() {
+        // M1: Höhe muss aus sichtbaren Repos kommen, nicht aus unsortierter Quelle.
+        assert_eq!(
+            popup_height(10, false),
+            (10.0_f32 * 66.0 + 90.0).clamp(280.0, 560.0)
+        );
+        assert_eq!(
+            popup_height(10, true),
+            (10.0_f32 * 94.0 + 90.0).clamp(280.0, 560.0)
+        );
+        assert_eq!(popup_height(0, false), 280.0);
+        assert_eq!(popup_height(50, true), 560.0);
+    }
+
+    #[test]
+    fn visible_dropdown_detection() {
+        use crate::git::{RepoInfo, SolutionFile};
+        let mk = |n_sln: usize| {
+            let mut r = RepoInfo::new(
+                std::path::PathBuf::from(format!("/tmp/r{n_sln}")),
+                "main".to_string(),
+                false,
+                false,
+            );
+            r.solutions = (0..n_sln)
+                .map(|i| SolutionFile {
+                    path: std::path::PathBuf::from(format!("/tmp/r{n_sln}/{i}.sln")),
+                    relative: format!("{i}.sln"),
+                })
+                .collect();
+            r
+        };
+        assert!(!has_visible_solution_dropdown(&[mk(1), mk(0)]));
+        assert!(has_visible_solution_dropdown(&[mk(1), mk(2)]));
+        assert!(!has_visible_solution_dropdown(&[]));
+    }
+
+    #[test]
+    fn sorted_visible_clones_only_top_n_mru_first() {
+        use crate::config::AppConfig;
+        use std::path::PathBuf;
+        let mut cfg = AppConfig::default();
+        let mk = |name: &str| {
+            crate::git::RepoInfo::new(
+                PathBuf::from(format!("/tmp/{name}")),
+                "main".into(),
+                false,
+                false,
+            )
+        };
+        let repos = vec![mk("a"), mk("b"), mk("c")];
+        // b als zuletzt benutzt markieren -> muss zuerst kommen
+        let key_b = AppConfig::repo_state_key(&PathBuf::from("/tmp/b"));
+        cfg.repo_usage.entry(key_b).or_default().last_opened = Some(9999);
+        let vis = sorted_visible_repos(&repos, &cfg, 2);
+        assert_eq!(vis.len(), 2);
+        assert_eq!(vis[0].path, PathBuf::from("/tmp/b"));
+        // Nur Top-N geklont, nicht alles
+        let vis_all = sorted_visible_repos(&repos, &cfg, 10);
+        assert_eq!(vis_all.len(), 3);
+    }
+
+    #[test]
+    fn branch_and_solution_keep_popup_open() {
+        // Gewünscht: Branch-/Solution-Wechsel und Refresh schließen NICHT,
+        // alles andere (Close, Main/Settings/Quit, externe Launches) schon.
+        let mut a = TrayPopupActions::default();
+        assert!(!should_close_tray_popup(&a));
+
+        a.branch_switch = Some((std::path::PathBuf::from("/tmp/r"), "main".into()));
+        assert!(!should_close_tray_popup(&a));
+
+        let mut a = TrayPopupActions::default();
+        a.solution_select = Some((
+            std::path::PathBuf::from("/tmp/r"),
+            std::path::PathBuf::from("/tmp/r/a.sln"),
+        ));
+        assert!(!should_close_tray_popup(&a));
+
+        let mut a = TrayPopupActions::default();
+        a.refresh = true;
+        assert!(!should_close_tray_popup(&a));
+
+        let mut a = TrayPopupActions::default();
+        a.close_popup = true;
+        assert!(should_close_tray_popup(&a));
+
+        let mut a = TrayPopupActions::default();
+        a.open_main = true;
+        assert!(should_close_tray_popup(&a));
+
+        let mut a = TrayPopupActions::default();
+        a.ide_open = Some((
+            std::path::PathBuf::from("/tmp/r"),
+            "vscode".into(),
+            std::path::PathBuf::from("/tmp/r/a.sln"),
+        ));
+        assert!(should_close_tray_popup(&a));
+    }
+
+    #[test]
+    fn truncate_label_keeps_short_and_cuts_long_char_safe() {
+        assert_eq!(truncate_label("main", 40), "main");
+        let s40: String = std::iter::repeat('x').take(40).collect();
+        assert_eq!(truncate_label(&s40, 40), s40);
+        // Lang: max Zeichen inkl. Ellipse, Anfang bleibt erhalten
+        let long = "feature/sehr-langer-branch-name-der-das-popup-sprengen-wuerde";
+        let cut = truncate_label(long, 40);
+        assert_eq!(cut.chars().count(), 40);
+        assert!(cut.ends_with('…'));
+        assert!(long.starts_with(&cut[..cut.len() - '…'.len_utf8()]));
+        // Unicode/Emoji: kein Panic, keine zerschnittenen Zeichen
+        let uni = "feature/äöü-🚀-sehr-langer-name-mit-umlauten-und-emoji";
+        let cut_uni = truncate_label(uni, 20);
+        assert_eq!(cut_uni.chars().count(), 20);
+        assert!(cut_uni.ends_with('…'));
+        assert_eq!(truncate_label("", 40), "");
+        assert_eq!(truncate_label("main", 0), "");
     }
 }

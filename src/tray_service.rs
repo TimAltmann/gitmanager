@@ -37,6 +37,12 @@ mod imp {
         pub popup_open: bool,
         pub popup_rect: Option<Rect>,
         pub popup_opened_at: Option<Instant>,
+        /// pixels_per_point of the ROOT (main) viewport, synced from main thread.
+        /// Service viewport lives off-screen and may report a different DPI,
+        /// so tray-rect conversion must not use the service ppp (M3).
+        pub root_ppp: f32,
+        /// Last toggle time for double-click debounce (N3).
+        pub last_toggle_at: Option<Instant>,
         // Channel to send actions to main app
         pub action_tx: mpsc::Sender<TrayAction>,
     }
@@ -49,6 +55,8 @@ mod imp {
                 popup_open: false,
                 popup_rect: None,
                 popup_opened_at: None,
+                root_ppp: 1.0,
+                last_toggle_at: None,
                 action_tx,
             }
         }
@@ -58,16 +66,31 @@ mod imp {
             self.repos = Arc::new(repos);
             self.config = Arc::new(config);
         }
+
+        pub fn set_root_ppp(&mut self, ppp: f32) {
+            if ppp.is_finite() && ppp > 0.0 {
+                self.root_ppp = ppp;
+            }
+        }
+    }
+
+    /// Poison-tolerant lock helper: recovers inner guard instead of staling forever.
+    fn lock_shared(shared: &Arc<Mutex<TrayShared>>) -> std::sync::MutexGuard<'_, TrayShared> {
+        shared.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The deferred viewport callback - runs on tray service viewport's independent event loop
     /// This viewport is hidden (1x1 off-screen) but visible to OS, so it stays responsive
     pub fn tray_service_callback(
         ui: &mut egui::Ui,
-        _class: ViewportClass,
+        class: ViewportClass,
         shared: Arc<Mutex<TrayShared>>,
         tray_rx: Arc<Mutex<mpsc::Receiver<tray_icon::TrayIconEvent>>>,
     ) {
+        // Service-Viewport läuft immer deferred; embedded wäre ein Fehlzustand.
+        if class == ViewportClass::EmbeddedWindow {
+            return;
+        }
         let ctx = ui.ctx().clone();
 
         // Poll tray events (nur TrayIconEvent für Custom-Popup, kein natives Menü)
@@ -75,7 +98,7 @@ mod imp {
 
         // Show popup if needed - as immediate child of tray service viewport
         let should_show = {
-            let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = lock_shared(&shared);
             guard.popup_open
         };
 
@@ -87,7 +110,7 @@ mod imp {
         // Request repaint only if popup open or we want to poll quickly
         // For efficiency, use 500ms interval when idle (handler wakes immediately on event), immediate when popup open
         let is_popup_open = {
-            let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = lock_shared(&shared);
             guard.popup_open
         };
         if is_popup_open {
@@ -100,9 +123,18 @@ mod imp {
     }
 
     fn toggle_popup(shared: &Arc<Mutex<TrayShared>>, ctx: &Context, rect: tray_icon::Rect) {
-        let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
-        let ppp = ctx.pixels_per_point();
-        let ppp = if ppp == 0.0 { 1.0 } else { ppp };
+        let mut guard = lock_shared(shared);
+        // M3: ROOT-ppp bevorzugen (vom Main-Thread synchronisiert), Service-Viewport
+        // liegt off-screen und kann auf PerMonitorV2 eine andere DPI melden.
+        let mut ppp = guard.root_ppp;
+        if !ppp.is_finite() || ppp <= 0.0 {
+            ppp = ctx.pixels_per_point();
+        }
+        let ppp = if ppp == 0.0 || !ppp.is_finite() {
+            1.0
+        } else {
+            ppp
+        };
         let tray_rect = Rect::from_min_size(
             egui::pos2(rect.position.x as f32 / ppp, rect.position.y as f32 / ppp),
             egui::vec2(rect.size.width as f32 / ppp, rect.size.height as f32 / ppp),
@@ -130,7 +162,7 @@ mod imp {
         use tray_icon::MouseButtonState;
         use tray_icon::TrayIconEvent;
 
-        // Drain tray events
+        // Drain tray events (poison-tolerant)
         let events: Vec<TrayIconEvent> = {
             let guard = tray_rx.lock().unwrap_or_else(|e| e.into_inner());
             let mut v = Vec::new();
@@ -140,6 +172,26 @@ mod imp {
             v
         };
 
+        // N3: Windows liefert bei Doppelklick typischerweise erst Click-Up, dann
+        // DoubleClick im selben Drain. Ohne Entprellung würde Up das Popup öffnen
+        // und DoubleClick es sofort wieder schließen + Main zeigen (Flackern).
+        // Wenn ein Left-DoubleClick im Batch ist, Left/Right-Up-Toggles überspringen.
+        let has_left_double = events.iter().any(|e| {
+            matches!(
+                e,
+                TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                }
+            )
+        });
+        // Zusätzlich 300ms-Debounce gegen schnelle Doppel-Toggles.
+        let now = Instant::now();
+        let recently_toggled = lock_shared(shared)
+            .last_toggle_at
+            .map(|t| now.duration_since(t) < std::time::Duration::from_millis(300))
+            .unwrap_or(false);
+
         for event in events {
             match event {
                 TrayIconEvent::Click {
@@ -148,7 +200,11 @@ mod imp {
                     rect,
                     ..
                 } => {
+                    if has_left_double || recently_toggled {
+                        continue;
+                    }
                     toggle_popup(shared, ctx, rect);
+                    lock_shared(shared).last_toggle_at = Some(Instant::now());
                 }
                 TrayIconEvent::Click {
                     button: MouseButton::Right,
@@ -156,8 +212,12 @@ mod imp {
                     rect,
                     ..
                 } => {
+                    if recently_toggled {
+                        continue;
+                    }
                     // Rechtsklick togglet ebenfalls das Custom-Popup (kein natives Menü).
                     toggle_popup(shared, ctx, rect);
+                    lock_shared(shared).last_toggle_at = Some(Instant::now());
                 }
                 TrayIconEvent::Click {
                     button: MouseButton::Right,
@@ -186,9 +246,9 @@ mod imp {
     }
 
     fn show_tray_popup_viewport(shared: &Arc<Mutex<TrayShared>>, ctx: &Context) {
-        // Clone needed data
+        // Clone needed data (Arc clones are cheap; deep-clone only visible Top-N below)
         let (tray_rect, popup_opened_at) = {
-            let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = lock_shared(shared);
             let rect = guard.popup_rect.unwrap_or_else(|| {
                 let screen = ctx.input(|i| {
                     i.viewport()
@@ -204,21 +264,18 @@ mod imp {
         };
 
         let (repos_arc, config_arc) = {
-            let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = lock_shared(shared);
             (guard.repos.clone(), guard.config.clone())
         };
 
-        // Popup size - add extra height if any *sichtbare* repo has solution dropdown
-        // (nur truncate-Menge prüfen, sonst Höhe bei vielen Repos überschätzt)
-        let popup_width: f32 = 360.0;
+        // M1+N1: erst MRU-sortieren + truncaten (nur sichtbare Top-N klonen),
+        // dann Höhe aus den tatsächlich sichtbaren Repos berechnen.
         let tray_limit = config_arc.tray_icons.max_display.clamp(5, 50);
-        let visible_repos = repos_arc.len().min(tray_limit);
-        let has_solution_dropdown = repos_arc
-            .iter()
-            .take(tray_limit)
-            .any(|r| r.solutions.len() > 1);
-        let row_height: f32 = if has_solution_dropdown { 94.0 } else { 66.0 };
-        let popup_height: f32 = (visible_repos as f32 * row_height + 90.0).clamp(280.0, 560.0);
+        let repos_visible = tray_popup::sorted_visible_repos(&repos_arc, &config_arc, tray_limit);
+        let has_solution_dropdown = tray_popup::has_visible_solution_dropdown(&repos_visible);
+        let popup_width: f32 = 360.0;
+        let popup_height: f32 =
+            tray_popup::popup_height(repos_visible.len(), has_solution_dropdown);
         let popup_size = Vec2::new(popup_width, popup_height);
 
         // Position calculation (Heuristik F-14: nimmt horizontale, gleich große
@@ -266,36 +323,6 @@ mod imp {
             .with_minimize_button(false)
             .with_maximize_button(false);
 
-        // MRU sort and truncate
-        let mut repos_clone = (*repos_arc).clone();
-        repos_clone.sort_by(|a, b| {
-            let usage_a = config_arc
-                .repo_usage
-                .get(&crate::config::AppConfig::repo_state_key(&a.path));
-            let usage_b = config_arc
-                .repo_usage
-                .get(&crate::config::AppConfig::repo_state_key(&b.path));
-            let time_a = usage_a
-                .map(|u| {
-                    u.last_opened
-                        .unwrap_or(0)
-                        .max(u.last_branch_switch.unwrap_or(0))
-                        .max(u.last_config_change.unwrap_or(0))
-                })
-                .unwrap_or(0);
-            let time_b = usage_b
-                .map(|u| {
-                    u.last_opened
-                        .unwrap_or(0)
-                        .max(u.last_branch_switch.unwrap_or(0))
-                        .max(u.last_config_change.unwrap_or(0))
-                })
-                .unwrap_or(0);
-            time_b.cmp(&time_a)
-        });
-        repos_clone.truncate(tray_limit);
-        let config_clone = (*config_arc).clone();
-
         let viewport_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
                 if class == ViewportClass::EmbeddedWindow {
@@ -307,7 +334,7 @@ mod imp {
                     });
                     return;
                 }
-                crate::ui::theme::apply_theme(ctx, &config_clone.theme);
+                crate::ui::theme::apply_theme(ctx, &config_arc.theme);
                 // install_image_loaders gehört einmalig in MyApp::new (F-19), nicht pro Frame
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_popup = true;
@@ -315,8 +342,8 @@ mod imp {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     tray_popup::show_tray_popup_ui(
                         ui,
-                        &mut repos_clone,
-                        &config_clone,
+                        &repos_visible,
+                        &config_arc,
                         &mut tray_actions,
                     );
                 });
@@ -329,16 +356,9 @@ mod imp {
                 if tray_actions.quit {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                if tray_actions.open_main || tray_actions.open_settings || tray_actions.quit {
-                    close_popup = true;
-                }
-                if tray_actions.branch_switch.is_some()
-                    || tray_actions.solution_select.is_some()
-                    || tray_actions.ide_open.is_some()
-                    || tray_actions.agent_open.is_some()
-                    || tray_actions.explorer_open.is_some()
-                    || tray_actions.shell_open.is_some()
-                {
+                // Branch-/Solution-Wechsel und Refresh halten das Popup offen
+                // (siehe should_close_tray_popup); Rest schließt.
+                if tray_popup::should_close_tray_popup(&tray_actions) {
                     close_popup = true;
                 }
                 if popup_opened_at
@@ -357,7 +377,7 @@ mod imp {
 
         if viewport_result.is_err() {
             eprintln!("Tray popup viewport panicked, closing popup");
-            let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = lock_shared(shared);
             guard.popup_open = false;
             guard.popup_rect = None;
             guard.popup_opened_at = None;
@@ -366,7 +386,7 @@ mod imp {
 
         // Handle close
         if close_popup {
-            let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = lock_shared(shared);
             guard.popup_open = false;
             guard.popup_rect = None;
             guard.popup_opened_at = None;
@@ -384,7 +404,7 @@ mod imp {
             || tray_actions.explorer_open.is_some()
             || tray_actions.shell_open.is_some();
         {
-            let guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = lock_shared(shared);
             if tray_actions.refresh {
                 let _ = guard.action_tx.send(TrayAction::Refresh);
             }
@@ -433,12 +453,13 @@ mod imp {
     ) {
         let viewport_id = ViewportId::from_hash_of("tray_service");
         // Hidden service viewport: 1x1 off-screen, but visible to OS so not throttled
-        // Use with_visible(true) + off-screen pos to keep event loop running
-        // But with_taskbar(false) so no taskbar entry
+        // Use with_visible(true) + far off-screen pos to keep event loop running.
+        // -30000 statt -10000: auch bei negativem Multi-Monitor-Layout (Monitor links
+        // vom Primary) praktisch nie sichtbar. with_taskbar(false): kein Taskleisten-Eintrag.
         let builder = ViewportBuilder::default()
             .with_title("GitManager Tray Service")
             .with_inner_size(Vec2::new(1.0, 1.0))
-            .with_position(egui::pos2(-10000.0, -10000.0))
+            .with_position(egui::pos2(-30000.0, -30000.0))
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(false)

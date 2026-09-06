@@ -45,13 +45,14 @@ pub struct MyApp {
     launch_err_tx: Sender<String>,
     launch_err_rx: Receiver<String>,
     config_update_rx: Receiver<Result<AppConfig, String>>,
-    update_rx: Receiver<Option<crate::updater::UpdateInfo>>,
+    update_rx: Receiver<Result<Option<crate::updater::UpdateInfo>, String>>,
     update_info: Option<crate::updater::UpdateInfo>,
+    update_error: Option<String>,
     show_update_dialog: bool,
     status_message: Option<String>,
     status_message_time: Option<std::time::Instant>,
     branch_dialog: Option<BranchDialog>,
-    pending_branch_switch: Option<(PathBuf, String)>,
+    pending_branch_switches: Vec<(PathBuf, String)>,
     // Window resizing state
     last_window_size: [f32; 2],
     // Panel collapse state
@@ -83,7 +84,8 @@ impl MyApp {
         let (tx, rx) = mpsc::channel();
         let (launch_err_tx, launch_err_rx) = mpsc::channel();
         let (config_update_tx, config_update_rx) = mpsc::channel::<Result<AppConfig, String>>();
-        let (update_tx, update_rx) = mpsc::channel::<Option<crate::updater::UpdateInfo>>();
+        let (update_tx, update_rx) =
+            mpsc::channel::<Result<Option<crate::updater::UpdateInfo>, String>>();
 
         let mut app = Self {
             config,
@@ -99,11 +101,12 @@ impl MyApp {
             config_update_rx,
             update_rx,
             update_info: None,
+            update_error: None,
             show_update_dialog: false,
             status_message: None,
             status_message_time: None,
             branch_dialog: None,
-            pending_branch_switch: None,
+            pending_branch_switches: Vec::new(),
             last_window_size: [0.0; 2],
             top_bar_collapsed: false,
             #[cfg(target_os = "windows")]
@@ -194,17 +197,16 @@ impl MyApp {
             let enabled = app.config.check_for_updates;
             std::thread::spawn(move || {
                 if !enabled {
-                    let _ = update_tx.send(None);
+                    let _ = update_tx.send(Ok(None));
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_secs(2));
-                let update = crate::updater::check_for_update(&current_version);
-                if update.is_none() {
-                    // Still-fail bewusst: kein Retry/Popup, nur Thread-Ende
-                    // (Proxy/MITM mit webpki-roots schlägt hier still fehl)
-                    eprintln!("Update-Check: keine Info (offline/404/deaktiviert?)");
+                // Diagnosefähig (M2): Fehler mit Kontext weiterreichen statt still zu schlucken.
+                let outcome = crate::updater::check_for_update_result(&current_version);
+                if let Err(ref e) = outcome {
+                    eprintln!("Update-Check fehlgeschlagen: {e} (offline/Proxy/TLS?)");
                 }
-                let _ = update_tx.send(update);
+                let _ = update_tx.send(outcome);
             });
         }
         app.start_scan();
@@ -268,11 +270,23 @@ impl MyApp {
                 }
             }
         }
-        while let Ok(update) = self.update_rx.try_recv() {
-            if let Some(info) = update {
-                self.update_info = Some(info);
-                self.show_update_dialog = true;
-                ctx.request_repaint();
+        while let Ok(outcome) = self.update_rx.try_recv() {
+            match outcome {
+                Ok(Some(info)) => {
+                    self.update_info = Some(info);
+                    self.update_error = None;
+                    self.show_update_dialog = true;
+                    ctx.request_repaint();
+                }
+                Ok(None) => {
+                    self.update_error = None;
+                }
+                Err(e) => {
+                    // In Release ohne Konsole unsichtbar -> für Support persistieren,
+                    // Anzeige in Settings (M2), kein Popup-Spam.
+                    self.update_error = Some(e);
+                    ctx.request_repaint();
+                }
             }
         }
         if self.scanning {
@@ -286,28 +300,64 @@ impl MyApp {
                 ctx.request_repaint_after(std::time::Duration::from_millis(500));
             }
         }
-        // Pending branch switch nach Scan? Eigentlich direkt
-        // F-05: Bei Tray-BranchSwitch mit hidden Window zuerst Hauptfenster einblenden,
-        // sonst wäre der Dirty-Dialog in ui() unsichtbar.
-        if let Some((path, branch)) = self.pending_branch_switch.take() {
-            if !self.window_visible {
+        // Tray-Switches laufen headless: Main öffnet sich nie von selbst
+        // (Dialog/Fehler bei Dirty/Konflikten warten in main, Popup bleibt offen).
+        for (path, branch) in std::mem::take(&mut self.pending_branch_switches) {
+            if tray_branch_switch_opens_main_window() {
                 self.show_main_window(ctx);
             }
             self.handle_branch_switch(path, branch);
         }
     }
+}
 
+/// Produktentscheidung: Tray-Branch-Switches öffnen das Hauptfenster nie von selbst.
+/// Saubere Switches laufen headless im Tray (Popup bleibt offen); bei Dirty landet
+/// der Entscheidungs-Dialog in `branch_dialog`, Konflikte/Fehler in `error` —
+/// beides wird sichtbar, sobald das Hauptfenster manuell geöffnet wird.
+pub fn tray_branch_switch_opens_main_window() -> bool {
+    false
+}
+
+/// Pure helper for minimize-to-tray decision (H1).
+/// `tray_available` must be true only when a tray icon + service actually exist,
+/// otherwise minimizing would hide the window with no way back.
+pub fn should_minimize_to_tray(
+    minimize_cfg: bool,
+    should_quit: bool,
+    tray_available: bool,
+) -> bool {
+    minimize_cfg && !should_quit && tray_available
+}
+
+#[cfg(target_os = "windows")]
+fn clear_tray_popup(shared: &std::sync::Arc<std::sync::Mutex<crate::tray_service::TrayShared>>) {
+    // Poison-tolerant try_lock: WouldBlock -> skip this frame (retry next),
+    // Poisoned -> recover inner guard so tray does not stay stale forever.
+    match shared.try_lock() {
+        Ok(mut guard) => {
+            guard.popup_open = false;
+            guard.popup_rect = None;
+            guard.popup_opened_at = None;
+        }
+        Err(std::sync::TryLockError::Poisoned(e)) => {
+            let mut guard = e.into_inner();
+            guard.popup_open = false;
+            guard.popup_rect = None;
+            guard.popup_opened_at = None;
+        }
+        Err(std::sync::TryLockError::WouldBlock) => {}
+    }
+}
+
+impl MyApp {
     fn show_main_window(&mut self, ctx: &egui::Context) {
         self.window_visible = true;
         self.should_quit = false;
         // Also clear popup in dedicated tray service (efficient: shared state)
         #[cfg(target_os = "windows")]
         if let Some(shared) = &self.tray_shared {
-            if let Ok(mut guard) = shared.try_lock() {
-                guard.popup_open = false;
-                guard.popup_rect = None;
-                guard.popup_opened_at = None;
-            }
+            clear_tray_popup(shared);
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -317,11 +367,17 @@ impl MyApp {
 
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) {
-            // Only minimize to tray on Windows where tray is available
+            // Only minimize to tray when a tray icon actually exists (H1).
+            // Without tray, hiding would lose the window with no way back.
             #[cfg(target_os = "windows")]
-            let should_minimize = self.config.minimize_to_tray && !self.should_quit;
+            let tray_available = self.tray_icon.is_some() && self.tray_shared.is_some();
             #[cfg(not(target_os = "windows"))]
-            let should_minimize = false;
+            let tray_available = false;
+            let should_minimize = should_minimize_to_tray(
+                self.config.minimize_to_tray,
+                self.should_quit,
+                tray_available,
+            );
             if should_minimize {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 // Hide instead of closing - tray service keeps popup alive
@@ -329,11 +385,7 @@ impl MyApp {
                 self.window_visible = false;
                 #[cfg(target_os = "windows")]
                 if let Some(shared) = &self.tray_shared {
-                    if let Ok(mut guard) = shared.try_lock() {
-                        guard.popup_open = false;
-                        guard.popup_rect = None;
-                        guard.popup_opened_at = None;
-                    }
+                    clear_tray_popup(shared);
                 }
             }
         }
@@ -341,9 +393,14 @@ impl MyApp {
 
     #[cfg(target_os = "windows")]
     fn sync_tray_service(&mut self) {
-        // Efficient: immediate sync using Arc to avoid clones on read (only clones Vec once)
+        // Poison-tolerant: recover from poisoned mutex instead of staling forever.
         if let Some(shared) = &self.tray_shared {
-            if let Ok(mut guard) = shared.try_lock() {
+            let locked = match shared.try_lock() {
+                Ok(g) => Some(g),
+                Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            };
+            if let Some(mut guard) = locked {
                 guard.update_data(self.repos.clone(), self.config.clone());
                 self.last_tray_sync = Some(std::time::Instant::now());
             }
@@ -388,7 +445,8 @@ impl MyApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 crate::tray_service::TrayAction::BranchSwitch(path, branch) => {
-                    self.pending_branch_switch = Some((path, branch));
+                    // Queue instead of overwriting (N2): no action lost on rapid clicks.
+                    self.pending_branch_switches.push((path, branch));
                 }
                 crate::tray_service::TrayAction::SolutionSelect(repo_path, sln_path) => {
                     let state = self.config.get_repo_state_mut(&repo_path);
@@ -522,10 +580,21 @@ impl MyApp {
 
     #[cfg(target_os = "windows")]
     fn show_tray_service_viewport(&mut self, ctx: &egui::Context) {
-        // Efficient: create dedicated tray service viewport - runs independently even when main hidden
+        // Efficient: create dedicated tray service viewport - runs independently even when main hidden.
+        // M3: ROOT-ppp hier (Main-Thread) abgreifen und in shared spiegeln, damit
+        // toggle_popup die Tray-Rect-Umrechnung mit der DPI des Tray-Monitors macht
+        // statt mit der des off-screen Service-Viewports.
         if let (Some(shared), Some(tray_rx)) =
             (self.tray_shared.clone(), self.tray_service_tray_rx.clone())
         {
+            let ppp = ctx.pixels_per_point();
+            if ppp.is_finite() && ppp > 0.0 {
+                match shared.try_lock() {
+                    Ok(mut g) => g.set_root_ppp(ppp),
+                    Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().set_root_ppp(ppp),
+                    Err(std::sync::TryLockError::WouldBlock) => {}
+                }
+            }
             crate::tray_service::create_tray_service_viewport(ctx, shared, tray_rx);
         }
     }
@@ -1229,8 +1298,8 @@ impl eframe::App for MyApp {
 
                 // Handle Actions
                 if let Some((repo_path, branch)) = actions.branch_switch {
-                    // Verzögert handeln, damit UI nicht blockiert
-                    self.pending_branch_switch = Some((repo_path, branch));
+                    // Verzögert handeln, damit UI nicht blockiert (Queue, kein Overwrite)
+                    self.pending_branch_switches.push((repo_path, branch));
                     ctx.request_repaint();
                 }
                 if let Some((repo_path, selector_id, new_value)) = actions.custom_select {
@@ -1461,7 +1530,13 @@ impl eframe::App for MyApp {
             if let Some(mut state) = self.settings_state.take() {
                 let mut save: Option<AppConfig> = None;
                 let mut open = self.show_settings;
-                crate::ui::settings::show_settings_window(&ctx, &mut state, &mut open, &mut save);
+                crate::ui::settings::show_settings_window(
+                    &ctx,
+                    &mut state,
+                    &mut open,
+                    &mut save,
+                    self.update_error.as_deref(),
+                );
                 self.show_settings = open;
 
                 if let Some(new_cfg) = save {
@@ -1686,15 +1761,26 @@ mod tests {
 
     #[test]
     fn myapp_pending_branch_switch_handling() {
-        let mut pending: Option<(PathBuf, String)> =
-            Some((PathBuf::from("/tmp/repo"), "main".to_string()));
-        // poll_scan would take pending and call handle_branch_switch
-        let taken = pending.take();
-        assert!(taken.is_some());
-        assert!(pending.is_none());
-        let (path, branch) = taken.unwrap();
-        assert_eq!(path, PathBuf::from("/tmp/repo"));
-        assert_eq!(branch, "main");
+        // Queue statt Option (N2): keine Action geht bei schnellen Klicks verloren.
+        let mut pending: Vec<(PathBuf, String)> = Vec::new();
+        pending.push((PathBuf::from("/tmp/repo"), "a".to_string()));
+        pending.push((PathBuf::from("/tmp/repo"), "b".to_string()));
+        assert_eq!(pending.len(), 2);
+        let drained = std::mem::take(&mut pending);
+        assert!(pending.is_empty());
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].1, "a");
+        assert_eq!(drained[1].1, "b");
+    }
+
+    #[test]
+    fn should_minimize_requires_tray_available() {
+        // H1: ohne Tray-Icon darf nicht minimiert werden (Fenster ginge verloren).
+        assert!(should_minimize_to_tray(true, false, true));
+        assert!(!should_minimize_to_tray(true, false, false));
+        assert!(!should_minimize_to_tray(true, true, true));
+        assert!(!should_minimize_to_tray(false, false, true));
+        assert!(!should_minimize_to_tray(false, false, false));
     }
 
     #[test]
@@ -1719,5 +1805,12 @@ mod tests {
         crate::config_parser::write_xml_value(dir.path(), &sel, "prod").unwrap();
         let out = std::fs::read_to_string(dir.path().join("App.config")).unwrap();
         assert!(out.contains(r#"value="prod""#));
+    }
+
+    #[test]
+    fn tray_branch_switch_never_forces_main_window() {
+        // Produktentscheidung: Tray-Switches laufen headless, auch bei Dirty
+        // (Dialog/Fehler warten in main). Popup bleibt offen, Main bleibt zu.
+        assert!(!tray_branch_switch_opens_main_window());
     }
 }

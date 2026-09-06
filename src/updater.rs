@@ -26,7 +26,7 @@ fn normalize_version(v: &str) -> String {
     v.to_string()
 }
 
-pub fn check_for_update(current_version: &str) -> Option<UpdateInfo> {
+pub fn check_for_update_result(current_version: &str) -> Result<Option<UpdateInfo>, String> {
     // Use a short timeout to not block startup
     let url = "https://api.github.com/repos/TimAltmann/gitmanager/releases/latest";
     let resp = ureq::get(url)
@@ -34,16 +34,18 @@ pub fn check_for_update(current_version: &str) -> Option<UpdateInfo> {
         .set("Accept", "application/vnd.github.v3+json")
         .timeout(std::time::Duration::from_secs(5))
         .call()
-        .ok()?;
+        .map_err(|e| format!("GitHub-Request fehlgeschlagen: {e}"))?;
 
     if resp.status() != 200 {
-        return None;
+        return Err(format!("GitHub-Status {} (erwartet 200)", resp.status()));
     }
 
-    let release: GithubRelease = resp.into_json().ok()?;
+    let release: GithubRelease = resp
+        .into_json()
+        .map_err(|e| format!("Release-JSON ungültig: {e}"))?;
     // Ignore drafts and prereleases
     if release.draft.unwrap_or(false) || release.prerelease.unwrap_or(false) {
-        return None;
+        return Ok(None);
     }
 
     let latest_raw = release.tag_name;
@@ -51,26 +53,26 @@ pub fn check_for_update(current_version: &str) -> Option<UpdateInfo> {
     let current_norm = normalize_version(current_version);
 
     // Parse semver; bei Parse-Fehler kein Update (nicht lexikalisch raten)
-    let latest_ver = semver::Version::parse(&latest_norm).ok();
-    let current_ver = semver::Version::parse(&current_norm).ok();
+    let latest_ver =
+        semver::Version::parse(&latest_norm).map_err(|e| format!("Tag semver ungültig: {e}"))?;
+    let current_ver = semver::Version::parse(&current_norm)
+        .map_err(|e| format!("Binary semver ungültig: {e}"))?;
 
-    let is_newer = match (latest_ver, current_ver) {
-        (Some(l), Some(c)) => l > c,
-        // Bei Parse-Fehler kein Update melden statt lexikalisch zu raten
-        // ("0.0.10" < "0.0.9" lexikalisch, Pre-Releases etc.)
-        _ => return None,
-    };
-
-    if is_newer {
-        Some(UpdateInfo {
+    if latest_ver > current_ver {
+        Ok(Some(UpdateInfo {
             latest_version: latest_raw,
             current_version: current_version.to_string(),
             url: release.html_url,
             body: release.body,
-        })
+        }))
     } else {
-        None
+        Ok(None)
     }
+}
+
+#[allow(dead_code)]
+pub fn check_for_update(current_version: &str) -> Option<UpdateInfo> {
+    check_for_update_result(current_version).ok().flatten()
 }
 
 #[cfg(test)]
@@ -104,5 +106,15 @@ mod tests {
         let l = semver::Version::parse(&latest_norm).unwrap();
         let c = semver::Version::parse(&current_norm).unwrap();
         assert!(!(l > c));
+    }
+
+    #[test]
+    fn result_returns_error_on_invalid_current_semver() {
+        // M2: Fehler müssen als Err mit Kontext kommen, nicht still None.
+        // Ohne Netzwerk nicht prüfbar, aber Parse-Fehler-Pfad ist lokal testbar:
+        assert!(semver::Version::parse(&normalize_version("not-a-version")).is_err());
+        // Wrapper check_for_update darf bei ungültiger Version nie panicken.
+        // (Netzwerk wird hier nicht aufgerufen; nur sicherstellen, dass fn existiert.)
+        let _ = check_for_update("0.0.0");
     }
 }

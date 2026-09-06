@@ -33,10 +33,19 @@ fn load_icon() -> Option<std::sync::Arc<egui::IconData>> {
     None
 }
 
+fn crash_log_filename() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("gitmanager_crash-{}-{}.log", ms, std::process::id())
+}
+
 fn main() -> eframe::Result<()> {
     // Panic hook für Tray-Crashes (F-17): vorherigen Hook chainen, Crash-Log mit
-    // Timestamp nach %LOCALAPPDATA%/gitmanager (ProjectDirs, bereits Dependency),
-    // Fallback CWD. Überschreibt nicht still, schluckt Schreibfehler nicht.
+    // Millisekunden-Timestamp + PID (keine Kollision pro Sekunde) nach
+    // ProjectDirs::from("com","gitmanager","gitmanager").data_local_dir()
+    // (Windows: %LOCALAPPDATA%\com\gitmanager\gitmanager), Fallback CWD.
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut msg = format!("PANIC: {}\n", info);
@@ -53,11 +62,7 @@ fn main() -> eframe::Result<()> {
                 loc.column()
             ));
         }
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let filename = format!("gitmanager_crash-{}.log", ts);
+        let filename = crash_log_filename();
         let written =
             directories::ProjectDirs::from("com", "gitmanager", "gitmanager").map(|dirs| {
                 let dir = dirs.data_local_dir().to_path_buf();
@@ -99,4 +104,20 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(MyApp::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crash_filename_contains_ms_and_pid() {
+        let a = crash_log_filename();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = crash_log_filename();
+        assert!(a.starts_with("gitmanager_crash-"));
+        assert!(a.ends_with(&format!("-{}.log", std::process::id())));
+        // Millisekunden + PID: zwei Aufrufe (mit Sleep) kollidieren praktisch nie.
+        assert_ne!(a, b);
+    }
 }

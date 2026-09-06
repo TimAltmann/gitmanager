@@ -135,6 +135,7 @@ pub fn show_settings_window(
     state: &mut SettingsState,
     open: &mut bool,
     on_save: &mut Option<AppConfig>,
+    update_error: Option<&str>,
 ) {
     let mut should_close = false;
 
@@ -172,7 +173,7 @@ pub fn show_settings_window(
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 match state.selected_tab {
-                    SettingsTab::General => show_general_tab(ui, state),
+                    SettingsTab::General => show_general_tab(ui, state, update_error),
                     SettingsTab::Profiles => show_profiles_tab(ui, state),
                     SettingsTab::Agents => show_agents_tab(ui, state),
                     SettingsTab::Terminal => show_terminal_tab(ui, state),
@@ -420,7 +421,7 @@ pub fn show_settings_window(
     }
 }
 
-fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
+fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: Option<&str>) {
     ui.label(
         RichText::new(
             "Wähle die Ordner, die nach Git-Repositories durchsucht werden sollen. Es werden alle direkten Unterordner bis zur eingestellten Tiefe geprüft.",
@@ -633,6 +634,40 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             .size(11.0)
             .color(Color32::from_rgb(120, 120, 120)),
     );
+
+    // Update-Check (allgemeine Einstellung, kein Tray-Thema)
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    {
+        let lang = state.draft.language;
+        let mut check_updates = state.draft.check_for_updates;
+        if ui
+            .checkbox(&mut check_updates, tr(lang, "tray_update_label"))
+            .changed()
+        {
+            state.draft.check_for_updates = check_updates;
+        }
+        ui.label(
+            RichText::new(if check_updates {
+                tr(lang, "tray_update_hint_on")
+            } else {
+                tr(lang, "tray_update_hint_off")
+            })
+            .size(10.0)
+            .color(Color32::from_rgb(120, 120, 120))
+            .italics(),
+        );
+        if let Some(err) = update_error {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(crate::i18n::tr_fmt(lang, "tray_update_error", &[err]))
+                    .size(10.0)
+                    .color(Color32::from_rgb(160, 40, 40))
+                    .italics(),
+            );
+        }
+    }
 }
 
 fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
@@ -2790,45 +2825,25 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     // System Tray Verhalten (moved from General)
     ui.separator();
     ui.add_space(8.0);
-    ui.label(RichText::new("System Tray Verhalten").size(12.0).strong());
+    ui.label(
+        RichText::new(tr(lang, "tray_behavior_title"))
+            .size(12.0)
+            .strong(),
+    );
     ui.add_space(4.0);
     {
         let mut minimize = state.draft.minimize_to_tray;
         if ui
-            .checkbox(
-                &mut minimize,
-                "Beim Schließen in Tray minimieren (statt beenden)",
-            )
+            .checkbox(&mut minimize, tr(lang, "tray_minimize_label"))
             .changed()
         {
             state.draft.minimize_to_tray = minimize;
         }
         ui.label(
             RichText::new(if minimize {
-                "✓ Das Fenster wird beim Schließen ausgeblendet und läuft im Tray weiter (Links-/Rechts-Klick: eigenes Menü)."
+                tr(lang, "tray_minimize_hint_on")
             } else {
-                "Das Fenster wird beim Schließen beendet."
-            })
-            .size(10.0)
-            .color(Color32::from_rgb(120, 120, 120))
-            .italics(),
-        );
-        ui.add_space(4.0);
-        let mut check_updates = state.draft.check_for_updates;
-        if ui
-            .checkbox(
-                &mut check_updates,
-                "Beim Start auf Updates prüfen (GitHub Releases)",
-            )
-            .changed()
-        {
-            state.draft.check_for_updates = check_updates;
-        }
-        ui.label(
-            RichText::new(if check_updates {
-                "✓ Beim Start wird einmalig api.github.com abgefragt (5 s Timeout). Deaktivieren für Offline-/Firmennetze. Änderung wirkt ab Neustart."
-            } else {
-                "Update-Check deaktiviert — keine Netzwerkabfrage beim Start. Änderung wirkt ab Neustart."
+                tr(lang, "tray_minimize_hint_off")
             })
             .size(10.0)
             .color(Color32::from_rgb(120, 120, 120))
@@ -2836,18 +2851,20 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         );
     }
     ui.add_space(8.0);
-    ui.label(RichText::new("Tray Branch-Limit").size(12.0).strong());
+    ui.label(
+        RichText::new(tr(lang, "tray_branch_limit_title"))
+            .size(12.0)
+            .strong(),
+    );
     ui.add_space(4.0);
     ui.label(
-        RichText::new(
-            "Wie viele Branches maximal im Tray-Popup Dropdown angezeigt werden (5–50, Standard 20).",
-        )
-        .size(11.0)
-        .color(Color32::from_rgb(100, 100, 100)),
+        RichText::new(tr(lang, "tray_branch_limit_desc"))
+            .size(11.0)
+            .color(Color32::from_rgb(100, 100, 100)),
     );
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.label("Limit:");
+        ui.label(tr(lang, "tray_limit_label"));
         let mut limit = state.draft.tray_branch_limit;
         if limit < 5 {
             limit = 5;
@@ -2860,7 +2877,7 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         }
     });
     ui.horizontal(|ui| {
-        ui.label("Oder direkt:");
+        ui.label(tr(lang, "tray_direct_label"));
         let mut l = state.draft.tray_branch_limit;
         if ui
             .add(egui::DragValue::new(&mut l).range(5..=50).speed(1.0))

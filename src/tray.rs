@@ -9,8 +9,10 @@ mod imp {
     }
 
     fn load_tray_icon_data() -> Option<(Vec<u8>, u32, u32)> {
-        // Prefer tray-optimized icon: try embedded icon_tray.png, then icon_tray.ico if present, fallback to icon.ico
-        // Also try runtime filesystem fallback for icon_tray.ico/png in case user placed file after compile
+        // Prefer tray-optimized icon: embedded icon_tray.png, then icon.ico.
+        // Filesystem-Versuch nur in Debug (cargo run aus Repo-Root); im installierten
+        // Release-EXE liegt assets/ nicht neben dem Binary (Dead Code + Syscall).
+        #[cfg(debug_assertions)]
         for fs_path in ["assets/icon_tray.png", "assets/icon_tray.ico"] {
             if let Ok(bytes) = std::fs::read(fs_path) {
                 if let Ok(image) = image::load_from_memory(&bytes) {
@@ -53,12 +55,13 @@ mod imp {
         let (tray_tx, tray_rx): (Sender<TrayIconEvent>, Receiver<TrayIconEvent>) =
             std::sync::mpsc::channel();
 
-        // Robust handler: forward payload + wake egui. No native menu - custom popup on left/right click.
+        // Robust handler: forward payload + wake service viewport.
+        // No native menu - custom popup on left/right click.
+        // Nur Service-Viewport wecken (N6): ROOT-Repaint wäre bei hidden Main sinnlos.
         let tray_service_id = egui::ViewportId::from_hash_of("tray_service");
         let ctx_clone = ctx.clone();
         TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {
             let _ = tray_tx.send(ev);
-            ctx_clone.request_repaint();
             ctx_clone.request_repaint_of(tray_service_id);
         }));
 

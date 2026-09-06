@@ -315,6 +315,30 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "tabs_tray_icons") => "Tray Icons".to_string(),
         (Language::En, "tray_icons_title") => "Tray Icons & Popup".to_string(),
         (Language::De, "tray_icons_title") => "Tray Icons & Popup".to_string(),
+        (Language::En, "tray_behavior_title") => "System Tray Behavior".to_string(),
+        (Language::De, "tray_behavior_title") => "System Tray Verhalten".to_string(),
+        (Language::En, "tray_minimize_label") => "Minimize to tray on close (instead of quit)".to_string(),
+        (Language::De, "tray_minimize_label") => "Beim Schließen in Tray minimieren (statt beenden)".to_string(),
+        (Language::En, "tray_minimize_hint_on") => "✓ Window is hidden on close and keeps running in tray (left/right click: custom menu).".to_string(),
+        (Language::De, "tray_minimize_hint_on") => "✓ Das Fenster wird beim Schließen ausgeblendet und läuft im Tray weiter (Links-/Rechts-Klick: eigenes Menü).".to_string(),
+        (Language::En, "tray_minimize_hint_off") => "Window quits on close.".to_string(),
+        (Language::De, "tray_minimize_hint_off") => "Das Fenster wird beim Schließen beendet.".to_string(),
+        (Language::En, "tray_update_label") => "Check for updates on startup (GitHub Releases)".to_string(),
+        (Language::De, "tray_update_label") => "Beim Start auf Updates prüfen (GitHub Releases)".to_string(),
+        (Language::En, "tray_update_hint_on") => "✓ api.github.com is queried once on startup (5 s timeout). Disable for offline/corporate networks. Takes effect after restart.".to_string(),
+        (Language::De, "tray_update_hint_on") => "✓ Beim Start wird einmalig api.github.com abgefragt (5 s Timeout). Deaktivieren für Offline-/Firmennetze. Änderung wirkt ab Neustart.".to_string(),
+        (Language::En, "tray_update_hint_off") => "Update check disabled — no network request on startup. Takes effect after restart.".to_string(),
+        (Language::De, "tray_update_hint_off") => "Update-Check deaktiviert — keine Netzwerkabfrage beim Start. Änderung wirkt ab Neustart.".to_string(),
+        (Language::En, "tray_update_error") => "Last update check failed: {}".to_string(),
+        (Language::De, "tray_update_error") => "Letzter Update-Check fehlgeschlagen: {}".to_string(),
+        (Language::En, "tray_branch_limit_title") => "Tray Branch Limit".to_string(),
+        (Language::De, "tray_branch_limit_title") => "Tray Branch-Limit".to_string(),
+        (Language::En, "tray_branch_limit_desc") => "Max branches shown in tray popup dropdown (5–50, default 20).".to_string(),
+        (Language::De, "tray_branch_limit_desc") => "Wie viele Branches maximal im Tray-Popup Dropdown angezeigt werden (5–50, Standard 20).".to_string(),
+        (Language::En, "tray_limit_label") => "Limit:".to_string(),
+        (Language::De, "tray_limit_label") => "Limit:".to_string(),
+        (Language::En, "tray_direct_label") => "Or direct:".to_string(),
+        (Language::De, "tray_direct_label") => "Oder direkt:".to_string(),
         (Language::En, "update_available_title") => "Update available".to_string(),
         (Language::De, "update_available_title") => "Update verfügbar".to_string(),
         (Language::En, "update_available_msg") => "New version available".to_string(),
@@ -511,6 +535,27 @@ mod tests {
             de.contains("DB") && de.contains("prod"),
             "config_saved DE fmt: {de}"
         );
+    }
+
+    #[test]
+    fn tr_tray_keys_exist() {
+        for key in [
+            "tray_behavior_title",
+            "tray_minimize_label",
+            "tray_minimize_hint_on",
+            "tray_minimize_hint_off",
+            "tray_update_label",
+            "tray_update_hint_on",
+            "tray_update_hint_off",
+            "tray_update_error",
+            "tray_branch_limit_title",
+            "tray_branch_limit_desc",
+        ] {
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+        }
+        let e = tr_fmt(Language::En, "tray_update_error", &["timeout"]);
+        assert!(e.contains("timeout"));
     }
 
     #[test]
