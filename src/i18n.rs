@@ -335,6 +335,12 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "tray_branch_limit_title") => "Tray Branch-Limit".to_string(),
         (Language::En, "tray_branch_limit_desc") => "Max branches shown in tray popup dropdown (5–50, default 20).".to_string(),
         (Language::De, "tray_branch_limit_desc") => "Wie viele Branches maximal im Tray-Popup Dropdown angezeigt werden (5–50, Standard 20).".to_string(),
+        (Language::En, "tray_branch_limit_summary") => "Shows up to {} branches in the tray popup. More in the main window.".to_string(),
+        (Language::De, "tray_branch_limit_summary") => "Zeigt bis zu {} Branches im Tray-Popup. Weitere im Hauptfenster.".to_string(),
+        (Language::En, "tray_creation_error") => "Tray icon creation failed – tray popup disabled.".to_string(),
+        (Language::De, "tray_creation_error") => "Tray-Icon konnte nicht erstellt werden – Tray-Popup deaktiviert.".to_string(),
+        (Language::En, "tray_all_hidden_warn") => "Warning: all tray icons hidden – no icons will be shown in the tray row.".to_string(),
+        (Language::De, "tray_all_hidden_warn") => "Warnung: alle Tray-Icons ausgeblendet – es werden keine Icons in der Tray-Zeile angezeigt.".to_string(),
         (Language::En, "tray_limit_label") => "Limit:".to_string(),
         (Language::De, "tray_limit_label") => "Limit:".to_string(),
         (Language::En, "tray_direct_label") => "Or direct:".to_string(),
@@ -548,14 +554,25 @@ mod tests {
             "tray_update_hint_on",
             "tray_update_hint_off",
             "tray_update_error",
+            "tray_creation_error",
             "tray_branch_limit_title",
             "tray_branch_limit_desc",
+            "tray_branch_limit_summary",
+            "tray_all_hidden_warn",
         ] {
             assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
             assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
         }
         let e = tr_fmt(Language::En, "tray_update_error", &["timeout"]);
         assert!(e.contains("timeout"));
+        let s = tr_fmt(Language::En, "tray_branch_limit_summary", &["7"]);
+        assert!(s.contains('7'), "summary must embed limit: {s}");
+        let sde = tr_fmt(Language::De, "tray_branch_limit_summary", &["7"]);
+        assert!(sde.contains('7'), "summary DE must embed limit: {sde}");
+        assert!(
+            sde.contains("Tray-Popup"),
+            "DE summary should mention Tray-Popup: {sde}"
+        );
     }
 
     #[test]

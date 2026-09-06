@@ -145,6 +145,12 @@ impl MyApp {
                 app.tray_service_tray_rx = Some(tray_rx_arc);
                 app.last_tray_sync = Some(std::time::Instant::now());
             } else {
+                // F2-C1: stilles Fehlen wäre null Tray-Funktionalität ohne Hinweis.
+                // Als sichtbarer Fehler im Hauptfenster (nicht nur stderr).
+                app.error = Some(crate::i18n::tr(
+                    app.config.language,
+                    "tray_creation_error",
+                ));
                 eprintln!("Tray icon creation failed");
             }
         }
@@ -283,8 +289,13 @@ impl MyApp {
                 }
                 Err(e) => {
                     // In Release ohne Konsole unsichtbar -> für Support persistieren,
-                    // Anzeige in Settings (M2), kein Popup-Spam.
+                    // Anzeige in Settings (M2). Zusätzlich kurzer Status-Hinweis im
+                    // Hauptfenster (F2-H4), damit Fehlschläge nicht unsichtbar bleiben.
+                    // Kein roter Error-Block: bei Offline-Start wäre das Popup-Spam.
+                    self.status_message =
+                        Some(tr_fmt(self.config.language, "tray_update_error", &[&e]));
                     self.update_error = Some(e);
+                    self.status_message_time = Some(std::time::Instant::now());
                     ctx.request_repaint();
                 }
             }
@@ -302,7 +313,10 @@ impl MyApp {
         }
         // Tray-Switches laufen headless: Main öffnet sich nie von selbst
         // (Dialog/Fehler bei Dirty/Konflikten warten in main, Popup bleibt offen).
-        for (path, branch) in std::mem::take(&mut self.pending_branch_switches) {
+        // Dedup: pro Repo nur der letzte Klick (keine verschwendeten Zwischen-Switches).
+        for (path, branch) in
+            dedup_branch_switches(std::mem::take(&mut self.pending_branch_switches))
+        {
             if tray_branch_switch_opens_main_window() {
                 self.show_main_window(ctx);
             }
@@ -317,6 +331,26 @@ impl MyApp {
 /// beides wird sichtbar, sobald das Hauptfenster manuell geöffnet wird.
 pub fn tray_branch_switch_opens_main_window() -> bool {
     false
+}
+
+/// Dedupliziert gequeue-te Branch-Switches: pro Repo zählt nur der letzte
+/// gewünschte Branch (schnelle Mehrfach-Klicks im offen bleibenden Popup
+/// erzeugen sonst sinnlose Zwischen-Switches). Reihenfolge = erste Klicks.
+pub fn dedup_branch_switches(
+    switches: Vec<(std::path::PathBuf, String)>,
+) -> Vec<(std::path::PathBuf, String)> {
+    use std::collections::HashMap;
+    let mut last_idx: HashMap<std::path::PathBuf, usize> = HashMap::new();
+    let mut out: Vec<(std::path::PathBuf, String)> = Vec::with_capacity(switches.len());
+    for (path, branch) in switches {
+        if let Some(&i) = last_idx.get(&path) {
+            out[i].1 = branch;
+        } else {
+            last_idx.insert(path.clone(), out.len());
+            out.push((path, branch));
+        }
+    }
+    out
 }
 
 /// Pure helper for minimize-to-tray decision (H1).
@@ -1113,8 +1147,8 @@ impl MyApp {
                     RichText::new(format!(
                         "{}: {} → {}",
                         tr(lang, "update_available_msg"),
-                        info.current_version,
-                        info.latest_version
+                        crate::updater::normalize_version(&info.current_version),
+                        crate::updater::normalize_version(&info.latest_version)
                     ))
                     .size(12.0),
                 );
@@ -1812,5 +1846,23 @@ mod tests {
         // Produktentscheidung: Tray-Switches laufen headless, auch bei Dirty
         // (Dialog/Fehler warten in main). Popup bleibt offen, Main bleibt zu.
         assert!(!tray_branch_switch_opens_main_window());
+    }
+
+    #[test]
+    fn pending_branch_switches_dedup_keeps_last_per_repo() {
+        // Schnelle Mehrfach-Klicks: pro Repo zählt nur der letzte Branch,
+        // Zwischen-Switches (dev, dann sofort main) sind verschwendete Arbeit.
+        let a = PathBuf::from("/tmp/repo-a");
+        let b = PathBuf::from("/tmp/repo-b");
+        let in_q = vec![
+            (a.clone(), "dev".to_string()),
+            (b.clone(), "x".to_string()),
+            (a.clone(), "main".to_string()),
+        ];
+        let out = dedup_branch_switches(in_q);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], (a, "main".to_string()));
+        assert_eq!(out[1], (b, "x".to_string()));
+        assert!(dedup_branch_switches(vec![]).is_empty());
     }
 }

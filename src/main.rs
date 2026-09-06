@@ -34,11 +34,15 @@ fn load_icon() -> Option<std::sync::Arc<egui::IconData>> {
 }
 
 fn crash_log_filename() -> String {
+    // Prozessweiter Zähler: Doppel-Panic innerhalb derselben Millisekunde
+    // (Panic-während-Panic, Destruktor-Panic bei Unwind) darf nie kollidieren.
+    static CRASH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = CRASH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    format!("gitmanager_crash-{}-{}.log", ms, std::process::id())
+    format!("gitmanager_crash-{}-{}-{}.log", ms, std::process::id(), n)
 }
 
 fn main() -> eframe::Result<()> {
@@ -111,13 +115,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn crash_filenames_unique_without_sleep() {
+        // Doppel-Panic im selben Prozess innerhalb einer ms darf nie kollidieren
+        // (kein Sleep – muss auch unter Windows-Timer-Granularität halten).
+        let mut names = std::collections::HashSet::new();
+        for _ in 0..100 {
+            names.insert(crash_log_filename());
+        }
+        assert_eq!(names.len(), 100);
+    }
+
+    #[test]
     fn crash_filename_contains_ms_and_pid() {
         let a = crash_log_filename();
-        std::thread::sleep(std::time::Duration::from_millis(2));
         let b = crash_log_filename();
         assert!(a.starts_with("gitmanager_crash-"));
-        assert!(a.ends_with(&format!("-{}.log", std::process::id())));
-        // Millisekunden + PID: zwei Aufrufe (mit Sleep) kollidieren praktisch nie.
+        assert!(a.contains(&format!("-{}-", std::process::id())));
+        assert!(a.ends_with(".log"));
+        // Zähler-Suffix statt Sleep: zwei Aufrufe kollidieren nie.
         assert_ne!(a, b);
     }
 }

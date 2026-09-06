@@ -17,7 +17,7 @@ struct GithubRelease {
     prerelease: Option<bool>,
 }
 
-fn normalize_version(v: &str) -> String {
+pub(crate) fn normalize_version(v: &str) -> String {
     let v = v.trim();
     let v = v
         .strip_prefix('v')
@@ -26,16 +26,42 @@ fn normalize_version(v: &str) -> String {
     v.to_string()
 }
 
+/// Validiert die lokale Binary-Version rein lokal (kein Netzwerk).
+/// Muss VOR jedem Netzwerk-Request laufen, damit eine kaputte
+/// CARGO_PKG_VERSION sofort (statt nach 5s-Timeout) als Err kommt.
+fn validate_current_version(current_version: &str) -> Result<semver::Version, String> {
+    let current_norm = normalize_version(current_version);
+    semver::Version::parse(&current_norm).map_err(|e| format!("Binary semver ungültig: {e}"))
+}
+
+fn github_request_error(e: ureq::Error) -> String {
+    // ureq 2.x liefert non-2xx als Err(Status) – die "Status != 200"-Prüfung
+    // unten sieht 4xx/5xx daher nie. Hier mit eigenem, handlungsfähigem Text.
+    match e {
+        ureq::Error::Status(403, _) => {
+            "GitHub API Rate-Limit erreicht (403) – später erneut versuchen".to_string()
+        }
+        ureq::Error::Status(code, _) => {
+            format!("GitHub-Request fehlgeschlagen: HTTP {code}")
+        }
+        other => format!("GitHub-Request fehlgeschlagen: {other}"),
+    }
+}
+
 pub fn check_for_update_result(current_version: &str) -> Result<Option<UpdateInfo>, String> {
     // Use a short timeout to not block startup
     let url = "https://api.github.com/repos/TimAltmann/gitmanager/releases/latest";
+    // Lokale Version zuerst validieren: spart bis zu 5s Timeout bei kaputter Version.
+    let current_ver = validate_current_version(current_version)?;
     let resp = ureq::get(url)
         .set("User-Agent", "gitmanager")
         .set("Accept", "application/vnd.github.v3+json")
         .timeout(std::time::Duration::from_secs(5))
         .call()
-        .map_err(|e| format!("GitHub-Request fehlgeschlagen: {e}"))?;
+        .map_err(github_request_error)?;
 
+    // Nur für 2xx-non-200 / ungefolgte 3xx erreichbar (4xx/5xx kommen als
+    // Err(Status) aus call() und landen in github_request_error).
     if resp.status() != 200 {
         return Err(format!("GitHub-Status {} (erwartet 200)", resp.status()));
     }
@@ -50,13 +76,10 @@ pub fn check_for_update_result(current_version: &str) -> Result<Option<UpdateInf
 
     let latest_raw = release.tag_name;
     let latest_norm = normalize_version(&latest_raw);
-    let current_norm = normalize_version(current_version);
 
     // Parse semver; bei Parse-Fehler kein Update (nicht lexikalisch raten)
     let latest_ver =
         semver::Version::parse(&latest_norm).map_err(|e| format!("Tag semver ungültig: {e}"))?;
-    let current_ver = semver::Version::parse(&current_norm)
-        .map_err(|e| format!("Binary semver ungültig: {e}"))?;
 
     if latest_ver > current_ver {
         Ok(Some(UpdateInfo {
@@ -111,10 +134,20 @@ mod tests {
     #[test]
     fn result_returns_error_on_invalid_current_semver() {
         // M2: Fehler müssen als Err mit Kontext kommen, nicht still None.
-        // Ohne Netzwerk nicht prüfbar, aber Parse-Fehler-Pfad ist lokal testbar:
-        assert!(semver::Version::parse(&normalize_version("not-a-version")).is_err());
-        // Wrapper check_for_update darf bei ungültiger Version nie panicken.
-        // (Netzwerk wird hier nicht aufgerufen; nur sicherstellen, dass fn existiert.)
-        let _ = check_for_update("0.0.0");
+        // Ungültige Version muss SOFORT (ohne Netzwerk) als "Binary semver"-Err kommen.
+        // validate_current_version ist rein lokal und damit netzunabhängig testbar:
+        let err = validate_current_version("not-a-version").unwrap_err();
+        assert!(
+            err.contains("Binary semver"),
+            "expected Binary-semver error, got: {err}"
+        );
+        assert!(validate_current_version("0.1.1").is_ok());
+        assert!(validate_current_version("v0.0.4").is_ok());
+        // Und der Wrapper muss denselben Fehler liefern, ohne je auf Netzwerk zu warten:
+        let err2 = check_for_update_result("not-a-version").unwrap_err();
+        assert!(
+            err2.contains("Binary semver"),
+            "expected early Binary-semver error, got: {err2}"
+        );
     }
 }

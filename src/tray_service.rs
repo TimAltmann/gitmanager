@@ -75,8 +75,13 @@ mod imp {
     }
 
     /// Poison-tolerant lock helper: recovers inner guard instead of staling forever.
+    /// Poison wird geloggt (F2-C2): stilles Recovery würde korrupte Zwischenstände
+    /// (z.B. popup_open=true mit stale popup_rect = Ghost-Popup) verschleiern.
     fn lock_shared(shared: &Arc<Mutex<TrayShared>>) -> std::sync::MutexGuard<'_, TrayShared> {
-        shared.lock().unwrap_or_else(|e| e.into_inner())
+        shared.lock().unwrap_or_else(|e| {
+            eprintln!("TrayShared mutex poisoned – recovering inner state");
+            e.into_inner()
+        })
     }
 
     /// The deferred viewport callback - runs on tray service viewport's independent event loop

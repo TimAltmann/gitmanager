@@ -2893,9 +2893,10 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     });
     ui.add_space(4.0);
     ui.label(
-        RichText::new(format!(
-            "Zeigt bis zu {} Branches im Tray-Popup. Weitere im Hauptfenster.",
-            state.draft.tray_branch_limit
+        RichText::new(crate::i18n::tr_fmt(
+            lang,
+            "tray_branch_limit_summary",
+            &[&state.draft.tray_branch_limit.to_string()],
         ))
         .size(10.0)
         .color(Color32::from_rgb(120, 120, 120))
@@ -2927,7 +2928,7 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     if state.draft.tray_icons.hidden_icon_ids.len() == DEFAULT_TRAY_ICON_IDS.len() {
         ui.colored_label(
             Color32::from_rgb(200, 80, 20),
-            "Warnung: alle Tray-Icons ausgeblendet – es werden keine Icons in der Tray-Zeile angezeigt.",
+            tr(lang, "tray_all_hidden_warn"),
         );
     }
 }
