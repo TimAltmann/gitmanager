@@ -68,8 +68,17 @@ docker compose run --rm dev cargo build --target x86_64-pc-windows-gnu --release
 docker compose run --rm dev cargo xwin build --target x86_64-pc-windows-msvc --release
 ```
 
-CI-Ablauf (`.github/workflows/ci.yml`): `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo test --verbose` → `cargo build --release --target x86_64-pc-windows-gnu`.
-> **„Testen“ heißt hier immer alle drei Checks** — `cargo test` allein reicht nicht. Vor jedem Push lokal `cargo fmt --check && cargo clippy -- -D warnings && cargo test` grün machen (siehe Abschnitt 2).
+CI-Ablauf (`.github/workflows/ci.yml`, exakt diese Reihenfolge): `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo test --verbose` → `cargo build --release --target x86_64-pc-windows-gnu`.
+> **Pflicht-Definition-of-Done bei JEDER Aufgabe:** „Fertig“ heißt immer **alle CI-Stages lokal grün** in obiger Reihenfolge — kein Fix/Feature ist done, solange eine Stage rot ist. `cargo test` allein reicht nicht; auch `fmt`+`clippy` allein reichen nicht. Vor jedem Push/Commit lokal ausführen:
+> ```bash
+> export PATH="$HOME/.cargo/bin:$PATH"
+> cargo fmt --check && cargo clippy -- -D warnings && cargo test --verbose
+> ```
+> Wer Windows-Code (`tray*`, `#[cfg(target_os = "windows")]`, `assets/`, `build.rs`) angefasst hat, zusätzlich:
+> ```bash
+> cargo build --release --target x86_64-pc-windows-gnu
+> ```
+> Hintergrund: `clippy` läuft in CI auf Linux — Windows-only-Code (`tray_popup`, `tray_service`) ist dort `dead_code` und muss per `cfg_attr(..., allow(dead_code))` gegated sein; ungenutzte Stubs (z. B. `poll_tray_events`) ersatzlos löschen statt `allow`. Ein grünes `cargo test` beweist nichts über `fmt`/`clippy`/`Windows-Build` (siehe Abschnitt 2).
 
 ## 5) Architektur & Patterns (kurz)
 

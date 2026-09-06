@@ -315,16 +315,6 @@ impl MyApp {
         ctx.request_repaint();
     }
 
-    #[cfg(target_os = "windows")]
-    fn poll_tray_events(&mut self, _ctx: &egui::Context) {
-        // F-01: Fallback gestrichen — TrayService-Viewport ist einzige Windows-Quelle.
-        // Historie: früher wurde hier tray_event_rx gedraint und tray_popup_open getoggelt
-        // (Links Up toggle, Rechts tot, DoubleClick ShowMain). Jetzt alles in tray_service.rs.
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn poll_tray_events(&mut self, _ctx: &egui::Context) {}
-
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) {
             // Only minimize to tray on Windows where tray is available
