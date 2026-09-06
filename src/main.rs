@@ -58,8 +58,8 @@ fn main() -> eframe::Result<()> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let filename = format!("gitmanager_crash-{}.log", ts);
-        let written = directories::ProjectDirs::from("com", "gitmanager", "gitmanager")
-            .map(|dirs| {
+        let written =
+            directories::ProjectDirs::from("com", "gitmanager", "gitmanager").map(|dirs| {
                 let dir = dirs.data_local_dir().to_path_buf();
                 let _ = std::fs::create_dir_all(&dir);
                 let path = dir.join(&filename);

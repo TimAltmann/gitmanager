@@ -408,7 +408,8 @@ impl MyApp {
                             self.config.language,
                             "save_failed",
                             &[&format!("{e:#}")],
-                        ));                    } else {
+                        ));
+                    } else {
                         if let Some(repo) = self.repos.iter_mut().find(|r| r.path == repo_path) {
                             repo.selected_solution = Some(sln_path.clone());
                         }

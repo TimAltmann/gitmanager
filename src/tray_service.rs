@@ -99,11 +99,7 @@ mod imp {
         }
     }
 
-    fn toggle_popup(
-        shared: &Arc<Mutex<TrayShared>>,
-        ctx: &Context,
-        rect: tray_icon::Rect,
-    ) {
+    fn toggle_popup(shared: &Arc<Mutex<TrayShared>>, ctx: &Context, rect: tray_icon::Rect) {
         let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
         let ppp = ctx.pixels_per_point();
         let ppp = if ppp == 0.0 { 1.0 } else { ppp };
@@ -217,7 +213,10 @@ mod imp {
         let popup_width: f32 = 360.0;
         let tray_limit = config_arc.tray_icons.max_display.clamp(5, 50);
         let visible_repos = repos_arc.len().min(tray_limit);
-        let has_solution_dropdown = repos_arc.iter().take(tray_limit).any(|r| r.solutions.len() > 1);
+        let has_solution_dropdown = repos_arc
+            .iter()
+            .take(tray_limit)
+            .any(|r| r.solutions.len() > 1);
         let row_height: f32 = if has_solution_dropdown { 94.0 } else { 66.0 };
         let popup_height: f32 = (visible_repos as f32 * row_height + 90.0).clamp(280.0, 560.0);
         let popup_size = Vec2::new(popup_width, popup_height);
