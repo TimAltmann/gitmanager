@@ -82,7 +82,9 @@ jobs:
             /^\[/{in_pkg=0}
             in_pkg && /^version = "/ && !done{sub(/^version = ".*"/, "version = \"" ver "\""); done=1}
             {print}' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
-          COUNT=$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version = "'"$TAG_VERSION"'"$/{c++} END{print c+0}' Cargo.toml)
+          # String-Vergleich via -v (kein Regex): TAG_VERSION kann `+build`
+          # enthalten, das in /.../ als Quantor wirken würde (L3).
+          COUNT=$(awk -v ver="$TAG_VERSION" '/^\[package\]/{p=1;next} /^\[/{p=0} p && $0 == "version = \"" ver "\""{c++} END{print c+0}' Cargo.toml)
           [ "$COUNT" = "1" ] || { echo "::error::Versionssync hat nicht genau 1 [package]-version gesetzt (count=$COUNT)"; exit 1; }
           echo "Cargo.toml nach Sync:"
           awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version = /' Cargo.toml

@@ -45,6 +45,9 @@ mod imp {
         pub last_toggle_at: Option<Instant>,
         // Channel to send actions to main app
         pub action_tx: mpsc::Sender<TrayAction>,
+        /// #3: Badge-Text fürs Popup (wartender Branch-Dialog/Fehler im
+        /// Hauptfenster). Wird vom Main-Thread bei jedem Sync gesetzt.
+        pub notice: Option<String>,
     }
 
     impl TrayShared {
@@ -58,6 +61,7 @@ mod imp {
                 root_ppp: 1.0,
                 last_toggle_at: None,
                 action_tx,
+                notice: None,
             }
         }
 
@@ -77,9 +81,15 @@ mod imp {
     /// Poison-tolerant lock helper: recovers inner guard instead of staling forever.
     /// Poison wird geloggt (F2-C2): stilles Recovery würde korrupte Zwischenstände
     /// (z.B. popup_open=true mit stale popup_rect = Ghost-Popup) verschleiern.
+    /// #13: nur einmal loggen — nach Poison schlägt jeder Frame (33ms) fehl und
+    /// würde sonst stderr fluten.
     fn lock_shared(shared: &Arc<Mutex<TrayShared>>) -> std::sync::MutexGuard<'_, TrayShared> {
         shared.lock().unwrap_or_else(|e| {
-            eprintln!("TrayShared mutex poisoned – recovering inner state");
+            static POISON_LOGGED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !POISON_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("TrayShared mutex poisoned – recovering inner state");
+            }
             e.into_inner()
         })
     }
@@ -129,17 +139,10 @@ mod imp {
 
     fn toggle_popup(shared: &Arc<Mutex<TrayShared>>, ctx: &Context, rect: tray_icon::Rect) {
         let mut guard = lock_shared(shared);
-        // M3: ROOT-ppp bevorzugen (vom Main-Thread synchronisiert), Service-Viewport
+        // M3/#9: ROOT-ppp bevorzugen (vom Main-Thread synchronisiert), Service-Viewport
         // liegt off-screen und kann auf PerMonitorV2 eine andere DPI melden.
-        let mut ppp = guard.root_ppp;
-        if !ppp.is_finite() || ppp <= 0.0 {
-            ppp = ctx.pixels_per_point();
-        }
-        let ppp = if ppp == 0.0 || !ppp.is_finite() {
-            1.0
-        } else {
-            ppp
-        };
+        // Bei ungültigem Root-Wert neutral 1.0 — nie Service-DPI (#9).
+        let ppp = tray_popup::resolve_root_ppp(guard.root_ppp);
         let tray_rect = Rect::from_min_size(
             egui::pos2(rect.position.x as f32 / ppp, rect.position.y as f32 / ppp),
             egui::vec2(rect.size.width as f32 / ppp, rect.size.height as f32 / ppp),
@@ -167,9 +170,16 @@ mod imp {
         use tray_icon::MouseButtonState;
         use tray_icon::TrayIconEvent;
 
-        // Drain tray events (poison-tolerant)
+        // Drain tray events (poison-tolerant, #13: Poison nur einmal loggen).
         let events: Vec<TrayIconEvent> = {
-            let guard = tray_rx.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = tray_rx.lock().unwrap_or_else(|e| {
+                static TRAY_RX_POISON_LOGGED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !TRAY_RX_POISON_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("tray_rx mutex poisoned – recovering inner state");
+                }
+                e.into_inner()
+            });
             let mut v = Vec::new();
             while let Ok(ev) = guard.try_recv() {
                 v.push(ev);
@@ -283,13 +293,19 @@ mod imp {
             let guard = lock_shared(shared);
             (guard.repos.clone(), guard.config.clone())
         };
+        // #3: Badge-Text (ein String-Clone nur bei gesetzter Notice).
+        let notice: Option<String> = {
+            let guard = lock_shared(shared);
+            guard.notice.clone()
+        };
 
         // M1+N1: erst MRU-sortieren + truncaten (nur sichtbare Top-N klonen),
         // dann Höhe pro sichtbarem Repo summieren (exakt bei gemischten Dropdowns).
         let tray_limit = config_arc.tray_icons.max_display.clamp(5, 50);
         let repos_visible = tray_popup::sorted_visible_repos(&repos_arc, &config_arc, tray_limit);
         let popup_width: f32 = 360.0;
-        let popup_height: f32 = tray_popup::popup_height_for_visible(&repos_visible);
+        let popup_height: f32 =
+            tray_popup::popup_height_for_visible(&repos_visible, notice.as_deref());
         let popup_size = Vec2::new(popup_width, popup_height);
 
         // Position calculation (Heuristik F-14: nimmt horizontale, gleich große
@@ -359,6 +375,7 @@ mod imp {
                         &repos_visible,
                         &config_arc,
                         &mut tray_actions,
+                        notice.as_deref(),
                     );
                 });
                 if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -407,7 +424,9 @@ mod imp {
         }
 
         // Send actions to main app and wake main viewport (service is throttled, main needs instant)
-        let needs_wake = tray_actions.open_main
+        // #10: Sender unter kurzem Lock klonen, dann ohne gehaltenen Lock senden —
+        // der Main-Thread verwirft bei WouldBlock sonst den ganzen Sync.
+        let needs_root_repaint = tray_actions.open_main
             || tray_actions.open_settings
             || tray_actions.quit
             || tray_actions.refresh
@@ -417,44 +436,41 @@ mod imp {
             || tray_actions.agent_open.is_some()
             || tray_actions.explorer_open.is_some()
             || tray_actions.shell_open.is_some();
-        {
+        let action_tx = {
             let guard = lock_shared(shared);
-            if tray_actions.refresh {
-                let _ = guard.action_tx.send(TrayAction::Refresh);
-            }
-            if tray_actions.open_main {
-                let _ = guard.action_tx.send(TrayAction::ShowMainWindow);
-            }
-            if tray_actions.quit {
-                let _ = guard.action_tx.send(TrayAction::Quit);
-            }
-            if let Some((path, branch)) = tray_actions.branch_switch {
-                let _ = guard.action_tx.send(TrayAction::BranchSwitch(path, branch));
-            }
-            if let Some((repo_path, sln_path)) = tray_actions.solution_select {
-                let _ = guard
-                    .action_tx
-                    .send(TrayAction::SolutionSelect(repo_path, sln_path));
-            }
-            if let Some((path, ide_id, file)) = tray_actions.ide_open {
-                let _ = guard
-                    .action_tx
-                    .send(TrayAction::IdeOpen(path, ide_id, file));
-            }
-            if let Some((path, agent_id)) = tray_actions.agent_open {
-                let _ = guard.action_tx.send(TrayAction::AgentOpen(path, agent_id));
-            }
-            if let Some(path) = tray_actions.explorer_open {
-                let _ = guard.action_tx.send(TrayAction::ExplorerOpen(path));
-            }
-            if let Some(path) = tray_actions.shell_open {
-                let _ = guard.action_tx.send(TrayAction::ShellOpen(path));
-            }
-            if tray_actions.open_settings {
-                let _ = guard.action_tx.send(TrayAction::OpenSettings);
-            }
+            guard.action_tx.clone()
+        };
+        if tray_actions.refresh {
+            let _ = action_tx.send(TrayAction::Refresh);
         }
-        if needs_wake {
+        if tray_actions.open_main {
+            let _ = action_tx.send(TrayAction::ShowMainWindow);
+        }
+        if tray_actions.quit {
+            let _ = action_tx.send(TrayAction::Quit);
+        }
+        if let Some((path, branch)) = tray_actions.branch_switch {
+            let _ = action_tx.send(TrayAction::BranchSwitch(path, branch));
+        }
+        if let Some((repo_path, sln_path)) = tray_actions.solution_select {
+            let _ = action_tx.send(TrayAction::SolutionSelect(repo_path, sln_path));
+        }
+        if let Some((path, ide_id, file)) = tray_actions.ide_open {
+            let _ = action_tx.send(TrayAction::IdeOpen(path, ide_id, file));
+        }
+        if let Some((path, agent_id)) = tray_actions.agent_open {
+            let _ = action_tx.send(TrayAction::AgentOpen(path, agent_id));
+        }
+        if let Some(path) = tray_actions.explorer_open {
+            let _ = action_tx.send(TrayAction::ExplorerOpen(path));
+        }
+        if let Some(path) = tray_actions.shell_open {
+            let _ = action_tx.send(TrayAction::ShellOpen(path));
+        }
+        if tray_actions.open_settings {
+            let _ = action_tx.send(TrayAction::OpenSettings);
+        }
+        if needs_root_repaint {
             // Wake main viewport immediately (service viewport is 500ms throttled)
             ctx.request_repaint_of(ViewportId::ROOT);
         }

@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::git::RepoInfo;
+use crate::i18n::{tr, tr_fmt, Language};
 use egui::{Color32, RichText, Vec2};
 
 // Icons reused from repo_list
@@ -41,9 +42,10 @@ fn agent_icon_for(agent_id: &str) -> egui::ImageSource<'static> {
 
 fn ide_image(ide: &crate::config::IdeConfig) -> egui::Image<'static> {
     if let Some(path) = &ide.icon {
-        let pb = std::path::PathBuf::from(path);
-        if pb.exists() {
-            let uri = format!("file://{}", pb.display().to_string().replace('\\', "/"));
+        // #6: Existenz nur einmal pro Pfad per stat prüfen (statt pro Repo pro
+        // Frame). Icons sind quasi-statisch; Dateiwechsel greift ab Neustart.
+        if icon_exists_cached(path) {
+            let uri = format!("file://{}", path.replace('\\', "/"));
             return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(16.0));
         }
     }
@@ -52,13 +54,61 @@ fn ide_image(ide: &crate::config::IdeConfig) -> egui::Image<'static> {
 
 fn agent_image(agent: &crate::config::AgentProfile) -> egui::Image<'static> {
     if let Some(path) = &agent.icon {
-        let pb = std::path::PathBuf::from(path);
-        if pb.exists() {
-            let uri = format!("file://{}", pb.display().to_string().replace('\\', "/"));
+        // #6: siehe ide_image — gecachter stat statt Syscall pro Frame.
+        if icon_exists_cached(path) {
+            let uri = format!("file://{}", path.replace('\\', "/"));
             return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(16.0));
         }
     }
     egui::Image::new(agent_icon_for(&agent.id)).fit_to_exact_size(Vec2::splat(16.0))
+}
+
+/// #6: gecachter `Path.exists` für Icon-Dateien. Ein stat-Syscall pro Pfad
+/// pro Prozess statt pro Repo-Zeile pro Frame (~3000 stats/s bei 30fps).
+/// Der erste Aufruf prüft das FS, danach gilt der Cache (Icons ändern sich
+/// praktisch nie zur Laufzeit; Wechsel greift ab Neustart).
+pub fn icon_exists_cached(path: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(&hit) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(path) {
+        return hit;
+    }
+    let exists = std::path::Path::new(path).exists();
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(path.to_string(), exists);
+    exists
+}
+
+/// #9: ROOT-DPI auflösen. Nur endliche positive Werte übernehmen — sonst
+/// neutral 1.0. Nie auf die DPI des off-screen Service-Viewports
+/// zurückfallen (PerMonitorV2 meldet dort ggf. eine andere DPI).
+pub fn resolve_root_ppp(root_ppp: f32) -> f32 {
+    if root_ppp.is_finite() && root_ppp > 0.0 {
+        root_ppp
+    } else {
+        1.0
+    }
+}
+
+/// #3: Badge-Text fürs Tray-Popup, wenn im Hauptfenster etwas auf den Nutzer
+/// wartet. Priorität: Branch-Dialog (mit Repo-Name) vor allgemeinem Fehler.
+/// `None` = kein Badge.
+pub fn tray_notice_text(
+    lang: Language,
+    dialog_repo_name: Option<&str>,
+    has_error: bool,
+) -> Option<String> {
+    if let Some(name) = dialog_repo_name {
+        Some(tr_fmt(lang, "tray_notice_branch_dialog", &[name]))
+    } else if has_error {
+        Some(tr(lang, "tray_notice_error"))
+    } else {
+        None
+    }
 }
 
 #[derive(Default)]
@@ -111,11 +161,14 @@ pub fn should_close_tray_popup(a: &TrayPopupActions) -> bool {
 
 /// Shows the tray popup UI inside the given viewport Ui.
 /// Returns actions triggered by the user.
+/// `notice` (#3) zeigt optional ein Badge (wartender Branch-Dialog/Fehler);
+/// Klick öffnet das Hauptfenster.
 pub fn show_tray_popup_ui(
     ui: &mut egui::Ui,
     repos: &[RepoInfo],
     config: &AppConfig,
     actions: &mut TrayPopupActions,
+    notice: Option<&str>,
 ) {
     let lang = config.language;
 
@@ -215,6 +268,25 @@ pub fn show_tray_popup_ui(
     egui::CentralPanel::default()
         .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 6)))
         .show(ui, |ui| {
+            // #3: Badge, wenn im Hauptfenster eine Entscheidung/Fehler wartet
+            // (z.B. Branch-Dialog nach Tray-Switch auf dirty Repo).
+            if let Some(text) = notice {
+                ui.add_space(2.0);
+                let banner = egui::Button::new(
+                    RichText::new(format!("⚠ {text}"))
+                        .size(11.0)
+                        .color(Color32::from_rgb(140, 90, 10)),
+                )
+                .fill(Color32::from_rgb(255, 243, 220));
+                if ui
+                    .add_sized([ui.available_width(), 26.0], banner)
+                    .on_hover_text(text)
+                    .clicked()
+                {
+                    actions.open_main = true;
+                }
+                ui.add_space(2.0);
+            }
             if repos.is_empty() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(30.0);
@@ -239,12 +311,34 @@ pub fn show_tray_popup_ui(
 
             // Optional filter
             // Show repos
+            // #8: Profil-/Agenten-Listen einmal pro Frame auflösen statt pro
+            // Repo-Zeile (× Repos × 30fps). Profile-Overrides sind selten —
+            // Default-Listen wiederverwenden, nur bei Override neu rechnen.
+            let default_profile = config.get_active_profile();
+            let default_ides = default_profile.visible_ides();
+            let default_agents =
+                default_profile.filtered_agents(&config.agents, &config.active_agent_ids);
+            let active_agents = config.get_active_agents();
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.add_space(2.0);
                     for repo in repos.iter() {
-                        show_tray_repo_row(ui, repo, config, actions);
+                        let profile = config.get_effective_profile_for_repo(&repo.path);
+                        let owned_ides;
+                        let owned_agents;
+                        let (ides, agents): (
+                            &[&crate::config::IdeConfig],
+                            &[&crate::config::AgentProfile],
+                        ) = if std::ptr::eq(profile, default_profile) {
+                            (&default_ides, &default_agents)
+                        } else {
+                            owned_ides = profile.visible_ides();
+                            owned_agents =
+                                profile.filtered_agents(&config.agents, &config.active_agent_ids);
+                            (&owned_ides, &owned_agents)
+                        };
+                        show_tray_repo_row(ui, repo, config, actions, ides, agents, &active_agents);
                         ui.add_space(4.0);
                     }
                 });
@@ -262,6 +356,10 @@ fn show_tray_repo_row(
     repo: &RepoInfo,
     config: &AppConfig,
     actions: &mut TrayPopupActions,
+    // #8: pro Frame vorberechnete Listen (statt pro Zeile neu auflösen).
+    profile_ides: &[&crate::config::IdeConfig],
+    profile_agents: &[&crate::config::AgentProfile],
+    active_agents: &[&crate::config::AgentProfile],
 ) {
     let visuals = ui.visuals().clone();
     let frame = egui::Frame::new()
@@ -398,7 +496,6 @@ fn show_tray_repo_row(
             // Row 4: Tools tight spacing – respects TrayIconConfig (hidden & order)
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let profile = config.get_effective_profile_for_repo(&repo.path);
                 let tray_hidden = &config.tray_icons.hidden_icon_ids;
                 let tray_order = &config.tray_icons.icon_order;
                 let order_idx = |id: &str| {
@@ -408,9 +505,9 @@ fn show_tray_repo_row(
                         .unwrap_or(usize::MAX)
                 };
                 // IDEs: filter by tray hidden, sort by tray order, limit 3
-                let visible_ides = profile.visible_ides();
-                let mut tray_ides: Vec<&crate::config::IdeConfig> = visible_ides
-                    .into_iter()
+                let mut tray_ides: Vec<&crate::config::IdeConfig> = profile_ides
+                    .iter()
+                    .copied()
                     .filter(|ide| !tray_hidden.contains(&ide.id))
                     .collect();
                 if !tray_order.is_empty() {
@@ -433,7 +530,7 @@ fn show_tray_repo_row(
                 if tray_ides.is_empty() {
                     // Only show placeholder if not all hidden? Keep "Keine IDE" only if original visible was empty?
                     // If filtered all hidden, don't show placeholder to reflect hidden state
-                    let any_visible_original = !profile.visible_ides().is_empty();
+                    let any_visible_original = !profile_ides.is_empty();
                     if any_visible_original
                         && tray_hidden
                             .iter()
@@ -497,11 +594,10 @@ fn show_tray_repo_row(
                 }
 
                 // Agents: filter by tray hidden + profile hidden/order, sort by tray order
-                let active_agents = config.get_active_agents();
-                let filtered_raw =
-                    profile.filtered_agents(&config.agents, &config.active_agent_ids);
+                let filtered_raw = profile_agents;
                 let mut filtered: Vec<&crate::config::AgentProfile> = filtered_raw
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|a| !tray_hidden.contains(&a.id))
                     .collect();
                 if !tray_order.is_empty() {
@@ -588,10 +684,13 @@ const ROW_H_DROPDOWN: f32 = 94.0;
 const POPUP_CHROME: f32 = 90.0;
 const POPUP_MIN_H: f32 = 280.0;
 const POPUP_MAX_H: f32 = 560.0;
+/// Höhe des Notice-Banners (#3: wartender Branch-Dialog/Fehler).
+const POPUP_NOTICE_H: f32 = 36.0;
 
 /// Popup-Höhe aus den sichtbaren Repos summiert (66px normal, 94px pro Repo
 /// mit Solution-Dropdown + 90px Chrome). Exakt auch bei gemischten Zeilen.
-pub fn popup_height_for_visible(visible_repos: &[RepoInfo]) -> f32 {
+/// Mit Notice-Banner (#3) kommen 36px dazu.
+pub fn popup_height_for_visible(visible_repos: &[RepoInfo], notice: Option<&str>) -> f32 {
     let rows: f32 = visible_repos
         .iter()
         .map(|r| {
@@ -602,18 +701,31 @@ pub fn popup_height_for_visible(visible_repos: &[RepoInfo]) -> f32 {
             }
         })
         .sum();
-    (rows + POPUP_CHROME).clamp(POPUP_MIN_H, POPUP_MAX_H)
+    let chrome = POPUP_CHROME + notice.map(|_| POPUP_NOTICE_H).unwrap_or(0.0);
+    (rows + chrome).clamp(POPUP_MIN_H, POPUP_MAX_H)
+}
+
+/// #4: MRU-sortierte Indizes der sichtbaren Top-N Repos. Timestamps werden
+/// einmalig O(n) vorberechnet (je ein HashMap-Lookup + String-Alloc), danach
+/// sortiert nur noch der Vergleich gecachter u64 — statt O(n log n)
+/// `repo_state_key`-Allocs pro Frame.
+pub fn sorted_visible_indices(repos: &[RepoInfo], config: &AppConfig, limit: usize) -> Vec<usize> {
+    let timestamps: Vec<u64> = repos
+        .iter()
+        .map(|r| mru_timestamp(config, &r.path))
+        .collect();
+    let mut idx: Vec<usize> = (0..repos.len()).collect();
+    // Stabile Sortierung: Gleichstand behält Originalreihenfolge.
+    idx.sort_by(|&a, &b| timestamps[b].cmp(&timestamps[a]));
+    idx.truncate(limit);
+    idx
 }
 
 /// Returns only the visible Top-N repos, MRU-sorted (N1: avoids full Vec deep-clone
 /// per frame; clones only what is actually displayed).
 pub fn sorted_visible_repos(repos: &[RepoInfo], config: &AppConfig, limit: usize) -> Vec<RepoInfo> {
-    let mut idx: Vec<usize> = (0..repos.len()).collect();
-    idx.sort_by(|&a, &b| {
-        mru_timestamp(config, &repos[b].path).cmp(&mru_timestamp(config, &repos[a].path))
-    });
-    idx.into_iter()
-        .take(limit)
+    sorted_visible_indices(repos, config, limit)
+        .into_iter()
         .map(|i| repos[i].clone())
         .collect()
 }
@@ -676,20 +788,23 @@ mod tests {
             r
         };
         let repos = vec![mk(0), mk(1), mk(2)];
-        assert_eq!(popup_height_for_visible(&repos), 2.0 * 66.0 + 94.0 + 90.0);
-        assert_eq!(popup_height_for_visible(&[]), 280.0);
+        assert_eq!(
+            popup_height_for_visible(&repos, None),
+            2.0 * 66.0 + 94.0 + 90.0
+        );
+        assert_eq!(popup_height_for_visible(&[], None), 280.0);
         // Homogen (Clamp beachten: 2 Zeilen lägen unter MIN 280):
         assert_eq!(
-            popup_height_for_visible(&[mk(0), mk(1), mk(0), mk(1)]),
+            popup_height_for_visible(&[mk(0), mk(1), mk(0), mk(1)], None),
             4.0 * 66.0 + 90.0
         );
         assert_eq!(
-            popup_height_for_visible(&[mk(2), mk(3), mk(2), mk(3)]),
+            popup_height_for_visible(&[mk(2), mk(3), mk(2), mk(3)], None),
             4.0 * 94.0 + 90.0
         );
         // Clamp bleibt: 50 Dropdown-Zeilen deckeln auf 560.
         let many: Vec<RepoInfo> = (0..50).map(|_| mk(2)).collect();
-        assert_eq!(popup_height_for_visible(&many), 560.0);
+        assert_eq!(popup_height_for_visible(&many, None), 560.0);
     }
 
     #[test]
@@ -773,5 +888,128 @@ mod tests {
         assert!(cut_uni.ends_with('…'));
         assert_eq!(truncate_label("", 40), "");
         assert_eq!(truncate_label("main", 0), "");
+    }
+
+    #[test]
+    fn sorted_visible_indices_match_mru_order_with_ties() {
+        // #4: Indizes müssen MRU-Reihenfolge (stabile Sortierung bei Gleichstand)
+        // liefern, ohne pro Vergleich String-Allocs zu brauchen.
+        use crate::config::AppConfig;
+        use std::path::PathBuf;
+        let mut cfg = AppConfig::default();
+        let repos: Vec<crate::git::RepoInfo> = (0..60)
+            .map(|i| {
+                crate::git::RepoInfo::new(
+                    PathBuf::from(format!("/tmp/r{i:02}")),
+                    "main".into(),
+                    false,
+                    false,
+                )
+            })
+            .collect();
+        // Verteilte Timestamps inkl. Gleichstand (r05 und r42 beide 500).
+        for (name, ts) in [
+            ("r05", 500),
+            ("r42", 500),
+            ("r07", 900),
+            ("r59", 100),
+            ("r00", 700),
+        ] {
+            let key = AppConfig::repo_state_key(&PathBuf::from(format!("/tmp/{name}")));
+            cfg.repo_usage.entry(key).or_default().last_opened = Some(ts);
+        }
+        let idx = sorted_visible_indices(&repos, &cfg, 10);
+        assert_eq!(idx.len(), 10);
+        // Referenz: naive stabile Sortierung nach Timestamp desc.
+        let mut expected: Vec<usize> = (0..repos.len()).collect();
+        expected.sort_by(|&a, &b| {
+            mru_timestamp(&cfg, &repos[b].path).cmp(&mru_timestamp(&cfg, &repos[a].path))
+        });
+        let expected: Vec<usize> = expected.into_iter().take(10).collect();
+        assert_eq!(idx, expected);
+        // Höchster zuerst, Gleichstand stabil in Originalreihenfolge.
+        assert_eq!(repos[idx[0]].path, PathBuf::from("/tmp/r07"));
+        assert_eq!(repos[idx[1]].path, PathBuf::from("/tmp/r00"));
+        assert_eq!(repos[idx[2]].path, PathBuf::from("/tmp/r05"));
+        assert_eq!(repos[idx[3]].path, PathBuf::from("/tmp/r42"));
+    }
+
+    #[test]
+    fn icon_exists_cached_reports_fs_and_caches() {
+        // #6: Einmal geprüfte Pfade dürfen keinen erneuten stat-Syscall brauchen.
+        let dir = std::env::temp_dir().join(format!(
+            "gm_icon_cache_test_{}_{}",
+            std::process::id(),
+            "traypopup"
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let present = dir.join("present_xyz123.png");
+        std::fs::write(&present, b"x").unwrap();
+        let missing = dir.join("missing_xyz123.png");
+        assert!(icon_exists_cached(present.to_str().unwrap()));
+        assert!(!icon_exists_cached(missing.to_str().unwrap()));
+        // Gecacht: nach Löschen weiterhin true (kein erneuter stat).
+        std::fs::remove_file(&present).unwrap();
+        assert!(icon_exists_cached(present.to_str().unwrap()));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn resolve_root_ppp_prefers_valid_root() {
+        // #9: Nur endliche positive Root-DPI übernehmen, sonst neutral 1.0
+        // (nie die DPI des off-screen Service-Viewports).
+        assert_eq!(resolve_root_ppp(1.0), 1.0);
+        assert_eq!(resolve_root_ppp(2.0), 2.0);
+        assert_eq!(resolve_root_ppp(0.0), 1.0);
+        assert_eq!(resolve_root_ppp(-1.5), 1.0);
+        assert_eq!(resolve_root_ppp(f32::NAN), 1.0);
+        assert_eq!(resolve_root_ppp(f32::INFINITY), 1.0);
+    }
+
+    #[test]
+    fn tray_notice_text_prioritizes_dialog_over_error() {
+        // #3: Badge-Text für wartenden Branch-Dialog (mit Repo-Name) bzw. Fehler.
+        use crate::i18n::Language;
+        assert!(tray_notice_text(Language::En, None, false).is_none());
+        assert!(tray_notice_text(Language::De, None, false).is_none());
+        let d = tray_notice_text(Language::En, Some("myrepo"), false).unwrap();
+        assert!(d.contains("myrepo"), "dialog notice names repo: {d}");
+        let e = tray_notice_text(Language::De, None, true).unwrap();
+        assert!(!e.is_empty());
+        // Dialog schlägt Fehler.
+        let both = tray_notice_text(Language::En, Some("myrepo"), true).unwrap();
+        assert!(both.contains("myrepo"), "dialog wins over error: {both}");
+    }
+
+    #[test]
+    fn popup_height_grows_with_notice() {
+        // #3: Banner braucht Platz — Höhe mit Notice größer als ohne.
+        use crate::git::{RepoInfo, SolutionFile};
+        let mk = |n_sln: usize| {
+            let mut r = RepoInfo::new(
+                std::path::PathBuf::from(format!("/tmp/n{n_sln}")),
+                "main".to_string(),
+                false,
+                false,
+            );
+            r.solutions = (0..n_sln)
+                .map(|i| SolutionFile {
+                    path: std::path::PathBuf::from(format!("/tmp/n{n_sln}/{i}.sln")),
+                    relative: format!("{i}.sln"),
+                })
+                .collect();
+            r
+        };
+        let repos = vec![mk(0), mk(1), mk(0), mk(1)];
+        // 4×66 + 90 = 354 (über MIN 280, unter MAX 560).
+        let plain = popup_height_for_visible(&repos, None);
+        assert_eq!(plain, 354.0);
+        let with_notice = popup_height_for_visible(&repos, Some("waiting"));
+        assert_eq!(with_notice, 390.0);
+        assert!(
+            with_notice > plain,
+            "notice must grow popup: {plain} -> {with_notice}"
+        );
+        assert_eq!(popup_height_for_visible(&[], None), 280.0);
     }
 }

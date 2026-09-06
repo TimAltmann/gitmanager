@@ -70,6 +70,12 @@ pub struct MyApp {
     >,
     #[cfg(target_os = "windows")]
     last_tray_sync: Option<std::time::Instant>,
+    /// #5: true, sobald sich Tray-relevante Daten geändert haben und noch kein
+    /// erfolgreicher Sync lief (WouldBlock behält das Flag für Retry).
+    /// Plattformunabhängig gehalten, damit Tests das Markieren prüfen können;
+    /// auf Nicht-Windows ohne Leser (nur gesetzt).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    tray_dirty: bool,
     window_visible: bool,
     should_quit: bool,
 }
@@ -119,6 +125,7 @@ impl MyApp {
             tray_service_tray_rx: None,
             #[cfg(target_os = "windows")]
             last_tray_sync: None,
+            tray_dirty: false,
             window_visible: true,
             should_quit: false,
         };
@@ -238,6 +245,9 @@ impl MyApp {
             let ScanResult::Repos(repos) = result;
             self.repos = repos;
             self.error = None;
+            // Review-Fix: dirty VOR dem direkten Sync markieren — bei
+            // WouldBlock bleibt das Flag (Backstop in sync_tray_service).
+            self.mark_tray_dirty();
             self.sync_tray_service();
             ctx.request_repaint();
         }
@@ -247,6 +257,8 @@ impl MyApp {
             self.status_message_time = None;
             // Async Tray-Launches (Agent/Shell) landen hier ohne Ursprung;
             // hidden impliziert Tray-Ursprung → Fehler sichtbar machen (7a).
+            // #3: Fehler speist das Tray-Badge → dirty für nächsten Sync.
+            self.mark_tray_dirty();
             if should_reveal_main_on_error(self.window_visible, self.should_quit) {
                 self.show_main_window(ctx);
             }
@@ -257,6 +269,7 @@ impl MyApp {
                 Ok(cfg) => {
                     self.config = cfg;
                     self.error = None;
+                    self.mark_tray_dirty();
                     self.sync_tray_service();
                     // Settings offen: nicht kompletten Draft verwerfen, nur auto-erkannte Programme mergen
                     if self.show_settings {
@@ -274,6 +287,8 @@ impl MyApp {
                     self.error = Some(err_msg);
                     self.status_message = None;
                     self.status_message_time = None;
+                    // #3: Fehler speist das Tray-Badge → dirty für nächsten Sync.
+                    self.mark_tray_dirty();
                     ctx.request_repaint();
                 }
             }
@@ -316,13 +331,17 @@ impl MyApp {
         // Tray-Switches laufen headless: Main öffnet sich nie von selbst
         // (Dialog/Fehler bei Dirty/Konflikten warten in main, Popup bleibt offen).
         // Dedup: pro Repo nur der letzte Klick (keine verschwendeten Zwischen-Switches).
-        for (path, branch) in
-            dedup_branch_switches(std::mem::take(&mut self.pending_branch_switches))
-        {
-            if tray_branch_switch_opens_main_window() {
-                self.show_main_window(ctx);
+        let pending = std::mem::take(&mut self.pending_branch_switches);
+        if !pending.is_empty() {
+            for (path, branch) in dedup_branch_switches(pending) {
+                if tray_branch_switch_opens_main_window() {
+                    self.show_main_window(ctx);
+                }
+                self.handle_branch_switch(path, branch);
             }
-            self.handle_branch_switch(path, branch);
+            // Dialog/Fehler landen in branch_dialog/error ohne direkten Sync
+            // (#3 Badge) → dirty, damit der nächste Throttle-Sync übernimmt.
+            self.mark_tray_dirty();
         }
     }
 }
@@ -354,6 +373,23 @@ pub fn dedup_branch_switches(
         }
     }
     out
+}
+
+/// #5: Sync-Entscheidung für den Tray-Service: nur bei dirty + abgelaufenem
+/// Throttle (500ms) — kein blinder Sync im Idle.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn should_sync_tray_service(
+    dirty: bool,
+    last_sync: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if !dirty {
+        return false;
+    }
+    match last_sync {
+        Some(t) => now.saturating_duration_since(t) >= std::time::Duration::from_millis(500),
+        None => true,
+    }
 }
 
 /// Pure helper for minimize-to-tray decision (H1).
@@ -396,6 +432,22 @@ fn clear_tray_popup(shared: &std::sync::Arc<std::sync::Mutex<crate::tray_service
 }
 
 impl MyApp {
+    /// #5: Tray-Daten als geändert markieren (nächster Throttle-Sync übernimmt).
+    fn mark_tray_dirty(&mut self) {
+        self.tray_dirty = true;
+    }
+
+    /// #12: Config-Save-Fehler einheitlich melden statt still zu verwerfen:
+    /// eprintln für Logs + `self.error` fürs Hauptfenster (sichtbar beim Öffnen).
+    fn note_config_save_error(&mut self, err: &anyhow::Error) {
+        eprintln!("Config speichern fehlgeschlagen: {err:#}");
+        self.error = Some(tr_fmt(
+            self.config.language,
+            "save_failed",
+            &[&format!("{err:#}")],
+        ));
+    }
+
     fn show_main_window(&mut self, ctx: &egui::Context) {
         self.window_visible = true;
         self.should_quit = false;
@@ -438,31 +490,62 @@ impl MyApp {
 
     #[cfg(target_os = "windows")]
     fn sync_tray_service(&mut self) {
-        // Poison-tolerant: recover from poisoned mutex instead of staling forever.
+        // Review-Nit: erst prüfen, dann klonen (ohne Tray kein Clone).
         if let Some(shared) = &self.tray_shared {
+            // #5: Klone VOR dem Lock erstellen — der Mutex wird nur für den kurzen
+            // Zeiger-Tausch gehalten, nicht für die Deep-Clones von Repos/Config.
+            let repos = self.repos.clone();
+            let config = self.config.clone();
+            // #3: Badge-Text (wartender Branch-Dialog/Fehler) gleich mit syncen.
+            let notice = self.tray_notice();
+            // Poison-tolerant: recover from poisoned mutex instead of staling forever.
             let locked = match shared.try_lock() {
                 Ok(g) => Some(g),
                 Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
                 Err(std::sync::TryLockError::WouldBlock) => None,
             };
             if let Some(mut guard) = locked {
-                guard.update_data(self.repos.clone(), self.config.clone());
+                guard.update_data(repos, config);
+                guard.notice = notice;
+                // Erfolgreich: dirty zurücksetzen.
+                self.tray_dirty = false;
                 self.last_tray_sync = Some(std::time::Instant::now());
+            } else {
+                // Review-Fix (:248): verlorener Sync bei WouldBlock → dirty
+                // setzen, damit maybe_sync_tray_service per Throttle nachholt.
+                // Deckt alle direkten Sync-Aufrufer ab (Scan, Config, Usage …).
+                self.tray_dirty = true;
             }
         }
     }
 
     #[cfg(target_os = "windows")]
     fn maybe_sync_tray_service(&mut self) {
-        // Throttled sync for periodic updates - efficient check every 500ms
-        let should_sync = if let Some(t) = self.last_tray_sync {
-            t.elapsed() > std::time::Duration::from_millis(500)
-        } else {
-            true
-        };
-        if should_sync {
+        // #5: nur bei dirty + Throttle syncen — kein blinder Sync alle 500ms
+        // im Idle ohne jede Datenänderung.
+        if should_sync_tray_service(
+            self.tray_dirty,
+            self.last_tray_sync,
+            std::time::Instant::now(),
+        ) {
             self.sync_tray_service();
         }
+    }
+
+    /// #3: Badge-Text fürs Tray-Popup (wartender Branch-Dialog/Fehler im
+    /// Hauptfenster). Priorität: Dialog (mit Repo-Name) vor Fehler.
+    #[cfg(target_os = "windows")]
+    fn tray_notice(&self) -> Option<String> {
+        let dialog_repo = self.branch_dialog.as_ref().and_then(|d| {
+            d.repo_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+        });
+        crate::ui::tray_popup::tray_notice_text(
+            self.config.language,
+            dialog_repo.as_deref(),
+            self.error.is_some(),
+        )
     }
 
     #[cfg(target_os = "windows")]
@@ -497,6 +580,8 @@ impl MyApp {
                     let state = self.config.get_repo_state_mut(&repo_path);
                     state.selected_solution = Some(sln_path.clone());
                     if let Err(e) = self.config.save() {
+                        // Review-Fix: Fehler speist das Tray-Badge → dirty.
+                        self.mark_tray_dirty();
                         self.error = Some(crate::i18n::tr_fmt(
                             self.config.language,
                             "save_failed",
@@ -515,6 +600,7 @@ impl MyApp {
                             &[&repo_path.display().to_string()],
                         ));
                         self.status_message_time = Some(std::time::Instant::now());
+                        self.mark_tray_dirty();
                         self.sync_tray_service();
                     }
                 }
@@ -522,7 +608,14 @@ impl MyApp {
                     {
                         let state = self.config.get_repo_state_mut(&path);
                         state.selected_ide = Some(ide_id.clone());
-                        let _ = self.config.save();
+                        // #12: Save-Fehler melden statt still verwerfen.
+                        self.mark_tray_dirty();
+                        if let Err(e) = self.config.save() {
+                            self.note_config_save_error(&e);
+                            if should_reveal_main_on_error(self.window_visible, self.should_quit) {
+                                self.show_main_window(ctx);
+                            }
+                        }
                     }
                     let profile = self.config.get_effective_profile_for_repo(&path);
                     if let Some(ide) = profile.ides.iter().find(|i| i.id == ide_id) {
@@ -680,7 +773,12 @@ impl MyApp {
                 usage.config_change_count = usage.config_change_count.wrapping_add(1);
             }
         }
-        let _ = self.config.save();
+        // #12: Save-Fehler melden statt still verwerfen (einheitlich mit
+        // SolutionSelect).
+        self.mark_tray_dirty();
+        if let Err(e) = self.config.save() {
+            self.note_config_save_error(&e);
+        }
         self.sync_tray_service();
     }
 
@@ -810,6 +908,8 @@ impl MyApp {
                         if let Err(e) = self.config.save() {
                             self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
                         } else {
+                            // Review-Fix: Profilwechsel betrifft Tray-Listen.
+                            self.mark_tray_dirty();
                             self.status_message = Some(tr_fmt(
                                 lang,
                                 "profile_switched",
@@ -840,6 +940,8 @@ impl MyApp {
                                 format!("{} aktiv", active_agents.len())
                             };
                             let mut save_err: Option<String> = None;
+                            // Review-Fix: Agent-Liste betrifft Tray-Popup → dirty.
+                            let mut agents_changed = false;
                             egui::ComboBox::from_id_salt("active_agent_top")
                                 .selected_text(current_text)
                                 .width(120.0)
@@ -849,6 +951,7 @@ impl MyApp {
                                         let mut is_active = self.config.is_agent_active(&a.id);
                                         if ui.checkbox(&mut is_active, &a.display_name).clicked() {
                                             self.config.toggle_agent_active(&a.id);
+                                            agents_changed = true;
                                             if let Err(e) = self.config.save() {
                                                 save_err = Some(format!("{e:#}"));
                                             }
@@ -859,6 +962,7 @@ impl MyApp {
                                         for a in &self.config.agents.clone() {
                                             if !self.config.is_agent_active(&a.id) {
                                                 self.config.toggle_agent_active(&a.id);
+                                                agents_changed = true;
                                             }
                                         }
                                         if let Err(e) = self.config.save() {
@@ -868,11 +972,15 @@ impl MyApp {
                                     if ui.button("Alle deaktivieren").clicked() {
                                         self.config.active_agent_ids.clear();
                                         self.config.active_agent_id = None;
+                                        agents_changed = true;
                                         if let Err(e) = self.config.save() {
                                             save_err = Some(format!("{e:#}"));
                                         }
                                     }
                                 });
+                            if agents_changed {
+                                self.mark_tray_dirty();
+                            }
                             if let Some(e) = save_err {
                                 self.error = Some(tr_fmt(lang, "save_failed", &[&e]));
                             }
@@ -907,6 +1015,8 @@ impl MyApp {
                         });
                     if new_lang != lang {
                         self.config.language = new_lang;
+                        // Review-Fix: Sprache betrifft auch Tray-Texte.
+                        self.mark_tray_dirty();
                         if let Err(e) = self.config.save() {
                             self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
                         }
@@ -1411,6 +1521,8 @@ impl eframe::App for MyApp {
                     // Speichere Auswahl in config
                     let state = self.config.get_repo_state_mut(&repo_path);
                     state.selected_solution = Some(sln_path.clone());
+                    // Review-Fix: Tray-Snapshot sonst stale (kein Scan/Sync hier).
+                    self.mark_tray_dirty();
                     if let Err(e) = self.config.save() {
                         self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
                     } else {
@@ -1431,6 +1543,8 @@ impl eframe::App for MyApp {
                     {
                         let state = self.config.get_repo_state_mut(&repo_path);
                         state.selected_ide = Some(ide_id.clone());
+                        // Review-Fix: Tray-Snapshot sonst stale.
+                        self.mark_tray_dirty();
                         if let Err(e) = self.config.save() {
                             self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
                         }
@@ -1601,6 +1715,8 @@ impl eframe::App for MyApp {
                     crate::ui::theme::apply_theme(&ctx, &new_cfg.theme);
                     let lang = new_cfg.language;
                     self.config = new_cfg;
+                    // Review-Fix: Tray-Settings (Icons/Limit) bis Scan-Ende stale.
+                    self.mark_tray_dirty();
                     self.settings_state = Some(SettingsState::from_config(&self.config));
                     self.show_settings = false;
                     self.status_message = Some(tr(lang, "saved_scan_restart"));
@@ -1652,6 +1768,111 @@ mod tests {
         };
         assert_eq!(dlg2.error, Some("err".to_string()));
         assert_eq!(dlg2.dirty_files.len(), 1);
+    }
+
+    #[test]
+    fn should_sync_tray_service_only_when_dirty_and_throttled() {
+        // #5: kein blinder Sync alle 500ms — nur bei dirty + Throttle abgelaufen.
+        let now = std::time::Instant::now();
+        assert!(!should_sync_tray_service(false, None, now));
+        assert!(should_sync_tray_service(true, None, now));
+        let recent = now - std::time::Duration::from_millis(100);
+        assert!(!should_sync_tray_service(true, Some(recent), now));
+        let old = now - std::time::Duration::from_millis(600);
+        assert!(should_sync_tray_service(true, Some(old), now));
+    }
+
+    fn test_app() -> MyApp {
+        let (scan_tx, scan_rx) = mpsc::channel();
+        let (launch_err_tx, launch_err_rx) = mpsc::channel();
+        let (_config_update_tx, config_update_rx) = mpsc::channel();
+        let (_update_tx, update_rx) = mpsc::channel();
+        MyApp {
+            config: AppConfig::default(),
+            repos: Vec::new(),
+            scanning: false,
+            error: None,
+            show_settings: false,
+            settings_state: None,
+            scan_tx,
+            scan_rx,
+            launch_err_tx,
+            launch_err_rx,
+            config_update_rx,
+            update_rx,
+            update_info: None,
+            update_error: None,
+            show_update_dialog: false,
+            status_message: None,
+            status_message_time: None,
+            branch_dialog: None,
+            pending_branch_switches: Vec::new(),
+            last_window_size: [0.0; 2],
+            top_bar_collapsed: false,
+            #[cfg(target_os = "windows")]
+            tray_icon: None,
+            #[cfg(target_os = "windows")]
+            tray_shared: None,
+            #[cfg(target_os = "windows")]
+            tray_action_rx: None,
+            #[cfg(target_os = "windows")]
+            tray_service_tray_rx: None,
+            #[cfg(target_os = "windows")]
+            last_tray_sync: None,
+            tray_dirty: false,
+            window_visible: true,
+            should_quit: false,
+        }
+    }
+
+    #[test]
+    fn note_config_save_error_sets_error() {
+        // #12: fehlgeschlagener Config-Save darf nicht still verworfen werden.
+        let mut app = test_app();
+        app.note_config_save_error(&anyhow::anyhow!("disk full"));
+        let msg = app.error.expect("error must be set");
+        assert!(msg.contains("disk full"), "unexpected message: {msg}");
+    }
+
+    #[test]
+    fn poll_scan_marks_tray_dirty_on_scan_result() {
+        // Review-Fix: Scan-Arm muss dirty markieren, damit ein WouldBlock-
+        // Sync per Throttle nachgeholt wird (statt still zu verlieren).
+        let mut app = test_app();
+        assert!(!app.tray_dirty);
+        app.scan_tx
+            .send(ScanResult::Repos(vec![]))
+            .expect("send scan result");
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(app.tray_dirty, "scan result must mark tray dirty");
+    }
+
+    #[test]
+    fn poll_scan_marks_tray_dirty_on_launch_error() {
+        // Fehler speisen das Tray-Badge (#3) → dirty für nächsten Sync.
+        let mut app = test_app();
+        app.launch_err_tx
+            .send("boom".to_string())
+            .expect("send launch err");
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(app.tray_dirty, "launch error must mark tray dirty");
+        assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn poll_scan_marks_tray_dirty_on_pending_switches() {
+        // Branch-Switch ohne Repo (open_repo → None → Fehlerpfad) markiert dirty.
+        let mut app = test_app();
+        app.pending_branch_switches.push((
+            std::path::PathBuf::from("/tmp/no-repo-xyz"),
+            "main".to_string(),
+        ));
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(app.tray_dirty, "pending switch must mark tray dirty");
+        assert!(app.pending_branch_switches.is_empty());
     }
 
     #[test]
