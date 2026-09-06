@@ -34,19 +34,49 @@ cargo fmt                   # Format fixen
 
 ## 3) Release-Build Windows `.exe` (lokal ohne Docker)
 
-Benötigt mingw + Target:
+Empfohlen in dieser Umgebung (WSL ohne sudo-Passwort) via Homebrew — einmalig:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y mingw-w64 clang pkg-config libssl-dev
-sudo ln -sf /usr/bin/x86_64-w64-mingw32-windres /usr/bin/windres  # falls fehlend
-
+brew install mingw-w64   # liefert x86_64-w64-mingw32-gcc + -windres (~1,6 GB)
+ln -sf /home/linuxbrew/.linuxbrew/bin/x86_64-w64-mingw32-windres /home/tim/.local/bin/windres
 rustup target add x86_64-pc-windows-gnu
-export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+Bauen (Dauer ca. 5 min, `~/.local/bin` für `windres` + Linuxbrew für den Cross-GCC müssen im PATH sein):
+
+```bash
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 cargo build --release --target x86_64-pc-windows-gnu
 # -> target/x86_64-pc-windows-gnu/release/gitmanager.exe
 ls -lh target/x86_64-pc-windows-gnu/release/gitmanager.exe
 file target/x86_64-pc-windows-gnu/release/gitmanager.exe
 ```
+
+Alternative mit sudo (Rechner mit apt-Rechten, wie CI in `.github/workflows/ci.yml`):
+
+```bash
+sudo apt-get update && sudo apt-get install -y mingw-w64 clang pkg-config libssl-dev
+sudo ln -sf /usr/bin/x86_64-w64-mingw32-windres /usr/bin/windres  # falls fehlend
+rustup target add x86_64-pc-windows-gnu
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+Test-Build mit anderer Version (z. B. `0.0.1` für Updater-Test — Latest Release ist `v0.0.4`, daher schlägt der Update-Dialog an). `CARGO_PKG_VERSION` kommt aus `Cargo.toml`, die Windows-Manifest-Version in `build.rs` wird daraus abgeleitet:
+
+```bash
+cp Cargo.toml /tmp/opencode_Cargo.toml.bak && cp Cargo.lock /tmp/opencode_Cargo.lock.bak
+sed -i -E '0,/^version = ".*"/s//version = "0.0.1"/' Cargo.toml  # nur [package]-Zeile!
+grep -m1 '^version' Cargo.toml
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+cargo build --release --target x86_64-pc-windows-gnu
+strings target/x86_64-pc-windows-gnu/release/gitmanager.exe | grep -m2 'v0.0.1'
+cp target/x86_64-pc-windows-gnu/release/gitmanager.exe ./gitmanager-0.0.1-test.exe
+cp /tmp/opencode_Cargo.toml.bak Cargo.toml && cp /tmp/opencode_Cargo.lock.bak Cargo.lock
+grep -m1 '^version' Cargo.toml  # muss wieder 0.1.1 zeigen
+```
+
+Hinweis: In CI schreibt der Step `Sync version from tag` die Tag-Version automatisch nach `Cargo.toml` (nur bei `refs/tags/v*`); lokal ist das obige `sed`-Backup-Restore das Äquivalent.
 
 MSVC (kleiner, empfohlen für Store/AV, benötigt `cargo-xwin`):
 ```bash
