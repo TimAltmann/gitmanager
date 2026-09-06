@@ -147,10 +147,7 @@ impl MyApp {
             } else {
                 // F2-C1: stilles Fehlen wäre null Tray-Funktionalität ohne Hinweis.
                 // Als sichtbarer Fehler im Hauptfenster (nicht nur stderr).
-                app.error = Some(crate::i18n::tr(
-                    app.config.language,
-                    "tray_creation_error",
-                ));
+                app.error = Some(crate::i18n::tr(app.config.language, "tray_creation_error"));
                 eprintln!("Tray icon creation failed");
             }
         }
