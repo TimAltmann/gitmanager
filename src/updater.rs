@@ -93,11 +93,6 @@ pub fn check_for_update_result(current_version: &str) -> Result<Option<UpdateInf
     }
 }
 
-#[allow(dead_code)]
-pub fn check_for_update(current_version: &str) -> Option<UpdateInfo> {
-    check_for_update_result(current_version).ok().flatten()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

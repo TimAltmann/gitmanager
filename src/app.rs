@@ -330,9 +330,10 @@ pub fn tray_branch_switch_opens_main_window() -> bool {
     false
 }
 
-/// Dedupliziert gequeue-te Branch-Switches: pro Repo zählt nur der letzte
-/// gewünschte Branch (schnelle Mehrfach-Klicks im offen bleibenden Popup
-/// erzeugen sonst sinnlose Zwischen-Switches). Reihenfolge = erste Klicks.
+/// Dedupliziert gequeue-te Branch-Switches: pro Repo zählt nur der zuletzt
+/// geklickte Branch (schnelle Mehrfach-Klicks im offen bleibenden Popup
+/// erzeugen sonst sinnlose Zwischen-Switches). Die Position im Vec folgt dem
+/// ersten Auftreten des Pfads, der Branch-Wert dem letzten Klick.
 pub fn dedup_branch_switches(
     switches: Vec<(std::path::PathBuf, String)>,
 ) -> Vec<(std::path::PathBuf, String)> {

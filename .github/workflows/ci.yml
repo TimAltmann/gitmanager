@@ -74,10 +74,18 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME ist kein gültiges Semver (erwartet vX.Y.Z)"
             exit 1
           fi
-          # Nur erste version-Zeile ([package]) patchen, Dependencies bleiben unangetastet
-          sed -i -E "0,/^version = \".*\"/s//version = \"$TAG_VERSION\"/" Cargo.toml
+          # Nur version-Zeile innerhalb [package] patchen (nicht erste
+          # version-Zeile der Datei: ein [workspace]-Eintrag oder Kommentar
+          # davor würde sonst still die falsche Zeile treffen).
+          awk -v ver="$TAG_VERSION" '
+            /^\[package\]/{in_pkg=1; print; next}
+            /^\[/{in_pkg=0}
+            in_pkg && /^version = "/ && !done{sub(/^version = ".*"/, "version = \"" ver "\""); done=1}
+            {print}' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+          COUNT=$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version = "'"$TAG_VERSION"'"$/{c++} END{print c+0}' Cargo.toml)
+          [ "$COUNT" = "1" ] || { echo "::error::Versionssync hat nicht genau 1 [package]-version gesetzt (count=$COUNT)"; exit 1; }
           echo "Cargo.toml nach Sync:"
-          grep -m1 '^version' Cargo.toml
+          awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version = /' Cargo.toml
           grep -A2 '^\[package\]' Cargo.toml | head -5
 
       - name: Rust cache
@@ -89,14 +97,14 @@ jobs:
       - name: Verify embedded version
         shell: bash
         run: |
-          echo "Cargo.toml:"
-          grep -m1 '^version' Cargo.toml
+          echo "Cargo.toml ([package]):"
+          awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version = /' Cargo.toml
           echo "Cargo.lock (gitmanager-Eintrag):"
           grep -A2 'name = "gitmanager"' Cargo.lock | head -5 || true
           if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
             TAG_VERSION="${GITHUB_REF_NAME#v}"
             echo "Erwarte Binary-Version: $TAG_VERSION"
-            grep -q "^version = \"$TAG_VERSION\"$" Cargo.toml || { echo "::error::Cargo.toml version != Tag $TAG_VERSION"; exit 1; }
+            awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version = /' Cargo.toml | grep -q "^version = \"$TAG_VERSION\"$" || { echo "::error::Cargo.toml [package] version != Tag $TAG_VERSION"; exit 1; }
             grep -A2 'name = "gitmanager"' Cargo.lock | grep -q "version = \"$TAG_VERSION\"" || { echo "::error::Cargo.lock gitmanager version != Tag $TAG_VERSION (Build hat Lock nicht aktualisiert?)"; exit 1; }
             echo "Version-Sync OK: $TAG_VERSION"
           else

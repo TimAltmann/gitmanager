@@ -191,8 +191,11 @@ mod imp {
             )
         });
         // Zusätzlich 300ms-Debounce gegen schnelle Doppel-Toggles.
+        // Mutabel: Toggles innerhalb desselben Drains müssen nachfolgende
+        // Events desselben Batches ebenfalls entprellen (sonst öffnet das
+        // zweite Up das gerade geöffnete Popup sofort wieder).
         let now = Instant::now();
-        let recently_toggled = lock_shared(shared)
+        let mut recently_toggled = lock_shared(shared)
             .last_toggle_at
             .map(|t| now.duration_since(t) < std::time::Duration::from_millis(300))
             .unwrap_or(false);
@@ -210,6 +213,7 @@ mod imp {
                     }
                     toggle_popup(shared, ctx, rect);
                     lock_shared(shared).last_toggle_at = Some(Instant::now());
+                    recently_toggled = true;
                 }
                 TrayIconEvent::Click {
                     button: MouseButton::Right,
@@ -223,6 +227,7 @@ mod imp {
                     // Rechtsklick togglet ebenfalls das Custom-Popup (kein natives Menü).
                     toggle_popup(shared, ctx, rect);
                     lock_shared(shared).last_toggle_at = Some(Instant::now());
+                    recently_toggled = true;
                 }
                 TrayIconEvent::Click {
                     button: MouseButton::Right,
@@ -234,12 +239,16 @@ mod imp {
                     button: MouseButton::Left,
                     ..
                 } => {
-                    let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    // Einheitlich über lock_shared (mit Poison-Logging) statt direktem lock().
+                    // last_toggle_at setzen: sonst öffnet ein nachfolgendes Up aus der
+                    // Doppelklick-Sequenz das Popup hinter dem Hauptfenster wieder.
+                    let mut guard = lock_shared(shared);
                     if guard.popup_open {
                         guard.popup_open = false;
                         guard.popup_rect = None;
                         guard.popup_opened_at = None;
                     }
+                    guard.last_toggle_at = Some(Instant::now());
                     let _ = guard.action_tx.send(TrayAction::ShowMainWindow);
                     drop(guard);
                     ctx.request_repaint();
@@ -274,13 +283,11 @@ mod imp {
         };
 
         // M1+N1: erst MRU-sortieren + truncaten (nur sichtbare Top-N klonen),
-        // dann Höhe aus den tatsächlich sichtbaren Repos berechnen.
+        // dann Höhe pro sichtbarem Repo summieren (exakt bei gemischten Dropdowns).
         let tray_limit = config_arc.tray_icons.max_display.clamp(5, 50);
         let repos_visible = tray_popup::sorted_visible_repos(&repos_arc, &config_arc, tray_limit);
-        let has_solution_dropdown = tray_popup::has_visible_solution_dropdown(&repos_visible);
         let popup_width: f32 = 360.0;
-        let popup_height: f32 =
-            tray_popup::popup_height(repos_visible.len(), has_solution_dropdown);
+        let popup_height: f32 = tray_popup::popup_height_for_visible(&repos_visible);
         let popup_size = Vec2::new(popup_width, popup_height);
 
         // Position calculation (Heuristik F-14: nimmt horizontale, gleich große

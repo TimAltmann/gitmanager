@@ -589,15 +589,26 @@ pub fn sort_repos_mru(repos: &mut [RepoInfo], config: &AppConfig) {
     repos.sort_by_key(|a| std::cmp::Reverse(mru_timestamp(config, &a.path)));
 }
 
-/// True when any *visible* repo needs a solution dropdown row.
-pub fn has_visible_solution_dropdown(visible_repos: &[RepoInfo]) -> bool {
-    visible_repos.iter().any(|r| r.solutions.len() > 1)
-}
+const ROW_H: f32 = 66.0;
+const ROW_H_DROPDOWN: f32 = 94.0;
+const POPUP_CHROME: f32 = 90.0;
+const POPUP_MIN_H: f32 = 280.0;
+const POPUP_MAX_H: f32 = 560.0;
 
-/// Popup height for N visible rows (66px normal, 94px with dropdown + 90px chrome).
-pub fn popup_height(visible_count: usize, has_dropdown: bool) -> f32 {
-    let row_height: f32 = if has_dropdown { 94.0 } else { 66.0 };
-    (visible_count as f32 * row_height + 90.0).clamp(280.0, 560.0)
+/// Popup-Höhe aus den sichtbaren Repos summiert (66px normal, 94px pro Repo
+/// mit Solution-Dropdown + 90px Chrome). Exakt auch bei gemischten Zeilen.
+pub fn popup_height_for_visible(visible_repos: &[RepoInfo]) -> f32 {
+    let rows: f32 = visible_repos
+        .iter()
+        .map(|r| {
+            if r.solutions.len() > 1 {
+                ROW_H_DROPDOWN
+            } else {
+                ROW_H
+            }
+        })
+        .sum();
+    (rows + POPUP_CHROME).clamp(POPUP_MIN_H, POPUP_MAX_H)
 }
 
 /// Returns only the visible Top-N repos, MRU-sorted (N1: avoids full Vec deep-clone
@@ -651,41 +662,40 @@ mod tests {
     }
 
     #[test]
-    fn popup_height_uses_visible_dropdown_only() {
-        // M1: Höhe muss aus sichtbaren Repos kommen, nicht aus unsortierter Quelle.
-        assert_eq!(
-            popup_height(10, false),
-            (10.0_f32 * 66.0 + 90.0).clamp(280.0, 560.0)
-        );
-        assert_eq!(
-            popup_height(10, true),
-            (10.0_f32 * 94.0 + 90.0).clamp(280.0, 560.0)
-        );
-        assert_eq!(popup_height(0, false), 280.0);
-        assert_eq!(popup_height(50, true), 560.0);
-    }
-
-    #[test]
-    fn visible_dropdown_detection() {
+    fn popup_height_sums_per_repo_mixed_dropdowns() {
+        // F1-1/F4-5: früheres globales Bool überschätzte bei gemischten Zeilen.
+        // 2 normale Zeilen (66) + 1 Dropdown-Zeile (94) + 90 Chrome = 316.
         use crate::git::{RepoInfo, SolutionFile};
         let mk = |n_sln: usize| {
             let mut r = RepoInfo::new(
-                std::path::PathBuf::from(format!("/tmp/r{n_sln}")),
+                std::path::PathBuf::from(format!("/tmp/m{n_sln}")),
                 "main".to_string(),
                 false,
                 false,
             );
             r.solutions = (0..n_sln)
                 .map(|i| SolutionFile {
-                    path: std::path::PathBuf::from(format!("/tmp/r{n_sln}/{i}.sln")),
+                    path: std::path::PathBuf::from(format!("/tmp/m{n_sln}/{i}.sln")),
                     relative: format!("{i}.sln"),
                 })
                 .collect();
             r
         };
-        assert!(!has_visible_solution_dropdown(&[mk(1), mk(0)]));
-        assert!(has_visible_solution_dropdown(&[mk(1), mk(2)]));
-        assert!(!has_visible_solution_dropdown(&[]));
+        let repos = vec![mk(0), mk(1), mk(2)];
+        assert_eq!(popup_height_for_visible(&repos), 2.0 * 66.0 + 94.0 + 90.0);
+        assert_eq!(popup_height_for_visible(&[]), 280.0);
+        // Homogen (Clamp beachten: 2 Zeilen lägen unter MIN 280):
+        assert_eq!(
+            popup_height_for_visible(&[mk(0), mk(1), mk(0), mk(1)]),
+            4.0 * 66.0 + 90.0
+        );
+        assert_eq!(
+            popup_height_for_visible(&[mk(2), mk(3), mk(2), mk(3)]),
+            4.0 * 94.0 + 90.0
+        );
+        // Clamp bleibt: 50 Dropdown-Zeilen deckeln auf 560.
+        let many: Vec<RepoInfo> = (0..50).map(|_| mk(2)).collect();
+        assert_eq!(popup_height_for_visible(&many), 560.0);
     }
 
     #[test]
@@ -754,7 +764,7 @@ mod tests {
     #[test]
     fn truncate_label_keeps_short_and_cuts_long_char_safe() {
         assert_eq!(truncate_label("main", 40), "main");
-        let s40: String = std::iter::repeat('x').take(40).collect();
+        let s40: String = "x".repeat(40);
         assert_eq!(truncate_label(&s40, 40), s40);
         // Lang: max Zeichen inkl. Ellipse, Anfang bleibt erhalten
         let long = "feature/sehr-langer-branch-name-der-das-popup-sprengen-wuerde";
