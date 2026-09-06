@@ -245,6 +245,11 @@ impl MyApp {
             self.error = Some(err);
             self.status_message = None;
             self.status_message_time = None;
+            // Async Tray-Launches (Agent/Shell) landen hier ohne Ursprung;
+            // hidden impliziert Tray-Ursprung → Fehler sichtbar machen (7a).
+            if should_reveal_main_on_error(self.window_visible, self.should_quit) {
+                self.show_main_window(ctx);
+            }
             ctx.request_repaint();
         }
         while let Ok(res) = self.config_update_rx.try_recv() {
@@ -360,6 +365,14 @@ pub fn should_minimize_to_tray(
     tray_available: bool,
 ) -> bool {
     minimize_cfg && !should_quit && tray_available
+}
+
+/// Entscheidet, ob nach einem Tray-initiierten Fehler das Hauptfenster
+/// geöffnet wird (7a): `self.error` im versteckten Fenster wäre unsichtbar.
+/// Beim Beenden (`should_quit`) nie öffnen; bei sichtbarem Fenster nichts tun.
+/// Cross-platform: Aufrufer in `poll_scan` (alle OS) + Tray-Actions (Windows).
+pub fn should_reveal_main_on_error(window_visible: bool, should_quit: bool) -> bool {
+    !window_visible && !should_quit
 }
 
 #[cfg(target_os = "windows")]
@@ -489,6 +502,9 @@ impl MyApp {
                             "save_failed",
                             &[&format!("{e:#}")],
                         ));
+                        if should_reveal_main_on_error(self.window_visible, self.should_quit) {
+                            self.show_main_window(ctx);
+                        }
                     } else {
                         if let Some(repo) = self.repos.iter_mut().find(|r| r.path == repo_path) {
                             repo.selected_solution = Some(sln_path.clone());
@@ -532,6 +548,12 @@ impl MyApp {
                                     "IDE '{}' konnte nicht gestartet werden: {e:#}",
                                     ide.display_name
                                 ));
+                                if should_reveal_main_on_error(
+                                    self.window_visible,
+                                    self.should_quit,
+                                ) {
+                                    self.show_main_window(ctx);
+                                }
                             }
                         }
                     }
@@ -583,7 +605,10 @@ impl MyApp {
                         }
                         Err(e) => {
                             self.error =
-                                Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"))
+                                Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"));
+                            if should_reveal_main_on_error(self.window_visible, self.should_quit) {
+                                self.show_main_window(ctx);
+                            }
                         }
                     }
                     self.record_usage(&path, UsageType::Open);
@@ -1813,6 +1838,16 @@ mod tests {
         assert!(!should_minimize_to_tray(true, true, true));
         assert!(!should_minimize_to_tray(false, false, true));
         assert!(!should_minimize_to_tray(false, false, false));
+    }
+
+    #[test]
+    fn reveal_main_on_error_only_when_hidden_and_not_quitting() {
+        // 7a: Tray-Fehler im versteckten Fenster wäre unsichtbar → Main öffnen.
+        // Beim Beenden nie öffnen; bei sichtbarem Fenster ist nichts zu tun.
+        assert!(should_reveal_main_on_error(false, false));
+        assert!(!should_reveal_main_on_error(true, false));
+        assert!(!should_reveal_main_on_error(false, true));
+        assert!(!should_reveal_main_on_error(true, true));
     }
 
     #[test]

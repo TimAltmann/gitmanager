@@ -583,12 +583,6 @@ pub fn mru_timestamp(config: &AppConfig, repo_path: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Sorts repos by MRU (newest first). Pure helper for testability (M1).
-#[allow(dead_code)]
-pub fn sort_repos_mru(repos: &mut [RepoInfo], config: &AppConfig) {
-    repos.sort_by_key(|a| std::cmp::Reverse(mru_timestamp(config, &a.path)));
-}
-
 const ROW_H: f32 = 66.0;
 const ROW_H_DROPDOWN: f32 = 94.0;
 const POPUP_CHROME: f32 = 90.0;

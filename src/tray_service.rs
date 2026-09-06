@@ -221,7 +221,9 @@ mod imp {
                     rect,
                     ..
                 } => {
-                    if recently_toggled {
+                    // Symmetrisch zum Left-Guard: DoubleClick-Left im selben Batch
+                    // unterdrückt auch Right-Up (sonst Popup hinter Main-Fenster).
+                    if has_left_double || recently_toggled {
                         continue;
                     }
                     // Rechtsklick togglet ebenfalls das Custom-Popup (kein natives Menü).

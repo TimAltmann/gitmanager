@@ -104,8 +104,8 @@ jobs:
           if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
             TAG_VERSION="${GITHUB_REF_NAME#v}"
             echo "Erwarte Binary-Version: $TAG_VERSION"
-            awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version = /' Cargo.toml | grep -q "^version = \"$TAG_VERSION\"$" || { echo "::error::Cargo.toml [package] version != Tag $TAG_VERSION"; exit 1; }
-            grep -A2 'name = "gitmanager"' Cargo.lock | grep -q "version = \"$TAG_VERSION\"" || { echo "::error::Cargo.lock gitmanager version != Tag $TAG_VERSION (Build hat Lock nicht aktualisiert?)"; exit 1; }
+            awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version = /' Cargo.toml | grep -q "^version = \"$TAG_VERSION\"[[:space:]]*$" || { echo "::error::Cargo.toml [package] version != Tag $TAG_VERSION"; exit 1; }
+            grep -A2 'name = "gitmanager"' Cargo.lock | grep -q "version = \"$TAG_VERSION\"[[:space:]]*$" || { echo "::error::Cargo.lock gitmanager version != Tag $TAG_VERSION (Build hat Lock nicht aktualisiert?)"; exit 1; }
             echo "Version-Sync OK: $TAG_VERSION"
           else
             echo "Kein Tag-Build, keine Assertion."

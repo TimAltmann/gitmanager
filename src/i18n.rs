@@ -559,6 +559,11 @@ mod tests {
             "tray_branch_limit_desc",
             "tray_branch_limit_summary",
             "tray_all_hidden_warn",
+            "tray_limit_label",
+            "tray_direct_label",
+            "update_available_title",
+            "update_available_msg",
+            "open_link",
         ] {
             assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
             assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");

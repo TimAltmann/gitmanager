@@ -18,12 +18,15 @@ struct GithubRelease {
 }
 
 pub(crate) fn normalize_version(v: &str) -> String {
-    let v = v.trim();
-    let v = v
+    // Außen trimmen (Präfix-Erkennung), genau ein v/V-Präfix strippen,
+    // Rest trimmen (robuste Tags wie "v 1.2.3").
+    let trimmed = v.trim();
+    trimmed
         .strip_prefix('v')
-        .or_else(|| v.strip_prefix('V'))
-        .unwrap_or(v);
-    v.to_string()
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed)
+        .trim()
+        .to_string()
 }
 
 /// Validiert die lokale Binary-Version rein lokal (kein Netzwerk).
@@ -103,6 +106,8 @@ mod tests {
         assert_eq!(normalize_version("V1.2.3"), "1.2.3");
         assert_eq!(normalize_version("0.1.0"), "0.1.0");
         assert_eq!(normalize_version(" v0.0.4 "), "0.0.4");
+        // Leerzeichen nach Präfix (robuste Tags) mittimmen:
+        assert_eq!(normalize_version("v 1.2.3"), "1.2.3");
     }
 
     #[test]
