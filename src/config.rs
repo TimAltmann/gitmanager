@@ -7,7 +7,50 @@ use std::path::{Path, PathBuf};
 
 // --- Default helpers ---
 fn default_config_version() -> u32 {
-    7
+    10
+}
+fn default_tray_max_display() -> usize {
+    10
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrayIconConfig {
+    /// Reihenfolge der Icons im Tray-Popup (IDs in Anzeigereihenfolge)
+    #[serde(default)]
+    pub icon_order: Vec<String>,
+    /// Ausgeblendete Icons (IDs)
+    #[serde(default)]
+    pub hidden_icon_ids: Vec<String>,
+    /// Maximale Anzahl angezeigter Repos im Popup (für MRU)
+    #[serde(default = "default_tray_max_display")]
+    pub max_display: usize,
+}
+
+impl Default for TrayIconConfig {
+    fn default() -> Self {
+        Self {
+            icon_order: Vec::new(),
+            hidden_icon_ids: Vec::new(),
+            max_display: default_tray_max_display(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RepoUsage {
+    /// Unix timestamp wann zuletzt geöffnet (IDE/Explorer/Terminal/Agent)
+    #[serde(default)]
+    pub last_opened: Option<u64>,
+    #[serde(default)]
+    pub last_branch_switch: Option<u64>,
+    #[serde(default)]
+    pub last_config_change: Option<u64>,
+    #[serde(default)]
+    pub open_count: u32,
+    #[serde(default)]
+    pub branch_switch_count: u32,
+    #[serde(default)]
+    pub config_change_count: u32,
 }
 fn default_active_profile() -> String {
     "dotnet".to_string()
@@ -20,6 +63,15 @@ fn default_language() -> Language {
 }
 fn default_branch_limit() -> usize {
     200
+}
+fn default_minimize_to_tray() -> bool {
+    true
+}
+fn default_check_for_updates() -> bool {
+    true
+}
+fn default_tray_branch_limit() -> usize {
+    20
 }
 
 // --- Terminal ---
@@ -105,6 +157,9 @@ pub struct IdeConfig {
     /// Wenn true: IDE ohne Argumente starten (nur cwd = repo_path)
     #[serde(default)]
     pub no_args: bool,
+    /// Pfad zu Custom Icon im AppData/icons Verzeichnis (kopiert via FilePicker). None = Default Icon.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 impl IdeConfig {
@@ -362,6 +417,7 @@ fn default_dotnet_profile() -> LanguageProfile {
                 use_shell: false,
                 allow_unsafe: false,
                 no_args: false,
+                icon: None,
             },
             IdeConfig {
                 id: "vscode".to_string(),
@@ -372,6 +428,7 @@ fn default_dotnet_profile() -> LanguageProfile {
                 use_shell: false,
                 allow_unsafe: false,
                 no_args: false,
+                icon: None,
             },
             IdeConfig {
                 id: "rider".to_string(),
@@ -382,6 +439,7 @@ fn default_dotnet_profile() -> LanguageProfile {
                 use_shell: false,
                 allow_unsafe: false,
                 no_args: false,
+                icon: None,
             },
         ],
         ide_order: Vec::new(),
@@ -422,6 +480,9 @@ pub struct AgentProfile {
     pub launch_mode: AgentLaunchMode,
     #[serde(default)]
     pub terminal_override: Option<TerminalPreference>,
+    /// Pfad zu Custom Icon im AppData/icons Verzeichnis (kopiert via FilePicker). None = Default Icon.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 fn default_agents() -> Vec<AgentProfile> {
@@ -434,6 +495,7 @@ fn default_agents() -> Vec<AgentProfile> {
             command: None,
             launch_mode: AgentLaunchMode::Terminal,
             terminal_override: None,
+            icon: None,
         },
         AgentProfile {
             id: "codex".to_string(),
@@ -443,6 +505,7 @@ fn default_agents() -> Vec<AgentProfile> {
             command: None,
             launch_mode: AgentLaunchMode::Terminal,
             terminal_override: None,
+            icon: None,
         },
         AgentProfile {
             id: "gemini".to_string(),
@@ -452,6 +515,7 @@ fn default_agents() -> Vec<AgentProfile> {
             command: None,
             launch_mode: AgentLaunchMode::Terminal,
             terminal_override: None,
+            icon: None,
         },
         AgentProfile {
             id: "copilot".to_string(),
@@ -461,6 +525,7 @@ fn default_agents() -> Vec<AgentProfile> {
             command: None,
             launch_mode: AgentLaunchMode::Terminal,
             terminal_override: None,
+            icon: None,
         },
         AgentProfile {
             id: "cursor".to_string(),
@@ -470,6 +535,7 @@ fn default_agents() -> Vec<AgentProfile> {
             command: None,
             launch_mode: AgentLaunchMode::Terminal,
             terminal_override: None,
+            icon: None,
         },
         AgentProfile {
             id: "aider".to_string(),
@@ -479,6 +545,7 @@ fn default_agents() -> Vec<AgentProfile> {
             command: None,
             launch_mode: AgentLaunchMode::Terminal,
             terminal_override: None,
+            icon: None,
         },
     ]
 }
@@ -542,6 +609,21 @@ pub struct AppConfig {
 
     #[serde(default = "default_branch_limit")]
     pub branch_display_limit: usize,
+
+    #[serde(default = "default_minimize_to_tray")]
+    pub minimize_to_tray: bool,
+
+    #[serde(default = "default_check_for_updates")]
+    pub check_for_updates: bool,
+
+    #[serde(default = "default_tray_branch_limit")]
+    pub tray_branch_limit: usize,
+
+    #[serde(default)]
+    pub tray_icons: TrayIconConfig,
+
+    #[serde(default)]
+    pub repo_usage: HashMap<String, RepoUsage>,
 }
 
 impl Default for AppConfig {
@@ -566,6 +648,11 @@ impl Default for AppConfig {
             repo_state: HashMap::new(),
             language: default_language(),
             branch_display_limit: default_branch_limit(),
+            minimize_to_tray: default_minimize_to_tray(),
+            check_for_updates: default_check_for_updates(),
+            tray_branch_limit: default_tray_branch_limit(),
+            tray_icons: TrayIconConfig::default(),
+            repo_usage: HashMap::new(),
         }
     }
 }
@@ -611,6 +698,73 @@ impl AppConfig {
             let cfg_dir = dirs.config_dir();
             cfg_dir.join("config.json")
         })
+    }
+
+    pub fn icons_dir() -> Option<PathBuf> {
+        Self::config_path().and_then(|p| p.parent().map(|d| d.join("icons")))
+    }
+
+    pub fn copy_icon_to_storage(src: &Path) -> Result<PathBuf, String> {
+        let dir = Self::icons_dir().ok_or_else(|| "Kein Config-Pfad ermittelbar".to_string())?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("Icons-Verzeichnis erstellen fehlgeschlagen: {e}"))?;
+        let ext = src
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_lowercase();
+        let allowed = ["svg", "png", "ico", "jpg", "jpeg"];
+        if !allowed.contains(&ext.as_str()) {
+            return Err(format!(
+                "Ungültiges Icon-Format '.{}' – erlaubt: svg, png, ico, jpg",
+                ext
+            ));
+        }
+        // Size limit 2 MB
+        if let Ok(meta) = std::fs::metadata(src) {
+            if meta.len() > 2 * 1024 * 1024 {
+                return Err("Icon-Datei zu groß (max 2 MB)".to_string());
+            }
+        }
+        let stem = src
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("icon")
+            .replace(' ', "_")
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .collect::<String>();
+        let stem = if stem.is_empty() {
+            "icon".to_string()
+        } else {
+            stem
+        };
+        // Unique suffix via timestamp + random
+        let uniq = format!(
+            "{}{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis().to_string())
+                .unwrap_or_else(|_| "0".to_string()),
+            std::process::id()
+        );
+        let dest_name = format!("{}_{}.{}", stem, &uniq[uniq.len().saturating_sub(6)..], ext);
+        let dest = dir.join(dest_name);
+        std::fs::copy(src, &dest).map_err(|e| format!("Icon kopieren fehlgeschlagen: {e}"))?;
+        Ok(dest)
+    }
+
+    pub fn remove_icon_file(path_str: &str) {
+        if path_str.is_empty() {
+            return;
+        }
+        let p = PathBuf::from(path_str);
+        // Only remove files inside icons_dir for safety
+        if let Some(dir) = Self::icons_dir() {
+            if p.starts_with(&dir) && p.exists() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
     }
 
     /// Lädt die Config von Disk oder gibt Default zurück
@@ -782,10 +936,114 @@ impl AppConfig {
             cfg.config_version = 7;
             let _ = cfg.save();
         }
+        if cfg.config_version < 8 {
+            for p in &mut cfg.profiles {
+                for ide in &mut p.ides {
+                    if let Some(ic) = ide.icon.as_mut() {
+                        let t = ic.trim().to_string();
+                        if t.is_empty() {
+                            ide.icon = None;
+                        } else {
+                            *ic = t;
+                        }
+                    }
+                }
+            }
+            for a in &mut cfg.agents {
+                if let Some(ic) = a.icon.as_mut() {
+                    let t = ic.trim().to_string();
+                    if t.is_empty() {
+                        a.icon = None;
+                    } else {
+                        *ic = t;
+                    }
+                }
+            }
+            cfg.config_version = 8;
+            let _ = cfg.save();
+        }
+        if cfg.config_version < 9 {
+            // v9: Tray settings introduced
+            // minimize_to_tray default handled via serde default, but ensure tray_branch_limit valid
+            if cfg.tray_branch_limit == 0 {
+                cfg.tray_branch_limit = default_tray_branch_limit();
+            }
+            cfg.config_version = 9;
+            let _ = cfg.save();
+        }
+        if cfg.config_version < 10 {
+            // v10: TrayIconConfig introduced (icon_order, hidden_icon_ids, max_display)
+            // Tray icons: fixed list for MVP ["vscode","vs2022","rider","folder","terminal","claude","codex","gemini","copilot","cursor","aider"]
+            const DEFAULT_TRAY_ICONS: &[&str] = &[
+                "vscode", "vs2022", "rider", "folder", "terminal", "claude", "codex", "gemini",
+                "copilot", "cursor", "aider",
+            ];
+            if cfg.tray_icons.max_display == 0 {
+                cfg.tray_icons.max_display = default_tray_max_display();
+            }
+            cfg.tray_icons.max_display = cfg.tray_icons.max_display.clamp(5, 50);
+            // hidden ids dedup/sort
+            cfg.tray_icons.hidden_icon_ids.sort();
+            cfg.tray_icons.hidden_icon_ids.dedup();
+            // filter hidden to valid ids only (keep custom hidden as is for forward compat? filter to known list)
+            // keep only known ids for migration, custom unknown kept as is (no filtering)
+            // icon_order dedup preserve order
+            {
+                let mut seen = std::collections::HashSet::new();
+                cfg.tray_icons
+                    .icon_order
+                    .retain(|id| seen.insert(id.clone()));
+            }
+            if cfg.tray_icons.icon_order.is_empty() {
+                cfg.tray_icons.icon_order =
+                    DEFAULT_TRAY_ICONS.iter().map(|s| s.to_string()).collect();
+            } else {
+                // ensure all default icons present (append missing)
+                for id in DEFAULT_TRAY_ICONS {
+                    if !cfg.tray_icons.icon_order.contains(&id.to_string()) {
+                        cfg.tray_icons.icon_order.push(id.to_string());
+                    }
+                }
+                // also remove invalid? keep as is for forward compat, but ensure deduped above
+            }
+            // RepoUsage introduced together with TrayIconConfig v10 (Task 5 MRU)
+            // Existing configs before v10 have no repo_usage; ensure initialized (empty map if missing)
+            if cfg.repo_usage.is_empty() {
+                cfg.repo_usage = HashMap::new();
+            }
+            // Windows key normalization for repo_usage (case-insensitive)
+            #[cfg(windows)]
+            {
+                let mut normalized: HashMap<String, RepoUsage> = HashMap::new();
+                for (k, v) in cfg.repo_usage.drain() {
+                    let nk = k.to_lowercase();
+                    normalized.entry(nk).or_insert(v);
+                }
+                cfg.repo_usage = normalized;
+            }
+            cfg.config_version = 10;
+            let _ = cfg.save();
+        }
         if cfg.branch_display_limit == 0 {
             cfg.branch_display_limit = default_branch_limit();
         }
         cfg.branch_display_limit = cfg.branch_display_limit.clamp(50, 500);
+        if cfg.tray_branch_limit == 0 {
+            cfg.tray_branch_limit = default_tray_branch_limit();
+        }
+        cfg.tray_branch_limit = cfg.tray_branch_limit.clamp(5, 50);
+        if cfg.tray_icons.max_display == 0 {
+            cfg.tray_icons.max_display = default_tray_max_display();
+        }
+        cfg.tray_icons.max_display = cfg.tray_icons.max_display.clamp(5, 50);
+        cfg.tray_icons.hidden_icon_ids.sort();
+        cfg.tray_icons.hidden_icon_ids.dedup();
+        {
+            let mut seen = std::collections::HashSet::new();
+            cfg.tray_icons
+                .icon_order
+                .retain(|id| seen.insert(id.clone()));
+        }
         if cfg.max_depth == 0 {
             cfg.max_depth = 2;
         }
@@ -805,6 +1063,16 @@ impl AppConfig {
                 normalized.entry(nk).or_insert(v);
             }
             cfg.repo_state = normalized;
+        }
+        // RepoUsage keys similarly normalize on Windows
+        #[cfg(windows)]
+        {
+            let mut normalized: HashMap<String, RepoUsage> = HashMap::new();
+            for (k, v) in cfg.repo_usage.drain() {
+                let nk = k.to_lowercase();
+                normalized.entry(nk).or_insert(v);
+            }
+            cfg.repo_usage = normalized;
         }
 
         // Profile validieren
@@ -1048,7 +1316,7 @@ impl AppConfig {
         self.active_agent_id = self.active_agent_ids.first().cloned();
     }
 
-    fn repo_state_key(path: &Path) -> String {
+    pub fn repo_state_key(path: &Path) -> String {
         // Auf Windows ist das Dateisystem case-insensitiv – Keys normalisieren, sonst gehen
         // Selections verloren wenn Pfade mal "C:\Dev\MyApp" und mal "c:\dev\myapp" lauten (Explorer, Symlink, canonicalize)
         let s = path.to_string_lossy().to_string();
@@ -1229,6 +1497,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         };
         assert_eq!(ide.effective_program(), "code");
     }
@@ -1244,6 +1514,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         };
         assert_eq!(ide.effective_program(), "devenv");
         let ide2 = IdeConfig {
@@ -1265,6 +1537,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         };
         assert_eq!(ide.effective_program(), "code");
         let ide2 = IdeConfig {
@@ -1287,6 +1561,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         };
         assert_eq!(ide.effective_args(), vec!["{file}", "--reuse-window"]);
     }
@@ -1302,6 +1578,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         };
         assert_eq!(ide.effective_args(), vec!["arg1", "arg2"]);
     }
@@ -1317,6 +1595,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         };
         assert_eq!(ide.effective_args(), vec!["{file}"]);
         let ide2 = IdeConfig {
@@ -1337,6 +1617,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: false,
+
+            icon: None,
         };
         assert_eq!(ide.effective_args(), vec!["custom"]);
     }
@@ -1352,6 +1634,8 @@ mod tests {
             use_shell: true,
             allow_unsafe: true,
             no_args: false,
+
+            icon: None,
         };
         let json = serde_json::to_string(&ide).unwrap();
         let de: IdeConfig = serde_json::from_str(&json).unwrap();
@@ -1674,6 +1958,8 @@ mod tests {
             command: Some("echo hi".to_string()),
             launch_mode: AgentLaunchMode::Detached,
             terminal_override: Some(TerminalPreference::Cmd),
+
+            icon: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         let de: AgentProfile = serde_json::from_str(&json).unwrap();
@@ -1728,7 +2014,7 @@ mod tests {
     fn config_default_has_valid_state() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.max_depth, 2);
-        assert_eq!(cfg.config_version, 7);
+        assert_eq!(cfg.config_version, 10);
         assert_eq!(cfg.active_profile_id, "dotnet");
         assert!(!cfg.profiles.is_empty());
         assert_eq!(cfg.agents.len(), 6);
@@ -2004,7 +2290,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded.roots.len(), 2);
         assert_eq!(loaded.max_depth, 3);
-        assert_eq!(loaded.config_version, 7);
+        assert_eq!(loaded.config_version, 10);
     }
 
     #[test]
@@ -2447,6 +2733,8 @@ mod tests {
             use_shell: false,
             allow_unsafe: false,
             no_args: true,
+
+            icon: None,
         };
         assert!(ide.effective_args().is_empty());
         ide.no_args = false;
@@ -2505,6 +2793,8 @@ mod tests {
                     use_shell: false,
                     allow_unsafe: false,
                     no_args: false,
+
+                    icon: None,
                 },
                 IdeConfig {
                     id: "b".to_string(),
@@ -2515,6 +2805,8 @@ mod tests {
                     use_shell: false,
                     allow_unsafe: false,
                     no_args: false,
+
+                    icon: None,
                 },
                 IdeConfig {
                     id: "c".to_string(),
@@ -2525,6 +2817,8 @@ mod tests {
                     use_shell: false,
                     allow_unsafe: false,
                     no_args: false,
+
+                    icon: None,
                 },
             ],
             default_ide_id: None,

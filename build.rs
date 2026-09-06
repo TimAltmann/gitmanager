@@ -1,7 +1,30 @@
+fn windows_file_version() -> String {
+    // CARGO_PKG_VERSION kommt aus Cargo.toml (in CI ggf. zuvor aus dem Git-Tag synchronisiert).
+    // Windows FILEVERSION braucht 4 numerische Teile: major.minor.patch.0
+    let v = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".to_string());
+    let core = v.split(['-', '+']).next().unwrap_or("0.1.0");
+    let mut parts: Vec<&str> = core.split('.').collect();
+    while parts.len() < 3 {
+        parts.push("0");
+    }
+    let nums: Vec<String> = parts
+        .iter()
+        .take(3)
+        .map(|p| {
+            p.parse::<u64>()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|_| "0".to_string())
+        })
+        .collect();
+    format!("{}.{}.{}.0", nums[0], nums[1], nums[2])
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=assets/icon.ico");
     println!("cargo:rerun-if-changed=assets/icon.png");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION");
 
     // Icon nur für Windows-Target einbetten – funktioniert auch beim Cross-Compile von Linux
     // CARGO_CFG_TARGET_OS ist "windows" wenn --target x86_64-pc-windows-gnu/msvc aktiv ist
@@ -22,9 +45,13 @@ fn main() {
             res.set_icon(&icon_path);
             // Vollständiges Manifest mit asInvoker + compatibility (verhindert SmartScreen "Herausgeber nicht verifiziert")
             // Ohne compatibility wird die EXE von Windows als legacy eingestuft und als nicht verifiziert angezeigt.
-            res.set_manifest(r#"
+            // assemblyIdentity-Version wird aus CARGO_PKG_VERSION abgeleitet (in CI aus dem Git-Tag),
+            // damit Datei-Version und Update-Check (CARGO_PKG_VERSION vs. Release-Tag) konsistent bleiben.
+            let file_version = windows_file_version();
+            let manifest = format!(
+                r#"
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="0.1.0.0" processorArchitecture="*" name="gitmanager" type="win32"/>
+  <assemblyIdentity version="{file_version}" processorArchitecture="*" name="gitmanager" type="win32"/>
   <description>gitmanager - Git Repository Manager</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
@@ -35,11 +62,11 @@ fn main() {
   </trustInfo>
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
-      <supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}"/>
-      <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/>
-      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/>
-      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
-      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+      <supportedOS Id="{{e2011457-1546-43c5-a5fe-008deee3d3f0}}"/>
+      <supportedOS Id="{{35138b9a-5d96-4fbd-8e2d-a2440225f93a}}"/>
+      <supportedOS Id="{{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}}"/>
+      <supportedOS Id="{{1f676c76-80e1-4239-95bb-83d0f6d0da78}}"/>
+      <supportedOS Id="{{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}}"/>
     </application>
   </compatibility>
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
@@ -49,7 +76,9 @@ fn main() {
     </windowsSettings>
   </application>
 </assembly>
-"#);
+"#
+            );
+            res.set_manifest(&manifest);
             if let Err(e) = res.compile() {
                 eprintln!("winres Fehler (Icon wird nicht eingebettet): {e}");
                 println!("cargo:warning=winres Fehler: {e}");

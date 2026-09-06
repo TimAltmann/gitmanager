@@ -6,7 +6,10 @@ mod config_parser;
 mod git;
 mod i18n;
 mod scanner;
+mod tray;
+mod tray_service;
 mod ui;
+mod updater;
 
 use app::MyApp;
 
@@ -30,7 +33,61 @@ fn load_icon() -> Option<std::sync::Arc<egui::IconData>> {
     None
 }
 
+fn crash_log_filename() -> String {
+    // Prozessweiter Zähler: Doppel-Panic innerhalb derselben Millisekunde
+    // (Panic-während-Panic, Destruktor-Panic bei Unwind) darf nie kollidieren.
+    static CRASH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = CRASH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("gitmanager_crash-{}-{}-{}.log", ms, std::process::id(), n)
+}
+
 fn main() -> eframe::Result<()> {
+    // Panic hook für Tray-Crashes (F-17): vorherigen Hook chainen, Crash-Log mit
+    // Millisekunden-Timestamp + PID (keine Kollision pro Sekunde) nach
+    // ProjectDirs::from("com","gitmanager","gitmanager").data_local_dir()
+    // (Windows: %LOCALAPPDATA%\com\gitmanager\gitmanager), Fallback CWD.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let mut msg = format!("PANIC: {}\n", info);
+        if let Some(s) = info.payload().downcast_ref::<&str>() {
+            msg.push_str(&format!("payload: {}\n", s));
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            msg.push_str(&format!("payload: {}\n", s));
+        }
+        if let Some(loc) = info.location() {
+            msg.push_str(&format!(
+                "at {}:{}:{}\n",
+                loc.file(),
+                loc.line(),
+                loc.column()
+            ));
+        }
+        let filename = crash_log_filename();
+        let written =
+            directories::ProjectDirs::from("com", "gitmanager", "gitmanager").map(|dirs| {
+                let dir = dirs.data_local_dir().to_path_buf();
+                let _ = std::fs::create_dir_all(&dir);
+                let path = dir.join(&filename);
+                std::fs::write(&path, &msg).map(|_| path.display().to_string())
+            });
+        match written {
+            Some(Ok(path)) => eprintln!("{} (crash log: {})", msg, path),
+            _ => {
+                // Fallback CWD, Fehler nicht schlucken ohne Hinweis
+                if let Err(e) = std::fs::write(&filename, &msg) {
+                    eprintln!("{} (crash log failed: {})", msg, e);
+                } else {
+                    eprintln!("{} (crash log: {})", msg, filename);
+                }
+            }
+        }
+        previous_hook(info);
+    }));
+
     let icon = load_icon();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1080.0, 680.0])
@@ -51,4 +108,31 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(MyApp::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crash_filenames_unique_without_sleep() {
+        // Doppel-Panic im selben Prozess innerhalb einer ms darf nie kollidieren
+        // (kein Sleep – muss auch unter Windows-Timer-Granularität halten).
+        let mut names = std::collections::HashSet::new();
+        for _ in 0..100 {
+            names.insert(crash_log_filename());
+        }
+        assert_eq!(names.len(), 100);
+    }
+
+    #[test]
+    fn crash_filename_contains_ms_and_pid() {
+        let a = crash_log_filename();
+        let b = crash_log_filename();
+        assert!(a.starts_with("gitmanager_crash-"));
+        assert!(a.contains(&format!("-{}-", std::process::id())));
+        assert!(a.ends_with(".log"));
+        // Zähler-Suffix statt Sleep: zwei Aufrufe kollidieren nie.
+        assert_ne!(a, b);
+    }
 }
