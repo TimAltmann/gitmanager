@@ -206,7 +206,9 @@ pub fn show_tray_popup_ui(
                         actions.close_popup = true;
                     }
                     let settings_btn = egui::Button::image(
-                        egui::Image::new(ICON_GEAR).fit_to_exact_size(Vec2::splat(12.0)),
+                        egui::Image::new(ICON_GEAR)
+                            .fit_to_exact_size(Vec2::splat(12.0))
+                            .tint(ui.visuals().text_color()),
                     )
                     .small();
                     if ui
@@ -218,7 +220,9 @@ pub fn show_tray_popup_ui(
                         actions.open_main = true;
                     }
                     let refresh_btn = egui::Button::image(
-                        egui::Image::new(ICON_REFRESH).fit_to_exact_size(Vec2::splat(12.0)),
+                        egui::Image::new(ICON_REFRESH)
+                            .fit_to_exact_size(Vec2::splat(12.0))
+                            .tint(ui.visuals().text_color()),
                     )
                     .small();
                     if ui.add(refresh_btn).on_hover_text("Refresh").clicked() {
@@ -375,7 +379,11 @@ fn show_tray_repo_row(
         ui.vertical(|ui| {
             // Row 1: Folder + name + dirty (tight, no branch)
             ui.horizontal(|ui| {
-                ui.add(egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(14.0)));
+                ui.add(
+                    egui::Image::new(ICON_FOLDER)
+                        .fit_to_exact_size(Vec2::splat(14.0))
+                        .tint(ui.visuals().text_color()),
+                );
                 ui.add_space(4.0);
                 // Name uses remaining width minus dirty indicator (16) – no fixed 90 subtraction
                 let name_available = ui.available_width() - 20.0;
@@ -567,7 +575,9 @@ fn show_tray_repo_row(
                     && ui
                         .add(
                             egui::Button::image(
-                                egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(12.0)),
+                                egui::Image::new(ICON_FOLDER)
+                                    .fit_to_exact_size(Vec2::splat(12.0))
+                                    .tint(ui.visuals().text_color()),
                             )
                             .small(),
                         )
@@ -582,7 +592,8 @@ fn show_tray_repo_row(
                         .add(
                             egui::Button::image(
                                 egui::Image::new(ICON_TERMINAL)
-                                    .fit_to_exact_size(Vec2::splat(12.0)),
+                                    .fit_to_exact_size(Vec2::splat(12.0))
+                                    .tint(ui.visuals().text_color()),
                             )
                             .small(),
                         )

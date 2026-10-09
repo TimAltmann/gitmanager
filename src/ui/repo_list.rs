@@ -349,7 +349,8 @@ fn show_repo_row(
                                             !fetching,
                                             egui::Button::image(
                                                 egui::Image::new(ICON_REFRESH)
-                                                    .fit_to_exact_size(Vec2::splat(12.0)),
+                                                    .fit_to_exact_size(Vec2::splat(12.0))
+                                                    .tint(ui.visuals().text_color()),
                                             ),
                                         )
                                         .on_hover_text(tr(
@@ -1018,7 +1019,9 @@ fn show_repo_row(
                     // Shell Button (per Profil show_shell)
                     if effective_profile.show_shell {
                         let shell_btn = egui::Button::image(
-                            egui::Image::new(ICON_TERMINAL).fit_to_exact_size(Vec2::splat(18.0)),
+                            egui::Image::new(ICON_TERMINAL)
+                                .fit_to_exact_size(Vec2::splat(18.0))
+                                .tint(ui.visuals().text_color()),
                         );
                         let resp = ui
                             .add(shell_btn)
@@ -1041,7 +1044,9 @@ fn show_repo_row(
                     // Explorer Button (per Profil show_explorer)
                     if effective_profile.show_explorer {
                         let explorer_btn = egui::Button::image(
-                            egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(18.0)),
+                            egui::Image::new(ICON_FOLDER)
+                                .fit_to_exact_size(Vec2::splat(18.0))
+                                .tint(ui.visuals().text_color()),
                         );
                         let resp = ui
                             .add(explorer_btn)

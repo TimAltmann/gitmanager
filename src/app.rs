@@ -1070,7 +1070,9 @@ impl MyApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(egui::Button::image_and_text(
-                                egui::Image::new(ICON_GEAR).fit_to_exact_size(Vec2::splat(14.0)),
+                                egui::Image::new(ICON_GEAR)
+                                    .fit_to_exact_size(Vec2::splat(14.0))
+                                    .tint(ui.visuals().text_color()),
                                 RichText::new(tr(lang, "settings")).size(12.0),
                             ))
                             .on_hover_text(tr(lang, "settings_tooltip"))
@@ -1086,7 +1088,9 @@ impl MyApp {
                             (ICON_REFRESH, tr(lang, "refresh"))
                         };
                         let btn = egui::Button::image_and_text(
-                            egui::Image::new(refresh_icon).fit_to_exact_size(Vec2::splat(14.0)),
+                            egui::Image::new(refresh_icon)
+                                .fit_to_exact_size(Vec2::splat(14.0))
+                                .tint(ui.visuals().text_color()),
                             RichText::new(refresh_label).size(12.0),
                         );
                         if ui.add_enabled(!self.scanning, btn).clicked() {
@@ -1450,7 +1454,8 @@ impl eframe::App for MyApp {
                             if ui
                                 .add(egui::Button::image(
                                     egui::Image::new(ICON_CROSS)
-                                        .fit_to_exact_size(Vec2::splat(12.0)),
+                                        .fit_to_exact_size(Vec2::splat(12.0))
+                                        .tint(Color32::from_rgb(160, 40, 40)),
                                 ))
                                 .on_hover_text("Schließen")
                                 .clicked()
