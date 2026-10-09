@@ -495,12 +495,14 @@ fn clear_tray_popup(shared: &std::sync::Arc<std::sync::Mutex<crate::tray_service
             guard.popup_open = false;
             guard.popup_rect = None;
             guard.popup_opened_at = None;
+            guard.branch_filters.clear();
         }
         Err(std::sync::TryLockError::Poisoned(e)) => {
             let mut guard = e.into_inner();
             guard.popup_open = false;
             guard.popup_rect = None;
             guard.popup_opened_at = None;
+            guard.branch_filters.clear();
         }
         Err(std::sync::TryLockError::WouldBlock) => {}
     }

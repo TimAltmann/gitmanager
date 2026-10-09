@@ -1,7 +1,10 @@
 use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt, Language};
+use crate::ui::repo_list::filter_branches;
 use egui::{Color32, RichText, Vec2};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 // Icons reused from repo_list
 const ICON_VSCODE: egui::ImageSource = egui::include_image!("../../assets/icons/vscode.svg");
@@ -126,6 +129,31 @@ pub struct TrayPopupActions {
     pub close_popup: bool,
 }
 
+/// Task 6: Tray-Branch-Limit, geclampet auf 5..50 (wie Settings/Config).
+pub fn tray_branch_limit(limit: usize) -> usize {
+    limit.clamp(5, 50)
+}
+
+/// Task 6: Rest-Hinweis unter der Tray-Branch-Liste. `None` wenn alles
+/// Sichtbare angezeigt wird, sonst `+ N weitere (in Hauptfenster)` ohne
+/// Filter bzw. `+ N weitere (filtere)` mit aktivem Filter.
+pub fn tray_branch_overflow_hint(
+    total_matching: usize,
+    shown: usize,
+    filter_active: bool,
+) -> Option<String> {
+    let remaining = total_matching.saturating_sub(shown);
+    if remaining == 0 {
+        return None;
+    }
+    let suffix = if filter_active {
+        "(filtere)"
+    } else {
+        "(in Hauptfenster)"
+    };
+    Some(format!("+ {remaining} weitere {suffix}"))
+}
+
 /// Max. Zeichen für Labels im Tray-Popup (Branch/Solution).
 /// Das Popup ist 360px breit (~320px nutzbar); längere Texte würden die
 /// ComboBox-Buttons und damit die Viewport-Breite über das Fenster treiben.
@@ -169,6 +197,7 @@ pub fn show_tray_popup_ui(
     config: &AppConfig,
     actions: &mut TrayPopupActions,
     notice: Option<&str>,
+    branch_filters: &mut HashMap<PathBuf, String>,
 ) {
     let lang = config.language;
 
@@ -342,7 +371,16 @@ pub fn show_tray_popup_ui(
                                 profile.filtered_agents(&config.agents, &config.active_agent_ids);
                             (&owned_ides, &owned_agents)
                         };
-                        show_tray_repo_row(ui, repo, config, actions, ides, agents, &active_agents);
+                        show_tray_repo_row(
+                            ui,
+                            repo,
+                            config,
+                            actions,
+                            ides,
+                            agents,
+                            &active_agents,
+                            branch_filters,
+                        );
                         ui.add_space(4.0);
                     }
                 });
@@ -355,6 +393,9 @@ pub fn show_tray_popup_ui(
     // Close on clicking outside? Handled via viewport close_requested
 }
 
+// Task 6: 8. Param ist die pro-Repo-Filter-Map (kein Struct-Split, um den
+// #8-Call-Site (vorgefertigte IDE/Agent-Slices) nicht aufzubrechen.
+#[allow(clippy::too_many_arguments)]
 fn show_tray_repo_row(
     ui: &mut egui::Ui,
     repo: &RepoInfo,
@@ -364,7 +405,10 @@ fn show_tray_repo_row(
     profile_ides: &[&crate::config::IdeConfig],
     profile_agents: &[&crate::config::AgentProfile],
     active_agents: &[&crate::config::AgentProfile],
+    // Task 6: pro-Repo Branch-Filter (Dropdown-Suche, KEIN globales Suchfeld).
+    branch_filters: &mut HashMap<PathBuf, String>,
 ) {
+    let lang = config.language;
     let visuals = ui.visuals().clone();
     let frame = egui::Frame::new()
         .fill(visuals.widgets.inactive.bg_fill)
@@ -409,16 +453,36 @@ fn show_tray_repo_row(
             // Row 2: Branch dropdown full width on own line
             {
                 let branches = &repo.branches;
-                let limit = config.tray_branch_limit.clamp(5, 50);
+                let limit = tray_branch_limit(config.tray_branch_limit);
                 if !branches.is_empty() {
-                    let display_branches: Vec<&String> = branches.iter().take(limit).collect();
+                    // Task 6: pro-Repo Filter oben in der ComboBox (Filter-State
+                    // pro Repo-Pfad, geleert bei Close).
+                    let filter = branch_filters.entry(repo.path.clone()).or_default();
                     let current = truncate_label(&repo.branch, TRAY_LABEL_MAX_CHARS);
                     let combo_width = ui.available_width();
                     egui::ComboBox::from_id_salt(("tray_branch", repo.path.clone()))
                         .selected_text(&current)
                         .width(combo_width)
                         .show_ui(ui, |ui| {
-                            for b in display_branches {
+                            let edit_width = ui.available_width();
+                            ui.add(
+                                egui::TextEdit::singleline(&mut *filter)
+                                    .hint_text(tr(lang, "branch_search"))
+                                    .desired_width(edit_width),
+                            );
+                            ui.separator();
+                            let shown = filter_branches(branches, filter.as_str(), limit);
+                            let filter_active = !filter.is_empty();
+                            let total_matching = if filter_active {
+                                let needle = filter.to_lowercase();
+                                branches
+                                    .iter()
+                                    .filter(|b| b.to_lowercase().contains(&needle))
+                                    .count()
+                            } else {
+                                branches.len()
+                            };
+                            for b in &shown {
                                 let is_sel = *b == repo.branch;
                                 if ui
                                     .selectable_label(
@@ -430,19 +494,27 @@ fn show_tray_repo_row(
                                     && *b != repo.branch
                                 {
                                     // Popup bleibt bewusst offen (mehrere Wechsel möglich).
-                                    actions.branch_switch = Some((repo.path.clone(), (*b).clone()));
+                                    actions.branch_switch = Some((repo.path.clone(), b.clone()));
                                 }
                             }
-                            if branches.len() > limit {
+                            if shown.is_empty() {
+                                ui.label(
+                                    RichText::new(tr(lang, "no_matches"))
+                                        .size(10.0)
+                                        .color(Color32::from_rgb(120, 120, 120))
+                                        .italics(),
+                                );
+                            } else if let Some(hint) = tray_branch_overflow_hint(
+                                total_matching,
+                                shown.len(),
+                                filter_active,
+                            ) {
                                 ui.separator();
                                 ui.label(
-                                    RichText::new(format!(
-                                        "+ {} weitere (in Hauptfenster)",
-                                        branches.len() - limit
-                                    ))
-                                    .size(10.0)
-                                    .color(Color32::from_rgb(120, 120, 120))
-                                    .italics(),
+                                    RichText::new(hint)
+                                        .size(10.0)
+                                        .color(Color32::from_rgb(120, 120, 120))
+                                        .italics(),
                                 );
                             }
                         })
@@ -990,6 +1062,48 @@ mod tests {
         // Dialog schlägt Fehler.
         let both = tray_notice_text(Language::En, Some("myrepo"), true).unwrap();
         assert!(both.contains("myrepo"), "dialog wins over error: {both}");
+    }
+
+    #[test]
+    fn tray_branch_limit_clamps_to_five_fifty() {
+        // Task 6: tray_branch_limit clamp 5..50 bleibt erhalten.
+        assert_eq!(tray_branch_limit(20), 20);
+        assert_eq!(tray_branch_limit(5), 5);
+        assert_eq!(tray_branch_limit(50), 50);
+        assert_eq!(tray_branch_limit(0), 5);
+        assert_eq!(tray_branch_limit(4), 5);
+        assert_eq!(tray_branch_limit(51), 50);
+        assert_eq!(tray_branch_limit(500), 50);
+    }
+
+    #[test]
+    fn tray_branch_overflow_hint_reports_remaining() {
+        // Task 6: "+N weitere (filtere)"-Hinweis pro Dropdown.
+        assert_eq!(tray_branch_overflow_hint(10, 10, false), None);
+        assert_eq!(tray_branch_overflow_hint(3, 5, true), None);
+        assert_eq!(
+            tray_branch_overflow_hint(25, 20, false).as_deref(),
+            Some("+ 5 weitere (in Hauptfenster)")
+        );
+        assert_eq!(
+            tray_branch_overflow_hint(25, 20, true).as_deref(),
+            Some("+ 5 weitere (filtere)")
+        );
+        assert_eq!(tray_branch_overflow_hint(0, 0, false), None);
+    }
+
+    #[test]
+    fn tray_branch_filter_reuses_filter_branches_with_clamped_limit() {
+        // Task 6: Tray nutzt filter_branches() aus repo_list mit geclampetem Limit.
+        use crate::ui::repo_list::filter_branches;
+        let branches: Vec<String> = (0..60).map(|i| format!("feature/branch-{i:02}")).collect();
+        let limit = tray_branch_limit(200);
+        assert_eq!(limit, 50);
+        let shown = filter_branches(&branches, "", limit);
+        assert_eq!(shown.len(), 50);
+        let filtered = filter_branches(&branches, "branch-05", limit);
+        assert_eq!(filtered, vec!["feature/branch-05".to_string()]);
+        assert!(filter_branches(&branches, "zzz-no-match", limit).is_empty());
     }
 
     #[test]

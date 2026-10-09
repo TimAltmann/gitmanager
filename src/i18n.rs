@@ -111,6 +111,8 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "search_label") => "Suche:".to_string(),
         (Language::En, "filter_hint") => "filter...".to_string(),
         (Language::De, "filter_hint") => "filtern...".to_string(),
+        (Language::En, "branch_search") => "Search branches...".to_string(),
+        (Language::De, "branch_search") => "Branches suchen...".to_string(),
         (Language::En, "branch_refresh_tooltip") => "Reload branches (git fetch --all)".to_string(),
         (Language::De, "branch_refresh_tooltip") => "Branches neu laden (git fetch --all)".to_string(),
         (Language::En, "current") => "Current:".to_string(),
@@ -678,6 +680,21 @@ mod tests {
         assert!(en.contains('3'), "branch_behind EN must embed count: {en}");
         let de = tr_fmt(Language::De, "branch_behind", &["3"]);
         assert!(de.contains('3'), "branch_behind DE must embed count: {de}");
+    }
+
+    #[test]
+    fn tr_branch_search_keys_exist() {
+        // Task 6: Tray-Branch-Suche braucht einen eigenen Placeholder.
+        assert_ne!(tr(Language::En, "branch_search"), "branch_search");
+        assert_ne!(tr(Language::De, "branch_search"), "branch_search");
+        assert!(
+            !tr(Language::En, "branch_search").is_empty(),
+            "EN branch_search must not be empty"
+        );
+        assert!(
+            !tr(Language::De, "branch_search").is_empty(),
+            "DE branch_search must not be empty"
+        );
     }
 
     #[test]
