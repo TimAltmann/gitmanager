@@ -456,6 +456,14 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::En, "value_attr") => "Value attribute:".to_string(),
         (Language::De, "value_attr") => "Value-Attribut:".to_string(),
 
+        // ── Main list sort (Task 4) ──────────────────────────────────
+        (Language::En, "sort_by_name") => "Sort by name".to_string(),
+        (Language::De, "sort_by_name") => "Nach Name sortieren".to_string(),
+        (Language::En, "sort_by_last_used") => "Sort by last used".to_string(),
+        (Language::De, "sort_by_last_used") => "Nach letzter Nutzung sortieren".to_string(),
+        (Language::En, "sort_tooltip") => "Sort repositories".to_string(),
+        (Language::De, "sort_tooltip") => "Repositories sortieren".to_string(),
+
         // fallback for any missing key -> return key itself
         (Language::En, _) => key.to_string(),
         (Language::De, _) => key.to_string(),
@@ -597,6 +605,14 @@ mod tests {
     #[test]
     fn tr_autostart_keys_exist() {
         for key in ["autostart_label", "autostart_hint"] {
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+        }
+    }
+
+    #[test]
+    fn tr_sort_keys_exist() {
+        for key in ["sort_by_name", "sort_by_last_used", "sort_tooltip"] {
             assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
             assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
         }

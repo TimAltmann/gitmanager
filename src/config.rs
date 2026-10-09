@@ -7,7 +7,25 @@ use std::path::{Path, PathBuf};
 
 // --- Default helpers ---
 fn default_config_version() -> u32 {
-    11
+    12
+}
+fn default_sort_mode() -> RepoSortMode {
+    RepoSortMode::LastUsed
+}
+
+/// Sortierung der Haupt-Repo-Liste (Task 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoSortMode {
+    Name,
+    #[default]
+    LastUsed,
+}
+
+impl RepoSortMode {
+    pub fn all() -> Vec<RepoSortMode> {
+        vec![RepoSortMode::LastUsed, RepoSortMode::Name]
+    }
 }
 fn default_tray_max_display() -> usize {
     10
@@ -627,6 +645,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub autostart: bool,
+
+    #[serde(default = "default_sort_mode")]
+    pub main_sort_mode: RepoSortMode,
 }
 
 impl Default for AppConfig {
@@ -657,6 +678,7 @@ impl Default for AppConfig {
             tray_icons: TrayIconConfig::default(),
             repo_usage: HashMap::new(),
             autostart: false,
+            main_sort_mode: default_sort_mode(),
         }
     }
 }
@@ -1032,6 +1054,12 @@ impl AppConfig {
             // v11: Autostart via Registry Run-Key (Windows), Default false via serde.
             // Kein Pfad-Schreiben hier — Registry-Sync erfolgt in app.rs (Save + Startup).
             cfg.config_version = 11;
+            let _ = cfg.save();
+        }
+        if cfg.config_version < 12 {
+            // v12: main_sort_mode eingeführt (Default LastUsed via serde).
+            // Alte Configs ohne Feld erhalten automatisch LastUsed — hier nur Version bump.
+            cfg.config_version = 12;
             let _ = cfg.save();
         }
         if cfg.branch_display_limit == 0 {
@@ -2024,7 +2052,7 @@ mod tests {
     fn config_default_has_valid_state() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.max_depth, 2);
-        assert_eq!(cfg.config_version, 11);
+        assert_eq!(cfg.config_version, 12);
         assert_eq!(cfg.active_profile_id, "dotnet");
         assert!(!cfg.profiles.is_empty());
         assert_eq!(cfg.agents.len(), 6);
@@ -2300,7 +2328,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded.roots.len(), 2);
         assert_eq!(loaded.max_depth, 3);
-        assert_eq!(loaded.config_version, 11);
+        assert_eq!(loaded.config_version, 12);
     }
 
     #[test]
@@ -2940,5 +2968,36 @@ mod tests {
         let cfg: AppConfig = serde_json::from_str(json).unwrap();
         assert!(!cfg.autostart);
         assert_eq!(cfg.config_version, 10);
+    }
+
+    #[test]
+    fn sort_mode_default_is_last_used() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.main_sort_mode, RepoSortMode::LastUsed);
+        assert_eq!(cfg.config_version, 12);
+    }
+
+    #[test]
+    fn sort_mode_serde_roundtrip_snake_case() {
+        for mode in [RepoSortMode::Name, RepoSortMode::LastUsed] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let de: RepoSortMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, de);
+        }
+        assert!(serde_json::to_string(&RepoSortMode::LastUsed)
+            .unwrap()
+            .contains("last_used"));
+        assert!(serde_json::to_string(&RepoSortMode::Name)
+            .unwrap()
+            .contains("name"));
+    }
+
+    #[test]
+    fn sort_mode_migration_v11_defaults_last_used() {
+        // v11 config ohne main_sort_mode-Feld -> serde default LastUsed
+        let json = r#"{"roots":[],"max_depth":2,"config_version":11}"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.main_sort_mode, RepoSortMode::LastUsed);
+        assert_eq!(cfg.config_version, 11);
     }
 }

@@ -112,6 +112,34 @@ pub fn filter_branches(branches: &[String], filter: &str, limit: usize) -> Vec<S
     out
 }
 
+/// Task 4: Sortierung der Hauptliste im View (nicht im Scanner).
+/// `LastUsed` = MRU desc via `tray_popup::mru_timestamp`, Gleichstand sowie
+/// nie-genutzte Repos alphabetisch (case-insensitiv) am Ende.
+/// `Name` = alphabetisch wie bisher im Scanner.
+pub fn sort_main_repos(repos: &mut [RepoInfo], config: &AppConfig) {
+    match config.main_sort_mode {
+        crate::config::RepoSortMode::Name => {
+            repos.sort_by_key(|a| a.name.to_lowercase());
+        }
+        crate::config::RepoSortMode::LastUsed => {
+            repos.sort_by(|a, b| {
+                let ta = crate::ui::tray_popup::mru_timestamp(config, &a.path);
+                let tb = crate::ui::tray_popup::mru_timestamp(config, &b.path);
+                tb.cmp(&ta)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
+        }
+    }
+}
+
+/// Geklonte, sortierte Kopie (Test-/Reuse-freundlich). Render-Pfad nutzt
+/// `sort_main_repos` in-place, um Klone pro Frame zu vermeiden.
+pub fn sorted_main_repos(repos: &[RepoInfo], config: &AppConfig) -> Vec<RepoInfo> {
+    let mut out = repos.to_vec();
+    sort_main_repos(&mut out, config);
+    out
+}
+
 pub struct RepoListActions {
     pub branch_switch: Option<(PathBuf, String)>,
     pub solution_select: Option<(PathBuf, PathBuf)>,
@@ -1404,5 +1432,99 @@ mod tests {
             a.custom_select,
             Some((PathBuf::from("/tmp/repo"), "db".into(), "prod".into()))
         );
+    }
+
+    #[test]
+    fn sorted_main_repos_last_used_desc() {
+        use crate::config::RepoSortMode;
+        use crate::git::RepoInfo;
+        let mut cfg = AppConfig {
+            main_sort_mode: RepoSortMode::LastUsed,
+            ..Default::default()
+        };
+        let mk = |name: &str| {
+            RepoInfo::new(
+                PathBuf::from(format!("/tmp/{name}")),
+                "main".into(),
+                false,
+                false,
+            )
+        };
+        let repos = vec![mk("aaa"), mk("bbb"), mk("ccc")];
+        // bbb zuletzt benutzt -> zuerst; ccc danach; aaa ungenutzt -> Ende
+        let key_b = AppConfig::repo_state_key(&PathBuf::from("/tmp/bbb"));
+        cfg.repo_usage.entry(key_b).or_default().last_opened = Some(9999);
+        let key_c = AppConfig::repo_state_key(&PathBuf::from("/tmp/ccc"));
+        cfg.repo_usage.entry(key_c).or_default().last_opened = Some(100);
+        let sorted = sorted_main_repos(&repos, &cfg);
+        assert_eq!(sorted[0].name, "bbb");
+        assert_eq!(sorted[1].name, "ccc");
+        assert_eq!(sorted[2].name, "aaa");
+    }
+
+    #[test]
+    fn sorted_main_repos_unused_alphabetical_at_end_and_tie_by_name() {
+        use crate::config::RepoSortMode;
+        use crate::git::RepoInfo;
+        let mut cfg = AppConfig {
+            main_sort_mode: RepoSortMode::LastUsed,
+            ..Default::default()
+        };
+        let mk = |name: &str| {
+            RepoInfo::new(
+                PathBuf::from(format!("/tmp/{name}")),
+                "main".into(),
+                false,
+                false,
+            )
+        };
+        // Gleicher Timestamp -> alphabetisch (tie=name)
+        let repos = vec![mk("zeta"), mk("alpha"), mk("beta")];
+        for n in ["zeta", "alpha", "beta"] {
+            let key = AppConfig::repo_state_key(&PathBuf::from(format!("/tmp/{n}")));
+            cfg.repo_usage.entry(key).or_default().last_opened = Some(500);
+        }
+        let sorted = sorted_main_repos(&repos, &cfg);
+        assert_eq!(sorted[0].name, "alpha");
+        assert_eq!(sorted[1].name, "beta");
+        assert_eq!(sorted[2].name, "zeta");
+        // Ungenutzte alphabetisch am Ende hinter genutzten
+        let repos2 = vec![mk("zeta"), mk("mango"), mk("apple")];
+        let mut cfg2 = AppConfig {
+            main_sort_mode: RepoSortMode::LastUsed,
+            ..Default::default()
+        };
+        let key = AppConfig::repo_state_key(&PathBuf::from("/tmp/mango"));
+        cfg2.repo_usage.entry(key).or_default().last_opened = Some(42);
+        let sorted2 = sorted_main_repos(&repos2, &cfg2);
+        assert_eq!(sorted2[0].name, "mango");
+        assert_eq!(sorted2[1].name, "apple");
+        assert_eq!(sorted2[2].name, "zeta");
+    }
+
+    #[test]
+    fn sorted_main_repos_name_mode_alphabetical() {
+        use crate::config::RepoSortMode;
+        use crate::git::RepoInfo;
+        let mut cfg = AppConfig {
+            main_sort_mode: RepoSortMode::Name,
+            ..Default::default()
+        };
+        let mk = |name: &str| {
+            RepoInfo::new(
+                PathBuf::from(format!("/tmp/{name}")),
+                "main".into(),
+                false,
+                false,
+            )
+        };
+        let repos = vec![mk("zeta"), mk("Alpha"), mk("beta")];
+        // MRU ignorieren: selbst mit Timestamp auf zeta bleibt alpha zuerst
+        let key = AppConfig::repo_state_key(&PathBuf::from("/tmp/zeta"));
+        cfg.repo_usage.entry(key).or_default().last_opened = Some(99999);
+        let sorted = sorted_main_repos(&repos, &cfg);
+        assert_eq!(sorted[0].name, "Alpha");
+        assert_eq!(sorted[1].name, "beta");
+        assert_eq!(sorted[2].name, "zeta");
     }
 }

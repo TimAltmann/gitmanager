@@ -1,4 +1,6 @@
-use crate::config::{AgentProfile, AppConfig, IdeConfig, LanguageProfile, TerminalPreference};
+use crate::config::{
+    AgentProfile, AppConfig, IdeConfig, LanguageProfile, RepoSortMode, TerminalPreference,
+};
 use crate::i18n::{tr, tr_fmt, Language};
 use egui::{Color32, RichText, Vec2};
 use std::path::PathBuf;
@@ -695,6 +697,37 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
                 .color(Color32::from_rgb(120, 120, 120))
                 .italics(),
         );
+    }
+    // Task 4: Sortierung Hauptliste (Spiegel zum Top-Bar-Umschalter)
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    {
+        let lang = state.draft.language;
+        ui.label(RichText::new(tr(lang, "sort_tooltip")).size(13.0).strong());
+        ui.add_space(4.0);
+        let selected = match state.draft.main_sort_mode {
+            RepoSortMode::LastUsed => tr(lang, "sort_by_last_used"),
+            RepoSortMode::Name => tr(lang, "sort_by_name"),
+        };
+        egui::ComboBox::from_id_salt("sort_mode_general")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for mode in RepoSortMode::all() {
+                    let label = match mode {
+                        RepoSortMode::LastUsed => tr(lang, "sort_by_last_used"),
+                        RepoSortMode::Name => tr(lang, "sort_by_name"),
+                    };
+                    if ui
+                        .selectable_label(state.draft.main_sort_mode == mode, label)
+                        .clicked()
+                    {
+                        state.draft.main_sort_mode = mode;
+                    }
+                }
+            })
+            .response
+            .on_hover_text(tr(lang, "sort_tooltip"));
     }
 }
 

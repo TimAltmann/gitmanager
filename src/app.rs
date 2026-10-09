@@ -1,9 +1,9 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, RepoSortMode};
 use crate::git::{launch_agent, launch_ide, RepoInfo};
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::scanner::scan_repos;
 use crate::ui::{
-    repo_list::{show_repo_list, RepoListActions},
+    repo_list::{show_repo_list, sort_main_repos, sorted_main_repos, RepoListActions},
     settings::SettingsState,
 };
 use egui::{Color32, RichText, Vec2};
@@ -264,7 +264,9 @@ impl MyApp {
             match result {
                 ScanResult::Repos(repos) => {
                     self.scanning = false;
-                    self.repos = repos;
+                    // Task 4: View-Sortierung einmalig am Intake (pro Frame zusätzlich
+                    // in-place vor Render, damit MRU-Updates sofort sichtbar sind)
+                    self.repos = sorted_main_repos(&repos, &self.config);
                     self.error = None;
                     // Review-Fix: dirty VOR dem direkten Sync markieren — bei
                     // WouldBlock bleibt das Flag (Backstop in sync_tray_service).
@@ -278,7 +280,7 @@ impl MyApp {
                     fetch_partial,
                 } => {
                     self.scanning = false;
-                    self.repos = repos;
+                    self.repos = sorted_main_repos(&repos, &self.config);
                     if let Some(raw) = fetch_error {
                         let key = fetch_error_i18n_key(fetch_partial);
                         let msg = tr_fmt(self.config.language, key, &[&raw]);
@@ -1100,6 +1102,36 @@ impl MyApp {
                             ui.add_space(8.0);
                             ui.spinner();
                         }
+                        // Task 4: Sort-Modus-Umschalter neben Settings/Refresh
+                        ui.add_space(8.0);
+                        let sort_label = match self.config.main_sort_mode {
+                            RepoSortMode::LastUsed => tr(lang, "sort_by_last_used"),
+                            RepoSortMode::Name => tr(lang, "sort_by_name"),
+                        };
+                        let mut new_sort = self.config.main_sort_mode;
+                        egui::ComboBox::from_id_salt("sort_mode_top")
+                            .selected_text(sort_label)
+                            .width(130.0)
+                            .show_ui(ui, |ui| {
+                                for mode in RepoSortMode::all() {
+                                    let label = match mode {
+                                        RepoSortMode::LastUsed => tr(lang, "sort_by_last_used"),
+                                        RepoSortMode::Name => tr(lang, "sort_by_name"),
+                                    };
+                                    if ui.selectable_label(new_sort == mode, label).clicked() {
+                                        new_sort = mode;
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text(tr(lang, "sort_tooltip"));
+                        if new_sort != self.config.main_sort_mode {
+                            self.config.main_sort_mode = new_sort;
+                            if let Err(e) = self.config.save() {
+                                self.error =
+                                    Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                            }
+                        }
                     });
                 });
 
@@ -1512,6 +1544,8 @@ impl eframe::App for MyApp {
                 // Wir brauchen &mut für repo_list, um selektierte Werte zu zeigen, aber hier clonen wir mut
                 // repo_list wird &mut repos erwarten, wir haben &mut self.repos
                 // scanning → Fetch-/Refresh-Buttons disabled + Spinner während Fetch/Scan
+                // Task 4: Sortierung im View (Scanner bleibt alphabetisch)
+                sort_main_repos(&mut self.repos, &self.config);
                 let fetching = self.scanning;
                 show_repo_list(ui, &mut self.repos, &self.config, &mut actions, fetching);
 
