@@ -17,6 +17,21 @@ const ICON_CROSS: egui::ImageSource = egui::include_image!("../assets/icons/cros
 
 enum ScanResult {
     Repos(Vec<RepoInfo>),
+    FetchDone {
+        repos: Vec<RepoInfo>,
+        fetch_error: Option<String>,
+        fetch_partial: bool,
+    },
+}
+
+/// Wählt den i18n-Key für Fetch-Fehler: `fetch_partial` bei Teil-Fehlschlag
+/// (einige Remotes ok), sonst `fetch_failed`.
+pub fn fetch_error_i18n_key(fetch_partial: bool) -> &'static str {
+    if fetch_partial {
+        "fetch_partial"
+    } else {
+        "fetch_failed"
+    }
 }
 
 struct BranchDialog {
@@ -241,15 +256,40 @@ impl MyApp {
 
     fn poll_scan(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.scan_rx.try_recv() {
-            self.scanning = false;
-            let ScanResult::Repos(repos) = result;
-            self.repos = repos;
-            self.error = None;
-            // Review-Fix: dirty VOR dem direkten Sync markieren — bei
-            // WouldBlock bleibt das Flag (Backstop in sync_tray_service).
-            self.mark_tray_dirty();
-            self.sync_tray_service();
-            ctx.request_repaint();
+            match result {
+                ScanResult::Repos(repos) => {
+                    self.scanning = false;
+                    self.repos = repos;
+                    self.error = None;
+                    // Review-Fix: dirty VOR dem direkten Sync markieren — bei
+                    // WouldBlock bleibt das Flag (Backstop in sync_tray_service).
+                    self.mark_tray_dirty();
+                    self.sync_tray_service();
+                    ctx.request_repaint();
+                }
+                ScanResult::FetchDone {
+                    repos,
+                    fetch_error,
+                    fetch_partial,
+                } => {
+                    self.scanning = false;
+                    self.repos = repos;
+                    if let Some(raw) = fetch_error {
+                        let key = fetch_error_i18n_key(fetch_partial);
+                        let msg = tr_fmt(self.config.language, key, &[&raw]);
+                        // Fallback falls Key fehlt (sollte nicht passieren, i18n-Test sichert ab)
+                        let msg = if msg == key { raw } else { msg };
+                        self.error = Some(msg.clone());
+                        self.status_message = Some(msg);
+                        self.status_message_time = Some(std::time::Instant::now());
+                    } else {
+                        self.error = None;
+                    }
+                    self.mark_tray_dirty();
+                    self.sync_tray_service();
+                    ctx.request_repaint();
+                }
+            }
         }
         while let Ok(err) = self.launch_err_rx.try_recv() {
             self.error = Some(err);
@@ -1461,7 +1501,9 @@ impl eframe::App for MyApp {
 
                 // Wir brauchen &mut für repo_list, um selektierte Werte zu zeigen, aber hier clonen wir mut
                 // repo_list wird &mut repos erwarten, wir haben &mut self.repos
-                show_repo_list(ui, &mut self.repos, &self.config, &mut actions);
+                // scanning → Fetch-/Refresh-Buttons disabled + Spinner während Fetch/Scan
+                let fetching = self.scanning;
+                show_repo_list(ui, &mut self.repos, &self.config, &mut actions, fetching);
 
                 // Handle Actions
                 if let Some((repo_path, branch)) = actions.branch_switch {
@@ -1650,11 +1692,24 @@ impl eframe::App for MyApp {
                     self.status_message_time = Some(std::time::Instant::now());
                     std::thread::spawn(move || {
                         let fetch_res = crate::git::fetch_all(&path_clone);
-                        if let Err(e) = fetch_res {
-                            eprintln!("Fetch fehlgeschlagen für {}: {e:#}", path_clone.display());
-                        }
+                        let (fetch_error, fetch_partial) = match fetch_res {
+                            Ok(()) => (None, false),
+                            Err(e) => {
+                                let partial = crate::git::is_partial_fetch_error(&e);
+                                let msg = format!("{e:#}");
+                                eprintln!(
+                                    "Fetch fehlgeschlagen für {}: {msg}",
+                                    path_clone.display()
+                                );
+                                (Some(msg), partial)
+                            }
+                        };
                         let repos = crate::scanner::scan_repos(&cfg);
-                        let _ = tx.send(ScanResult::Repos(repos));
+                        let _ = tx.send(ScanResult::FetchDone {
+                            repos,
+                            fetch_error,
+                            fetch_partial,
+                        });
                     });
                 }
                 if let Some(repo_path) = actions.explorer_open {
@@ -1880,13 +1935,110 @@ mod tests {
         let result = ScanResult::Repos(vec![]);
         match result {
             ScanResult::Repos(v) => assert!(v.is_empty()),
+            ScanResult::FetchDone { .. } => panic!("expected Repos"),
         }
         let info =
             crate::git::RepoInfo::new(PathBuf::from("/tmp/repo"), "main".to_string(), false, false);
         let result2 = ScanResult::Repos(vec![info]);
         match result2 {
             ScanResult::Repos(v) => assert_eq!(v.len(), 1),
+            ScanResult::FetchDone { .. } => panic!("expected Repos"),
         }
+        let fetch_done = ScanResult::FetchDone {
+            repos: vec![],
+            fetch_error: None,
+            fetch_partial: false,
+        };
+        match fetch_done {
+            ScanResult::FetchDone {
+                repos,
+                fetch_error,
+                fetch_partial,
+            } => {
+                assert!(repos.is_empty());
+                assert!(fetch_error.is_none());
+                assert!(!fetch_partial);
+            }
+            ScanResult::Repos(_) => panic!("expected FetchDone"),
+        }
+    }
+
+    #[test]
+    fn fetch_error_i18n_key_selects_partial_vs_failed() {
+        assert_eq!(fetch_error_i18n_key(true), "fetch_partial");
+        assert_eq!(fetch_error_i18n_key(false), "fetch_failed");
+    }
+
+    #[test]
+    fn poll_scan_fetch_done_error_sets_error_and_status() {
+        // UI-Error-Pfad: Fetch-Fehler landet in self.error + Status (statt eprintln-only)
+        let mut app = test_app();
+        app.scanning = true;
+        app.scan_tx
+            .send(ScanResult::FetchDone {
+                repos: vec![],
+                fetch_error: Some("Remote 'origin': auth failed".to_string()),
+                fetch_partial: false,
+            })
+            .expect("send fetch done");
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(!app.scanning, "fetch done must clear spinner");
+        let err = app.error.expect("error must be set");
+        assert!(
+            err.contains("Remote 'origin': auth failed"),
+            "error must embed fetch detail, got: {err}"
+        );
+        assert!(
+            err.contains(&crate::i18n::tr(app.config.language, "fetch_failed").replace(" {}", "")),
+            "complete failure must use fetch_failed key, got: {err}"
+        );
+        assert!(app.status_message.is_some(), "status must be set");
+        assert!(app.tray_dirty, "fetch error must mark tray dirty");
+    }
+
+    #[test]
+    fn poll_scan_fetch_done_partial_uses_partial_key() {
+        let mut app = test_app();
+        app.scanning = true;
+        app.scan_tx
+            .send(ScanResult::FetchDone {
+                repos: vec![],
+                fetch_error: Some("Remote 'bad': timeout. Erfolgreich: 'good'".to_string()),
+                fetch_partial: true,
+            })
+            .expect("send fetch done");
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(!app.scanning);
+        let err = app.error.expect("error must be set");
+        assert!(
+            err.contains("Remote 'bad'"),
+            "error must embed fetch detail, got: {err}"
+        );
+        assert!(
+            err.contains(&crate::i18n::tr(app.config.language, "fetch_partial").replace(" {}", "")),
+            "partial failure must use fetch_partial key, got: {err}"
+        );
+        assert!(app.status_message.is_some());
+    }
+
+    #[test]
+    fn poll_scan_fetch_done_ok_clears_error() {
+        let mut app = test_app();
+        app.scanning = true;
+        app.error = Some("stale".to_string());
+        app.scan_tx
+            .send(ScanResult::FetchDone {
+                repos: vec![],
+                fetch_error: None,
+                fetch_partial: false,
+            })
+            .expect("send fetch done");
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(!app.scanning);
+        assert!(app.error.is_none(), "successful fetch must clear error");
     }
 
     #[test]

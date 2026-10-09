@@ -245,52 +245,119 @@ pub fn list_branches(path: &Path) -> Vec<String> {
     branches
 }
 
-/// Holt alle Remotes (git fetch --all) – für Refresh-Button
+/// Holt alle Remotes (git fetch --all) – für Refresh-Button.
+///
+/// Ehrliche Semantik: `Ok` nur wenn alle Remotes erfolgreich waren (oder keine
+/// Remotes konfiguriert sind). Jeder Fehler wird pro Remote gesammelt und als
+/// `Err` mit Remote-Namen plus Auth-Hinweis zurückgegeben – auch wenn nur ein
+/// Teil der Remotes fehlschlägt (dann als [`PartialFetch`], siehe
+/// [`is_partial_fetch_error`], damit die UI `fetch_partial` statt
+/// `fetch_failed` wählen kann). `eprintln!` bleibt als Log erhalten.
+///
+/// Signatur bleibt `fetch_all(path: &Path) -> anyhow::Result<()>` (Task 5 baut darauf).
 pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
     let repo =
         Repository::open(path).map_err(|e| anyhow::anyhow!("Repo öffnen fehlgeschlagen: {e}"))?;
     let remotes = repo
         .remotes()
         .map_err(|e| anyhow::anyhow!("Remotes lesen fehlgeschlagen: {e}"))?;
-    let mut last_err = None;
+    if remotes.is_empty() {
+        return Ok(());
+    }
+    let mut succeeded: Vec<String> = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
     for remote_res in remotes.iter() {
         let remote_name = match remote_res {
-            Ok(Some(name)) => name,
+            Ok(Some(name)) => name.to_string(),
             Ok(None) => continue,
             Err(e) => {
                 eprintln!("Remote name invalid: {e}");
+                failed.push(("<invalid>".to_string(), e.to_string()));
                 continue;
             }
         };
-        match repo.find_remote(remote_name) {
+        match repo.find_remote(&remote_name) {
             Ok(mut remote) => {
                 let mut opts = git2::FetchOptions::new();
                 opts.prune(git2::FetchPrune::On);
-                if let Err(e) = remote.fetch(&[] as &[&str], Some(&mut opts), None) {
-                    eprintln!("Fetch für Remote '{}' fehlgeschlagen: {e}", remote_name);
-                    last_err = Some(e);
+                match remote.fetch(&[] as &[&str], Some(&mut opts), None) {
+                    Ok(()) => succeeded.push(remote_name),
+                    Err(e) => {
+                        eprintln!("Fetch für Remote '{remote_name}' fehlgeschlagen: {e}");
+                        failed.push((remote_name, e.to_string()));
+                    }
                 }
             }
             Err(e) => {
-                eprintln!("Remote '{}' nicht gefunden: {e}", remote_name);
-                last_err = Some(e);
+                eprintln!("Remote '{remote_name}' nicht gefunden: {e}");
+                failed.push((remote_name, e.to_string()));
             }
         }
     }
-    if let Some(e) = last_err {
-        // Wenn mindestens ein Remote fehlgeschlagen, aber andere erfolgreich, trotzdem als Warnung
-        // Für UI: zeige Fehler nur wenn alle fehlgeschlagen
-        // Hier geben wir den letzten Fehler zurück, UI kann entscheiden
-        // Wenn gar keine Remotes, ist das ok
-        if remotes.is_empty() {
-            return Ok(());
-        }
-        // Wenn nur ein Remote und der fehlgeschlagen, Fehler zurück
-        if remotes.len() == 1 {
-            anyhow::bail!("Fetch fehlgeschlagen: {e}");
-        }
+    if failed.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    const AUTH_HINT: &str = "Hinweis: Credentials/SSH prüfen (ggf. Auth erforderlich)";
+    if succeeded.is_empty() {
+        // Alle Remotes fehlgeschlagen (inkl. Single-Remote-Fall)
+        let names = failed
+            .iter()
+            .map(|(n, _)| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let details = failed
+            .iter()
+            .map(|(n, e)| format!("'{n}': {e}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        anyhow::bail!("Fetch fehlgeschlagen für Remote(s) {names}: {details}. {AUTH_HINT}");
+    }
+    // Teilweise fehlgeschlagen: einige Remotes ok, mindestens einer failed
+    Err(anyhow::Error::new(PartialFetch { succeeded, failed }))
+}
+
+/// Marker für teilweise fehlgeschlagenen Fetch (einige Remotes ok, andere failed).
+/// Als anyhow-Error transportiert, damit die UI per [`is_partial_fetch_error`]
+/// ohne String-Parsing `fetch_partial` statt `fetch_failed` wählen kann.
+#[derive(Debug)]
+pub struct PartialFetch {
+    succeeded: Vec<String>,
+    failed: Vec<(String, String)>,
+}
+
+impl std::fmt::Display for PartialFetch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let failed_names = self
+            .failed
+            .iter()
+            .map(|(n, _)| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let details = self
+            .failed
+            .iter()
+            .map(|(n, e)| format!("'{n}': {e}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let ok_names = self
+            .succeeded
+            .iter()
+            .map(|n| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            f,
+            "Fetch teilweise fehlgeschlagen für Remote(s) {failed_names}: {details}. Erfolgreich: {ok_names}. Hinweis: Credentials/SSH prüfen (ggf. Auth erforderlich)"
+        )
+    }
+}
+
+impl std::error::Error for PartialFetch {}
+
+/// True wenn `err` (aus [`fetch_all`]) einen teilweisen Fehlschlag beschreibt
+/// (mind. 1 Remote ok, mind. 1 failed). Sonstige Fetch-Fehler sind komplett.
+pub fn is_partial_fetch_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<PartialFetch>().is_some()
 }
 
 /// Öffnet den Explorer / Dateimanager im Repo-Verzeichnis
@@ -1618,11 +1685,76 @@ mod tests {
     }
 
     #[test]
-    fn fetch_all_partial_fail_warns_but_ok() {
-        // With no remotes, Ok; with single fail Err; mixed would need two remotes where one fails and one succeeds
-        // We test no remotes case already; for mixed we would need a real remote - skip as warn but Ok case is when len>1 and last_err Some -> Ok
-        // So we verify that with zero remotes it's Ok (already) and with one failing it's Err (above)
-        // This test ensures logic for multiple remotes doesn't panic
+    fn fetch_all_multi_remote_partial_fails_honestly() {
+        // TDD RED: >1 Remote, einer fails → aktuell Ok (Masking), soll Err sein.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        // Working remote: local bare repo (offline-capable file transport)
+        let bare_dir = tempdir().unwrap();
+        let _bare = Repository::init_bare(bare_dir.path()).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.remote("good", bare_dir.path().to_str().unwrap())
+            .unwrap();
+        repo.remote("bad", "https://invalid.example.com/doesnotexist.git")
+            .unwrap();
+        drop(repo);
+        let res = fetch_all(dir.path());
+        assert!(
+            res.is_err(),
+            "partial fetch (1 ok, 1 fail) must be Err, got Ok (multi-remote masking)"
+        );
+        let err = res.unwrap_err();
+        assert!(
+            is_partial_fetch_error(&err),
+            "partial failure must be marked as partial, got: {err:#}"
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("bad"),
+            "error must name failing remote, got: {msg}"
+        );
+        assert!(
+            msg.contains("good"),
+            "error must name successful remote, got: {msg}"
+        );
+        assert!(
+            msg.contains("Credentials/SSH"),
+            "error must hint at auth, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn fetch_all_multi_remote_all_fail_is_complete_error() {
+        // Alle Remotes fail → Err, aber kein Partial-Marker
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.remote("bad1", "https://invalid.example.com/a.git")
+            .unwrap();
+        repo.remote("bad2", "https://invalid.example.com/b.git")
+            .unwrap();
+        drop(repo);
+        let res = fetch_all(dir.path());
+        assert!(res.is_err(), "all remotes failing must be Err");
+        let err = res.unwrap_err();
+        assert!(
+            !is_partial_fetch_error(&err),
+            "complete failure must not be marked partial: {err:#}"
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("bad1") && msg.contains("bad2"),
+            "must name all failing remotes, got: {msg}"
+        );
+        assert!(
+            msg.contains("Credentials/SSH"),
+            "error must hint at auth, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn fetch_all_zero_remotes_ok_and_no_partial_marker() {
+        // Keine Remotes → Ok (kein Fehler möglich)
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path(), "main");
         assert!(fetch_all(dir.path()).is_ok());

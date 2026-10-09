@@ -131,6 +131,7 @@ pub fn show_repo_list(
     repos: &mut [RepoInfo],
     config: &AppConfig,
     actions: &mut RepoListActions,
+    fetching: bool,
 ) {
     if repos.is_empty() {
         ui.vertical_centered(|ui| {
@@ -155,7 +156,7 @@ pub fn show_repo_list(
         .show(ui, |ui| {
             ui.add_space(4.0);
             for repo in repos.iter_mut() {
-                show_repo_row(ui, repo, config, actions);
+                show_repo_row(ui, repo, config, actions, fetching);
                 ui.add_space(6.0);
             }
             ui.add_space(12.0);
@@ -167,6 +168,7 @@ fn show_repo_row(
     repo: &mut RepoInfo,
     config: &AppConfig,
     actions: &mut RepoListActions,
+    fetching: bool,
 ) {
     let visuals = ui.visuals();
     let frame = egui::Frame::new()
@@ -339,11 +341,17 @@ fn show_repo_row(
                                     if edit_resp.changed() {
                                         branch_filter_changed = true;
                                     }
+                                    if fetching {
+                                        ui.spinner();
+                                    }
                                     if ui
-                                        .add(egui::Button::image(
-                                            egui::Image::new(ICON_REFRESH)
-                                                .fit_to_exact_size(Vec2::splat(12.0)),
-                                        ))
+                                        .add_enabled(
+                                            !fetching,
+                                            egui::Button::image(
+                                                egui::Image::new(ICON_REFRESH)
+                                                    .fit_to_exact_size(Vec2::splat(12.0)),
+                                            ),
+                                        )
                                         .on_hover_text(tr(
                                             config.language,
                                             "branch_refresh_tooltip",
@@ -423,7 +431,14 @@ fn show_repo_row(
                                                     .size(11.0),
                                             );
                                             if ui
-                                                .small_button(tr(config.language, "fetch_now"))
+                                                .add_enabled(
+                                                    !fetching,
+                                                    egui::Button::new(tr(
+                                                        config.language,
+                                                        "fetch_now",
+                                                    ))
+                                                    .small(),
+                                                )
                                                 .clicked()
                                             {
                                                 do_fetch = true;

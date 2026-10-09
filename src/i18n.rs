@@ -415,6 +415,10 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "shell_opened") => "Shell geöffnet: {}".to_string(),
         (Language::En, "fetching_branches") => "Fetching branches for {}...".to_string(),
         (Language::De, "fetching_branches") => "Fetche Branches für {}...".to_string(),
+        (Language::En, "fetch_failed") => "Fetch failed: {}".to_string(),
+        (Language::De, "fetch_failed") => "Fetch fehlgeschlagen: {}".to_string(),
+        (Language::En, "fetch_partial") => "Fetch partially failed: {}".to_string(),
+        (Language::De, "fetch_partial") => "Fetch teilweise fehlgeschlagen: {}".to_string(),
         (Language::En, "branch_switched_to") => "Branch switched to '{}': {}".to_string(),
         (Language::De, "branch_switched_to") => "Branch zu '{}' gewechselt: {}".to_string(),
         (Language::En, "ide_not_found") => "IDE '{}' not found".to_string(),
@@ -583,6 +587,34 @@ mod tests {
         assert!(
             sde.contains("Tray-Popup"),
             "DE summary should mention Tray-Popup: {sde}"
+        );
+    }
+
+    #[test]
+    fn tr_fetch_keys_exist() {
+        for key in ["fetch_failed", "fetch_partial"] {
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+        }
+        let en = tr_fmt(Language::En, "fetch_failed", &["boom"]);
+        assert!(
+            en.contains("boom"),
+            "fetch_failed EN must embed detail: {en}"
+        );
+        let de = tr_fmt(Language::De, "fetch_failed", &["boom"]);
+        assert!(
+            de.contains("boom"),
+            "fetch_failed DE must embed detail: {de}"
+        );
+        let en_p = tr_fmt(Language::En, "fetch_partial", &["boom"]);
+        assert!(
+            en_p.contains("boom"),
+            "fetch_partial EN must embed detail: {en_p}"
+        );
+        let de_p = tr_fmt(Language::De, "fetch_partial", &["boom"]);
+        assert!(
+            de_p.contains("boom"),
+            "fetch_partial DE must embed detail: {de_p}"
         );
     }
 
