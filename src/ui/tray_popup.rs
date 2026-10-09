@@ -135,9 +135,11 @@ pub fn tray_branch_limit(limit: usize) -> usize {
 }
 
 /// Task 6: Rest-Hinweis unter der Tray-Branch-Liste. `None` wenn alles
-/// Sichtbare angezeigt wird, sonst `+ N weitere (in Hauptfenster)` ohne
-/// Filter bzw. `+ N weitere (filtere)` mit aktivem Filter.
+/// Sichtbare angezeigt wird, sonst sprachabhängig via i18n
+/// (`tray_branch_more_filtered` / `tray_branch_more_main`).
+/// De-Texte bleiben `+ N weitere (filtere)` / `+ N weitere (in Hauptfenster)`.
 pub fn tray_branch_overflow_hint(
+    lang: Language,
     total_matching: usize,
     shown: usize,
     filter_active: bool,
@@ -146,12 +148,26 @@ pub fn tray_branch_overflow_hint(
     if remaining == 0 {
         return None;
     }
-    let suffix = if filter_active {
-        "(filtere)"
+    let key = if filter_active {
+        "tray_branch_more_filtered"
     } else {
-        "(in Hauptfenster)"
+        "tray_branch_more_main"
     };
-    Some(format!("+ {remaining} weitere {suffix}"))
+    Some(tr_fmt(lang, key, &[&remaining.to_string()]))
+}
+
+/// Task 6 fix (Finding 1): totale Trefferzahl via dieselbe
+/// `filter_branches`-Prädikat wie die angezeigte Liste (mit `usize::MAX`
+/// statt geclampetem Limit), damit `shown == Prefix(total)`.
+/// Verhindert Divergenz zwischen `+N weitere`-Zähler und angezeigten Einträgen.
+pub fn tray_branch_match_counts(
+    branches: &[String],
+    filter: &str,
+    limit: usize,
+) -> (Vec<String>, usize) {
+    let shown = filter_branches(branches, filter, limit);
+    let total = filter_branches(branches, filter, usize::MAX).len();
+    (shown, total)
 }
 
 /// Max. Zeichen für Labels im Tray-Popup (Branch/Solution).
@@ -373,13 +389,15 @@ pub fn show_tray_popup_ui(
                         };
                         show_tray_repo_row(
                             ui,
-                            repo,
-                            config,
-                            actions,
-                            ides,
-                            agents,
-                            &active_agents,
-                            branch_filters,
+                            TrayRepoRowParams {
+                                repo,
+                                config,
+                                actions,
+                                profile_ides: ides,
+                                profile_agents: agents,
+                                active_agents: &active_agents,
+                                branch_filters,
+                            },
                         );
                         ui.add_space(4.0);
                     }
@@ -393,21 +411,30 @@ pub fn show_tray_popup_ui(
     // Close on clicking outside? Handled via viewport close_requested
 }
 
-// Task 6: 8. Param ist die pro-Repo-Filter-Map (kein Struct-Split, um den
-// #8-Call-Site (vorgefertigte IDE/Agent-Slices) nicht aufzubrechen.
-#[allow(clippy::too_many_arguments)]
-fn show_tray_repo_row(
-    ui: &mut egui::Ui,
-    repo: &RepoInfo,
-    config: &AppConfig,
-    actions: &mut TrayPopupActions,
-    // #8: pro Frame vorberechnete Listen (statt pro Zeile neu auflösen).
-    profile_ides: &[&crate::config::IdeConfig],
-    profile_agents: &[&crate::config::AgentProfile],
-    active_agents: &[&crate::config::AgentProfile],
-    // Task 6: pro-Repo Branch-Filter (Dropdown-Suche, KEIN globales Suchfeld).
-    branch_filters: &mut HashMap<PathBuf, String>,
-) {
+// Task 6 fix (Finding 4): Params als Struct statt 8 Einzel-Args —
+// entfernt `#[allow(clippy::too_many_arguments)]`, kein Lint-Maskieren.
+// `actions` + `branch_filters` bleiben `&mut` (kein Split nötig,
+// #8-Call-Site mit vorberechneten IDE/Agent-Slices bleibt erhalten).
+pub struct TrayRepoRowParams<'a> {
+    pub repo: &'a RepoInfo,
+    pub config: &'a AppConfig,
+    pub actions: &'a mut TrayPopupActions,
+    pub profile_ides: &'a [&'a crate::config::IdeConfig],
+    pub profile_agents: &'a [&'a crate::config::AgentProfile],
+    pub active_agents: &'a [&'a crate::config::AgentProfile],
+    pub branch_filters: &'a mut HashMap<PathBuf, String>,
+}
+
+fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
+    let TrayRepoRowParams {
+        repo,
+        config,
+        actions,
+        profile_ides,
+        profile_agents,
+        active_agents,
+        branch_filters,
+    } = p;
     let lang = config.language;
     let visuals = ui.visuals().clone();
     let frame = egui::Frame::new()
@@ -464,24 +491,32 @@ fn show_tray_repo_row(
                         .selected_text(&current)
                         .width(combo_width)
                         .show_ui(ui, |ui| {
+                            // Task 6 fix (Finding 3): ComboBox+TextEdit-Härtung.
+                            // egui 0.36 hält das ComboBox-Popup bei inneren
+                            // Interaktionen offen; TextEdit konsumiert Tasten,
+                            // sodass Tippen das Dropdown nicht schließt. Das
+                            // Hauptfenster nutzt Window+TextEdit (repo_list.rs:
+                            // Branch-Popup mit Fetch-Button + Outside-Click/Esc),
+                            // hier reicht die leichte ComboBox (kein Fetch-Button,
+                            // Außen-Tray-Popup bleibt ohnehin offen). Fokus sofort
+                            // anfordern, damit Tippen ohne Extraklick filtert.
                             let edit_width = ui.available_width();
-                            ui.add(
+                            let edit_resp = ui.add(
                                 egui::TextEdit::singleline(&mut *filter)
                                     .hint_text(tr(lang, "branch_search"))
                                     .desired_width(edit_width),
                             );
+                            if !edit_resp.has_focus() && ui.ctx().memory(|m| m.focused().is_none())
+                            {
+                                edit_resp.request_focus();
+                            }
                             ui.separator();
-                            let shown = filter_branches(branches, filter.as_str(), limit);
+                            // Finding 1: totale Treffer via dieselbe
+                            // filter_branches-Prädikat (MAX-Limit) — shown ist
+                            // dadurch garantiert Prefix von total.
+                            let (shown, total_matching) =
+                                tray_branch_match_counts(branches, filter.as_str(), limit);
                             let filter_active = !filter.is_empty();
-                            let total_matching = if filter_active {
-                                let needle = filter.to_lowercase();
-                                branches
-                                    .iter()
-                                    .filter(|b| b.to_lowercase().contains(&needle))
-                                    .count()
-                            } else {
-                                branches.len()
-                            };
                             for b in &shown {
                                 let is_sel = *b == repo.branch;
                                 if ui
@@ -505,6 +540,7 @@ fn show_tray_repo_row(
                                         .italics(),
                                 );
                             } else if let Some(hint) = tray_branch_overflow_hint(
+                                lang,
                                 total_matching,
                                 shown.len(),
                                 filter_active,
@@ -1078,18 +1114,29 @@ mod tests {
 
     #[test]
     fn tray_branch_overflow_hint_reports_remaining() {
-        // Task 6: "+N weitere (filtere)"-Hinweis pro Dropdown.
-        assert_eq!(tray_branch_overflow_hint(10, 10, false), None);
-        assert_eq!(tray_branch_overflow_hint(3, 5, true), None);
+        // Task 6 fix (Finding 2): sprachabhängig via i18n, De-Texte identisch.
+        use crate::i18n::Language;
+        assert_eq!(tray_branch_overflow_hint(Language::De, 10, 10, false), None);
+        assert_eq!(tray_branch_overflow_hint(Language::En, 10, 10, false), None);
+        assert_eq!(tray_branch_overflow_hint(Language::De, 3, 5, true), None);
         assert_eq!(
-            tray_branch_overflow_hint(25, 20, false).as_deref(),
+            tray_branch_overflow_hint(Language::De, 25, 20, false).as_deref(),
             Some("+ 5 weitere (in Hauptfenster)")
         );
         assert_eq!(
-            tray_branch_overflow_hint(25, 20, true).as_deref(),
+            tray_branch_overflow_hint(Language::De, 25, 20, true).as_deref(),
             Some("+ 5 weitere (filtere)")
         );
-        assert_eq!(tray_branch_overflow_hint(0, 0, false), None);
+        assert_eq!(
+            tray_branch_overflow_hint(Language::En, 25, 20, false).as_deref(),
+            Some("+ 5 more (in main window)")
+        );
+        assert_eq!(
+            tray_branch_overflow_hint(Language::En, 25, 20, true).as_deref(),
+            Some("+ 5 more (filter)")
+        );
+        assert_eq!(tray_branch_overflow_hint(Language::De, 0, 0, false), None);
+        assert_eq!(tray_branch_overflow_hint(Language::En, 0, 0, true), None);
     }
 
     #[test]
@@ -1104,6 +1151,41 @@ mod tests {
         let filtered = filter_branches(&branches, "branch-05", limit);
         assert_eq!(filtered, vec!["feature/branch-05".to_string()]);
         assert!(filter_branches(&branches, "zzz-no-match", limit).is_empty());
+    }
+
+    #[test]
+    fn tray_branch_match_counts_consistent_with_filter_branches() {
+        // Task 6 fix (Finding 1): total via filter_branches(..., MAX),
+        // shown == Prefix(total); no_matches-Pfad (total==0, shown leer).
+        use crate::ui::repo_list::filter_branches;
+        let branches: Vec<String> = (0..60).map(|i| format!("feature/branch-{i:02}")).collect();
+        let limit = tray_branch_limit(20);
+        // Ungefiltert: total 60, shown 20 == erste 20 von total.
+        let (shown, total) = tray_branch_match_counts(&branches, "", limit);
+        let expected_total = filter_branches(&branches, "", usize::MAX);
+        assert_eq!(total, expected_total.len());
+        assert_eq!(total, 60);
+        assert_eq!(shown.len(), 20);
+        assert_eq!(shown, expected_total[..20].to_vec());
+        // Gefiltert: total via MAX-Limit, shown Prefix.
+        let (shown_f, total_f) = tray_branch_match_counts(&branches, "branch-0", limit);
+        let expected_f = filter_branches(&branches, "branch-0", usize::MAX);
+        assert_eq!(total_f, expected_f.len());
+        assert_eq!(shown_f, expected_f[..shown_f.len()].to_vec());
+        // Case-insensitiv wie filter_branches (kein eigener contains-Pfad).
+        let (shown_ci, total_ci) = tray_branch_match_counts(&branches, "BRANCH-05", limit);
+        assert_eq!(total_ci, 1);
+        assert_eq!(shown_ci, vec!["feature/branch-05".to_string()]);
+        // No-matches: leer + total 0 → UI zeigt no_matches statt Hint.
+        let (shown_none, total_none) = tray_branch_match_counts(&branches, "zzz-no-match", limit);
+        assert!(shown_none.is_empty());
+        assert_eq!(total_none, 0);
+        assert_eq!(
+            total_none,
+            filter_branches(&branches, "zzz-no-match", usize::MAX).len()
+        );
+        use crate::i18n::Language;
+        assert!(tray_branch_overflow_hint(Language::En, total_none, 0, true).is_none());
     }
 
     #[test]

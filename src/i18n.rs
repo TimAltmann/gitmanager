@@ -351,6 +351,10 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "tray_limit_label") => "Limit:".to_string(),
         (Language::En, "tray_direct_label") => "Or direct:".to_string(),
         (Language::De, "tray_direct_label") => "Oder direkt:".to_string(),
+        (Language::En, "tray_branch_more_filtered") => "+ {} more (filter)".to_string(),
+        (Language::De, "tray_branch_more_filtered") => "+ {} weitere (filtere)".to_string(),
+        (Language::En, "tray_branch_more_main") => "+ {} more (in main window)".to_string(),
+        (Language::De, "tray_branch_more_main") => "+ {} weitere (in Hauptfenster)".to_string(),
         (Language::En, "tray_notice_branch_dialog") => "Branch switch for '{}' waits for a decision – click to open".to_string(),
         (Language::De, "tray_notice_branch_dialog") => "Branch-Wechsel für '{}' wartet auf Entscheidung – klicken zum Öffnen".to_string(),
         (Language::En, "tray_notice_error") => "Note in main window – click to open".to_string(),
@@ -694,6 +698,39 @@ mod tests {
         assert!(
             !tr(Language::De, "branch_search").is_empty(),
             "DE branch_search must not be empty"
+        );
+    }
+
+    #[test]
+    fn tr_tray_branch_more_keys_exist() {
+        // Task 6 fix (Finding 2): Overflow-Hinweis sprachabhängig.
+        for key in ["tray_branch_more_filtered", "tray_branch_more_main"] {
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+        }
+        // De-Texte identisch zum bisherigen Hardcode.
+        let de_f = tr_fmt(Language::De, "tray_branch_more_filtered", &["5"]);
+        assert_eq!(
+            de_f, "+ 5 weitere (filtere)",
+            "DE filtered must stay: {de_f}"
+        );
+        let de_m = tr_fmt(Language::De, "tray_branch_more_main", &["5"]);
+        assert_eq!(
+            de_m, "+ 5 weitere (in Hauptfenster)",
+            "DE main must stay: {de_m}"
+        );
+        // En darf kein Deutsch enthalten.
+        let en_f = tr_fmt(Language::En, "tray_branch_more_filtered", &["5"]);
+        assert!(en_f.contains('5'), "EN filtered must embed count: {en_f}");
+        assert!(
+            !en_f.contains("weitere"),
+            "EN filtered must not be German: {en_f}"
+        );
+        let en_m = tr_fmt(Language::En, "tray_branch_more_main", &["5"]);
+        assert!(en_m.contains('5'), "EN main must embed count: {en_m}");
+        assert!(
+            !en_m.contains("weitere"),
+            "EN main must not be German: {en_m}"
         );
     }
 
