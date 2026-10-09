@@ -254,19 +254,20 @@ pub fn list_branches(path: &Path) -> Vec<String> {
 /// Holt alle Remotes (git fetch --all) – für Refresh-Button.
 ///
 /// Ehrliche Semantik: `Ok` nur wenn alle Remotes erfolgreich waren (oder keine
-/// Remotes konfiguriert sind). Jeder Fehler wird pro Remote gesammelt und als
-/// `Err` mit Remote-Namen plus Auth-Hinweis zurückgegeben – auch wenn nur ein
-/// Teil der Remotes fehlschlägt (dann als [`PartialFetch`], siehe
-/// [`is_partial_fetch_error`], damit die UI `fetch_partial` statt
-/// `fetch_failed` wählen kann). `eprintln!` bleibt als Log erhalten.
+/// Remotes konfiguriert sind). Jeder Remote-Fehler wird pro Remote gesammelt und
+/// als strukturiertes [`PartialFetch`] (`succeeded` + `failed`, auch bei komplettem
+/// Fehlschlag mit leerem `succeeded`) zurückgegeben, siehe
+/// [`is_partial_fetch_error`] / [`is_fetch_error`], damit die UI `fetch_partial`
+/// statt `fetch_failed` wählen und Wrapper/Hinweis via i18n lokalisieren kann.
+/// `eprintln!` bleibt als Log erhalten.
 ///
 /// Signatur bleibt `fetch_all(path: &Path) -> anyhow::Result<()>` (Task 5 baut darauf).
 pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
     let repo =
-        Repository::open(path).map_err(|e| anyhow::anyhow!("Repo öffnen fehlgeschlagen: {e}"))?;
+        Repository::open(path).map_err(|e| anyhow::anyhow!("Failed to open repository: {e}"))?;
     let remotes = repo
         .remotes()
-        .map_err(|e| anyhow::anyhow!("Remotes lesen fehlgeschlagen: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read remotes: {e}"))?;
     if remotes.is_empty() {
         return Ok(());
     }
@@ -303,66 +304,97 @@ pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
     if failed.is_empty() {
         return Ok(());
     }
-    const AUTH_HINT: &str = "Hinweis: Credentials/SSH prüfen (ggf. Auth erforderlich)";
-    if succeeded.is_empty() {
-        // Alle Remotes fehlgeschlagen (inkl. Single-Remote-Fall)
-        let names = failed
-            .iter()
-            .map(|(n, _)| format!("'{n}'"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let details = failed
-            .iter()
-            .map(|(n, e)| format!("'{n}': {e}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        anyhow::bail!("Fetch fehlgeschlagen für Remote(s) {names}: {details}. {AUTH_HINT}");
-    }
-    // Teilweise fehlgeschlagen: einige Remotes ok, mindestens einer failed
+    // I1: alle Remote-Fehler (komplett + partiell) als strukturiertes PartialFetch.
+    // UI baut Wrapper/Hinweis lokalisiert via tr_fmt(fetch_failed/fetch_partial) +
+    // tr(auth_hint); Detail bleibt English-neutral mit opakem libgit2-Text.
     Err(anyhow::Error::new(PartialFetch { succeeded, failed }))
 }
 
-/// Marker für teilweise fehlgeschlagenen Fetch (einige Remotes ok, andere failed).
+/// Strukturierter Fetch-Fehler (alle Remotes failed UND partielle Fehlschläge).
 /// Als anyhow-Error transportiert, damit die UI per [`is_partial_fetch_error`]
-/// ohne String-Parsing `fetch_partial` statt `fetch_failed` wählen kann.
+/// ohne String-Parsing `fetch_partial` statt `fetch_failed` wählen kann und das
+/// Detail via [`PartialFetch::detail_en`] English-neutral (opake libgit2-Texte)
+/// einbettet. Display ist English-neutral für Logs/Tests; die UI lokalisiert
+/// Wrapper + Hinweis via i18n (`fetch_failed`/`fetch_partial`, `auth_hint`).
 #[derive(Debug)]
 pub struct PartialFetch {
-    succeeded: Vec<String>,
-    failed: Vec<(String, String)>,
+    pub succeeded: Vec<String>,
+    pub failed: Vec<(String, String)>,
 }
 
-impl std::fmt::Display for PartialFetch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let failed_names = self
-            .failed
-            .iter()
-            .map(|(n, _)| format!("'{n}'"))
-            .collect::<Vec<_>>()
-            .join(", ");
+impl PartialFetch {
+    /// English-neutrales Detail ohne Wrapper/Hinweis: `'<remote>': <libgit2-msg>; ...`
+    /// plus `; succeeded: '<ok>', ...` bei Teil-Erfolg. libgit2-Texte bleiben opak.
+    pub fn detail_en(&self) -> String {
         let details = self
             .failed
             .iter()
             .map(|(n, e)| format!("'{n}': {e}"))
             .collect::<Vec<_>>()
             .join("; ");
+        if self.succeeded.is_empty() {
+            return details;
+        }
         let ok_names = self
             .succeeded
             .iter()
             .map(|n| format!("'{n}'"))
             .collect::<Vec<_>>()
             .join(", ");
-        write!(
-            f,
-            "Fetch teilweise fehlgeschlagen für Remote(s) {failed_names}: {details}. Erfolgreich: {ok_names}. Hinweis: Credentials/SSH prüfen (ggf. Auth erforderlich)"
-        )
+        if details.is_empty() {
+            format!("succeeded: {ok_names}")
+        } else {
+            format!("{details}; succeeded: {ok_names}")
+        }
+    }
+}
+
+impl std::fmt::Display for PartialFetch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // English-neutral für EN-UI + Logs; DE-UI nutzt detail_en() + i18n-Wrapper.
+        const EN_HINT: &str = "Note: check Credentials/SSH (auth may be required)";
+        if self.succeeded.is_empty() {
+            let names = self
+                .failed
+                .iter()
+                .map(|(n, _)| format!("'{n}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(
+                f,
+                "Fetch failed for remote(s) {names}: {}. {EN_HINT}",
+                self.detail_en()
+            )
+        } else {
+            let failed_names = self
+                .failed
+                .iter()
+                .map(|(n, _)| format!("'{n}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(
+                f,
+                "Fetch partially failed for remote(s) {failed_names}: {}. {EN_HINT}",
+                self.detail_en()
+            )
+        }
     }
 }
 
 impl std::error::Error for PartialFetch {}
 
 /// True wenn `err` (aus [`fetch_all`]) einen teilweisen Fehlschlag beschreibt
-/// (mind. 1 Remote ok, mind. 1 failed). Sonstige Fetch-Fehler sind komplett.
+/// (mind. 1 Remote ok, mind. 1 failed). Komplette Remote-Fehler sind ebenfalls
+/// [`PartialFetch`] (mit leerem `succeeded`), zählen aber NICHT als partiell.
 pub fn is_partial_fetch_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<PartialFetch>()
+        .is_some_and(|p| !p.succeeded.is_empty())
+}
+
+/// True wenn `err` ein strukturierter Fetch-Remote-Fehler ist (komplett oder
+/// partiell, d.h. [`PartialFetch`] mit beliebigem `succeeded`). Sonstige Fehler
+/// (z.B. Repo öffnen) sind keine Remote-Fehler.
+pub fn is_fetch_error(err: &anyhow::Error) -> bool {
     err.downcast_ref::<PartialFetch>().is_some()
 }
 
@@ -1757,9 +1789,19 @@ mod tests {
         // add failing remote
         repo.remote("origin", "https://invalid.example.com/doesnotexist.git")
             .unwrap();
+        drop(repo);
         let res = fetch_all(dir.path());
-        // single remote fail should error
+        // single remote fail should error (structured complete, not partial)
         assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            is_fetch_error(&err),
+            "single fail must be fetch error: {err:#}"
+        );
+        assert!(
+            !is_partial_fetch_error(&err),
+            "single fail must not be partial: {err:#}"
+        );
     }
 
     #[test]
@@ -1786,6 +1828,13 @@ mod tests {
             is_partial_fetch_error(&err),
             "partial failure must be marked as partial, got: {err:#}"
         );
+        assert!(is_fetch_error(&err), "partial must be fetch error: {err:#}");
+        let p = err
+            .downcast_ref::<PartialFetch>()
+            .expect("partial must expose parts");
+        assert_eq!(p.succeeded, vec!["good".to_string()]);
+        assert_eq!(p.failed.len(), 1);
+        assert_eq!(p.failed[0].0, "bad");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("bad"),
@@ -1799,11 +1848,25 @@ mod tests {
             msg.contains("Credentials/SSH"),
             "error must hint at auth, got: {msg}"
         );
+        // I1: Display English-neutral (EN-UI darf kein Deutsch einbetten).
+        for german in [
+            "Hinweis",
+            "prüfen",
+            "fehlgeschlagen",
+            "teilweise",
+            "Erfolgreich",
+        ] {
+            assert!(
+                !msg.contains(german),
+                "partial Display must not embed German '{german}': {msg}"
+            );
+        }
     }
 
     #[test]
     fn fetch_all_multi_remote_all_fail_is_complete_error() {
-        // Alle Remotes fail → Err, aber kein Partial-Marker
+        // Alle Remotes fail → Err, strukturiert (PartialFetch mit leerem succeeded),
+        // aber kein Partial-Marker.
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path(), "main");
         let repo = Repository::open(dir.path()).unwrap();
@@ -1819,6 +1882,16 @@ mod tests {
             !is_partial_fetch_error(&err),
             "complete failure must not be marked partial: {err:#}"
         );
+        // I1: kompletter Fehlschlag bleibt strukturiert für lokalisierten Wrapper.
+        assert!(
+            is_fetch_error(&err),
+            "complete failure must be structured fetch error: {err:#}"
+        );
+        let p = err
+            .downcast_ref::<PartialFetch>()
+            .expect("complete must expose parts");
+        assert!(p.succeeded.is_empty(), "complete must have empty succeeded");
+        assert_eq!(p.failed.len(), 2);
         let msg = format!("{err:#}");
         assert!(
             msg.contains("bad1") && msg.contains("bad2"),
@@ -1828,6 +1901,18 @@ mod tests {
             msg.contains("Credentials/SSH"),
             "error must hint at auth, got: {msg}"
         );
+        for german in [
+            "Hinweis",
+            "prüfen",
+            "fehlgeschlagen",
+            "teilweise",
+            "Erfolgreich",
+        ] {
+            assert!(
+                !msg.contains(german),
+                "complete Display must not embed German '{german}': {msg}"
+            );
+        }
     }
 
     #[test]

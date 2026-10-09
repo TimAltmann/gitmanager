@@ -429,6 +429,8 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "fetch_failed") => "Fetch fehlgeschlagen: {}".to_string(),
         (Language::En, "fetch_partial") => "Fetch partially failed: {}".to_string(),
         (Language::De, "fetch_partial") => "Fetch teilweise fehlgeschlagen: {}".to_string(),
+        (Language::En, "auth_hint") => "Note: check Credentials/SSH (auth may be required)".to_string(),
+        (Language::De, "auth_hint") => "Hinweis: Credentials/SSH prüfen (ggf. Auth erforderlich)".to_string(),
         (Language::En, "branch_switched_to") => "Branch switched to '{}': {}".to_string(),
         (Language::De, "branch_switched_to") => "Branch zu '{}' gewechselt: {}".to_string(),
         (Language::En, "ide_not_found") => "IDE '{}' not found".to_string(),
@@ -643,10 +645,20 @@ mod tests {
 
     #[test]
     fn tr_fetch_keys_exist() {
-        for key in ["fetch_failed", "fetch_partial"] {
+        for key in ["fetch_failed", "fetch_partial", "auth_hint"] {
             assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
             assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
         }
+        // DE wrapper texts stay byte-identical (review I1).
+        assert_eq!(tr(Language::De, "fetch_failed"), "Fetch fehlgeschlagen: {}");
+        assert_eq!(
+            tr(Language::De, "fetch_partial"),
+            "Fetch teilweise fehlgeschlagen: {}"
+        );
+        assert_eq!(
+            tr(Language::De, "auth_hint"),
+            "Hinweis: Credentials/SSH prüfen (ggf. Auth erforderlich)"
+        );
         let en = tr_fmt(Language::En, "fetch_failed", &["boom"]);
         assert!(
             en.contains("boom"),
@@ -667,6 +679,39 @@ mod tests {
             de_p.contains("boom"),
             "fetch_partial DE must embed detail: {de_p}"
         );
+        // I1: EN wrapper + EN hint must be pure EN (no German embeds).
+        for s in [
+            tr(Language::En, "fetch_failed"),
+            tr(Language::En, "fetch_partial"),
+            tr(Language::En, "auth_hint"),
+        ] {
+            for german in [
+                "Hinweis",
+                "prüfen",
+                "fehlgeschlagen",
+                "teilweise",
+                "Erfolgreich",
+            ] {
+                assert!(
+                    !s.contains(german),
+                    "EN fetch text must not embed German '{german}': {s}"
+                );
+            }
+        }
+        // Full EN message (wrapper + opaque detail + hint) stays pure EN.
+        let hint_en = tr(Language::En, "auth_hint");
+        let full_en = tr_fmt(
+            Language::En,
+            "fetch_failed",
+            &[&format!("'bad': timeout. {hint_en}")],
+        );
+        assert!(full_en.contains("timeout"));
+        for german in ["Hinweis", "prüfen", "fehlgeschlagen", "teilweise"] {
+            assert!(
+                !full_en.contains(german),
+                "EN full fetch message must not embed German '{german}': {full_en}"
+            );
+        }
     }
 
     #[test]

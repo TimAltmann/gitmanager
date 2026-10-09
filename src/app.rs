@@ -35,6 +35,17 @@ pub fn fetch_error_i18n_key(fetch_partial: bool) -> &'static str {
     }
 }
 
+/// Reine Entscheidung für Settings-Save mit Autostart-Apply (I2, headless-testbar):
+/// `apply_failed=true` → Dialog offen halten, kein Scan (Korrektur/Retry);
+/// `false` → schließen + Scan. Gibt `(keep_open, should_scan)` zurück.
+pub fn settings_save_autostart_outcome(apply_failed: bool) -> (bool, bool) {
+    if apply_failed {
+        (true, false)
+    } else {
+        (false, true)
+    }
+}
+
 struct BranchDialog {
     repo_path: PathBuf,
     target_branch: String,
@@ -290,9 +301,13 @@ impl MyApp {
                     self.repos = sorted_main_repos(&repos, &self.config);
                     if let Some(raw) = fetch_error {
                         let key = fetch_error_i18n_key(fetch_partial);
-                        let msg = tr_fmt(self.config.language, key, &[&raw]);
+                        // I1: Wrapper übersetzt, Detail opak; auth_hint lokalisiert anhängen.
+                        // raw ist English-neutral ohne Hinweis (detail_en bzw. Setup-Fehler).
+                        let hint = tr(self.config.language, "auth_hint");
+                        let arg = format!("{raw}. {hint}");
+                        let msg = tr_fmt(self.config.language, key, &[&arg]);
                         // Fallback falls Key fehlt (sollte nicht passieren, i18n-Test sichert ab)
-                        let msg = if msg == key { raw } else { msg };
+                        let msg = if msg == key { arg } else { msg };
                         self.error = Some(msg.clone());
                         self.status_message = Some(msg);
                         self.status_message_time = Some(std::time::Instant::now());
@@ -1812,7 +1827,15 @@ impl eframe::App for MyApp {
                             Ok(()) => (None, false),
                             Err(e) => {
                                 let partial = crate::git::is_partial_fetch_error(&e);
-                                let msg = format!("{e:#}");
+                                // I1: strukturiertes Detail English-neutral (opake libgit2-Texte),
+                                // ohne Wrapper/Hinweis — Wrapper + auth_hint lokalisiert in poll_scan.
+                                let msg = if crate::git::is_fetch_error(&e) {
+                                    e.downcast_ref::<crate::git::PartialFetch>()
+                                        .map(|p| p.detail_en())
+                                        .unwrap_or_else(|| format!("{e:#}"))
+                                } else {
+                                    format!("{e:#}")
+                                };
                                 eprintln!(
                                     "Fetch fehlgeschlagen für {}: {msg}",
                                     path_clone.display()
@@ -1888,17 +1911,41 @@ impl eframe::App for MyApp {
                     let autostart = new_cfg.autostart;
                     self.config = new_cfg;
                     // Autostart nach Save anwenden (Registry Run-Key schreiben/entfernen)
-                    if let Err(e) = crate::autostart::apply_autostart(autostart) {
-                        eprintln!("Autostart anwenden fehlgeschlagen: {e:#}");
-                        self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                    let autostart_failed = match crate::autostart::apply_autostart(autostart) {
+                        Ok(()) => false,
+                        Err(e) => {
+                            eprintln!("Autostart anwenden fehlgeschlagen: {e:#}");
+                            let msg = tr_fmt(lang, "save_failed", &[&format!("{e:#}")]);
+                            self.error = Some(msg.clone());
+                            // I2: Dialog offen halten für Korrektur/Retry; Fehler auch
+                            // im Settings-State sichtbar (show_settings_window zeigt
+                            // state.error rot an).
+                            let mut reopened = SettingsState::from_config(&self.config);
+                            reopened.error = Some(msg);
+                            reopened.success = None;
+                            self.settings_state = Some(reopened);
+                            self.show_settings = true;
+                            self.mark_tray_dirty();
+                            true
+                        }
+                    };
+                    // I2-Entscheidung (rein, headless-testbar): Err → offen/kein Scan,
+                    // Ok → schließen + Scan. Registry-Err ist headless nicht erzwingbar
+                    // (Non-Windows No-Op), daher ist die Verzweigung hier explizit plus
+                    // Unit-Test für settings_save_autostart_outcome.
+                    let (keep_open, should_scan) =
+                        settings_save_autostart_outcome(autostart_failed);
+                    if !keep_open {
+                        // Review-Fix: Tray-Settings (Icons/Limit) bis Scan-Ende stale.
+                        self.mark_tray_dirty();
+                        self.settings_state = Some(SettingsState::from_config(&self.config));
+                        self.show_settings = false;
+                        self.status_message = Some(tr(lang, "saved_scan_restart"));
+                        self.status_message_time = Some(std::time::Instant::now());
                     }
-                    // Review-Fix: Tray-Settings (Icons/Limit) bis Scan-Ende stale.
-                    self.mark_tray_dirty();
-                    self.settings_state = Some(SettingsState::from_config(&self.config));
-                    self.show_settings = false;
-                    self.status_message = Some(tr(lang, "saved_scan_restart"));
-                    self.status_message_time = Some(std::time::Instant::now());
-                    self.start_scan();
+                    if should_scan {
+                        self.start_scan();
+                    }
                 } else if self.show_settings {
                     self.settings_state = Some(state);
                 } else {
@@ -2118,7 +2165,7 @@ mod tests {
         app.scan_tx
             .send(ScanResult::FetchDone {
                 repos: vec![],
-                fetch_error: Some("Remote 'origin': auth failed".to_string()),
+                fetch_error: Some("'origin': auth failed".to_string()),
                 fetch_partial: false,
             })
             .expect("send fetch done");
@@ -2127,12 +2174,17 @@ mod tests {
         assert!(!app.scanning, "fetch done must clear spinner");
         let err = app.error.expect("error must be set");
         assert!(
-            err.contains("Remote 'origin': auth failed"),
+            err.contains("'origin': auth failed"),
             "error must embed fetch detail, got: {err}"
         );
         assert!(
             err.contains(&crate::i18n::tr(app.config.language, "fetch_failed").replace(" {}", "")),
             "complete failure must use fetch_failed key, got: {err}"
+        );
+        // I1: lokalisierter auth_hint wird angehängt.
+        assert!(
+            err.contains(&crate::i18n::tr(app.config.language, "auth_hint")),
+            "error must append localized auth_hint, got: {err}"
         );
         assert!(app.status_message.is_some(), "status must be set");
         assert!(app.tray_dirty, "fetch error must mark tray dirty");
@@ -2145,7 +2197,8 @@ mod tests {
         app.scan_tx
             .send(ScanResult::FetchDone {
                 repos: vec![],
-                fetch_error: Some("Remote 'bad': timeout. Erfolgreich: 'good'".to_string()),
+                // I1: Background liefert English-neutral (detail_en), kein Deutsch.
+                fetch_error: Some("'bad': timeout; succeeded: 'good'".to_string()),
                 fetch_partial: true,
             })
             .expect("send fetch done");
@@ -2154,14 +2207,55 @@ mod tests {
         assert!(!app.scanning);
         let err = app.error.expect("error must be set");
         assert!(
-            err.contains("Remote 'bad'"),
+            err.contains("'bad'"),
             "error must embed fetch detail, got: {err}"
         );
         assert!(
             err.contains(&crate::i18n::tr(app.config.language, "fetch_partial").replace(" {}", "")),
             "partial failure must use fetch_partial key, got: {err}"
         );
+        assert!(
+            err.contains(&crate::i18n::tr(app.config.language, "auth_hint")),
+            "partial must append localized auth_hint, got: {err}"
+        );
         assert!(app.status_message.is_some());
+    }
+
+    #[test]
+    fn poll_scan_fetch_error_en_has_no_german() {
+        // I1: EN-UI darf kein Deutsch einbetten (Wrapper + Hint + Detail EN).
+        let mut app = test_app();
+        assert_eq!(app.config.language, crate::i18n::Language::En);
+        app.scanning = true;
+        app.scan_tx
+            .send(ScanResult::FetchDone {
+                repos: vec![],
+                fetch_error: Some("'bad': timeout; succeeded: 'good'".to_string()),
+                fetch_partial: true,
+            })
+            .expect("send");
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        let err = app.error.expect("error must be set");
+        for german in [
+            "Hinweis",
+            "prüfen",
+            "fehlgeschlagen",
+            "teilweise",
+            "Erfolgreich",
+        ] {
+            assert!(
+                !err.contains(german),
+                "EN fetch message must not embed German '{german}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_save_autostart_outcome_keeps_open_on_err() {
+        // I2: reiner Zweig (Registry-Err headless nicht erzwingbar, Non-Windows No-Op).
+        assert_eq!(settings_save_autostart_outcome(true), (true, false));
+        assert_eq!(settings_save_autostart_outcome(false), (false, true));
     }
 
     #[test]
