@@ -98,6 +98,11 @@ pub struct MyApp {
 impl MyApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let config = AppConfig::load();
+        // Startup-Sync: Run-Key mit aktueller exe synchronisieren (falls exe verschoben).
+        // Best effort — kein Start-Abbruch bei Registry-Fehlern.
+        if let Err(e) = crate::autostart::apply_autostart(config.autostart) {
+            eprintln!("Autostart-Sync fehlgeschlagen: {e:#}");
+        }
         crate::ui::theme::apply_theme(&cc.egui_ctx, &config.theme);
         // SVG Icons loader für egui_extras
         egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -1769,7 +1774,13 @@ impl eframe::App for MyApp {
                     // Theme sofort anwenden
                     crate::ui::theme::apply_theme(&ctx, &new_cfg.theme);
                     let lang = new_cfg.language;
+                    let autostart = new_cfg.autostart;
                     self.config = new_cfg;
+                    // Autostart nach Save anwenden (Registry Run-Key schreiben/entfernen)
+                    if let Err(e) = crate::autostart::apply_autostart(autostart) {
+                        eprintln!("Autostart anwenden fehlgeschlagen: {e:#}");
+                        self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                    }
                     // Review-Fix: Tray-Settings (Icons/Limit) bis Scan-Ende stale.
                     self.mark_tray_dirty();
                     self.settings_state = Some(SettingsState::from_config(&self.config));

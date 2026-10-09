@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 // --- Default helpers ---
 fn default_config_version() -> u32 {
-    10
+    11
 }
 fn default_tray_max_display() -> usize {
     10
@@ -624,6 +624,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub repo_usage: HashMap<String, RepoUsage>,
+
+    #[serde(default)]
+    pub autostart: bool,
 }
 
 impl Default for AppConfig {
@@ -653,6 +656,7 @@ impl Default for AppConfig {
             tray_branch_limit: default_tray_branch_limit(),
             tray_icons: TrayIconConfig::default(),
             repo_usage: HashMap::new(),
+            autostart: false,
         }
     }
 }
@@ -1022,6 +1026,12 @@ impl AppConfig {
                 cfg.repo_usage = normalized;
             }
             cfg.config_version = 10;
+            let _ = cfg.save();
+        }
+        if cfg.config_version < 11 {
+            // v11: Autostart via Registry Run-Key (Windows), Default false via serde.
+            // Kein Pfad-Schreiben hier — Registry-Sync erfolgt in app.rs (Save + Startup).
+            cfg.config_version = 11;
             let _ = cfg.save();
         }
         if cfg.branch_display_limit == 0 {
@@ -2014,7 +2024,7 @@ mod tests {
     fn config_default_has_valid_state() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.max_depth, 2);
-        assert_eq!(cfg.config_version, 10);
+        assert_eq!(cfg.config_version, 11);
         assert_eq!(cfg.active_profile_id, "dotnet");
         assert!(!cfg.profiles.is_empty());
         assert_eq!(cfg.agents.len(), 6);
@@ -2290,7 +2300,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded.roots.len(), 2);
         assert_eq!(loaded.max_depth, 3);
-        assert_eq!(loaded.config_version, 10);
+        assert_eq!(loaded.config_version, 11);
     }
 
     #[test]
@@ -2905,5 +2915,30 @@ mod tests {
     fn profile_has_config_selectors_empty_by_default() {
         let cfg = AppConfig::default();
         assert!(cfg.get_active_profile().config_selectors.is_empty());
+    }
+
+    #[test]
+    fn autostart_serde_roundtrip() {
+        let mut cfg = AppConfig::default();
+        assert!(!cfg.autostart);
+        cfg.autostart = true;
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("autostart"));
+        let de: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(de.autostart);
+        let mut cfg2 = AppConfig::default();
+        cfg2.autostart = false;
+        let json2 = serde_json::to_string(&cfg2).unwrap();
+        let de2: AppConfig = serde_json::from_str(&json2).unwrap();
+        assert!(!de2.autostart);
+    }
+
+    #[test]
+    fn autostart_migration_v10_defaults_false() {
+        // v10 config ohne autostart-Feld -> serde default false
+        let json = r#"{"roots":[],"max_depth":2,"config_version":10}"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.autostart);
+        assert_eq!(cfg.config_version, 10);
     }
 }

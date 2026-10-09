@@ -668,6 +668,26 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
             );
         }
     }
+    // Autostart via Registry Run-Key (neben Update-Check im General-Tab)
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    {
+        let lang = state.draft.language;
+        let mut autostart = state.draft.autostart;
+        if ui
+            .checkbox(&mut autostart, tr(lang, "autostart_label"))
+            .changed()
+        {
+            state.draft.autostart = autostart;
+        }
+        ui.label(
+            RichText::new(tr(lang, "autostart_hint"))
+                .size(10.0)
+                .color(Color32::from_rgb(120, 120, 120))
+                .italics(),
+        );
+    }
 }
 
 fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {

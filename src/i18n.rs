@@ -329,6 +329,10 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "tray_update_hint_on") => "✓ Beim Start wird einmalig api.github.com abgefragt (5 s Timeout). Deaktivieren für Offline-/Firmennetze. Änderung wirkt ab Neustart.".to_string(),
         (Language::En, "tray_update_hint_off") => "Update check disabled — no network request on startup. Takes effect after restart.".to_string(),
         (Language::De, "tray_update_hint_off") => "Update-Check deaktiviert — keine Netzwerkabfrage beim Start. Änderung wirkt ab Neustart.".to_string(),
+        (Language::En, "autostart_label") => "Start automatically with Windows".to_string(),
+        (Language::De, "autostart_label") => "Automatisch mit Windows starten".to_string(),
+        (Language::En, "autostart_hint") => "Adds/removes GitManager in Windows Autostart (Registry Run key). Takes effect on next login.".to_string(),
+        (Language::De, "autostart_hint") => "Trägt GitManager in den Windows-Autostart ein (Registry Run-Key). Wirkt ab der nächsten Anmeldung.".to_string(),
         (Language::En, "tray_update_error") => "Last update check failed: {}".to_string(),
         (Language::De, "tray_update_error") => "Letzter Update-Check fehlgeschlagen: {}".to_string(),
         (Language::En, "tray_branch_limit_title") => "Tray Branch Limit".to_string(),
@@ -588,6 +592,14 @@ mod tests {
             sde.contains("Tray-Popup"),
             "DE summary should mention Tray-Popup: {sde}"
         );
+    }
+
+    #[test]
+    fn tr_autostart_keys_exist() {
+        for key in ["autostart_label", "autostart_hint"] {
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+        }
     }
 
     #[test]

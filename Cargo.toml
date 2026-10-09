@@ -27,6 +27,7 @@ ureq = { version = "2.9", features = ["json", "tls"] }
 semver = "1.0"
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-icon = "0.24"
+winreg = "0.52"
 
 [dev-dependencies]
 tempfile = "3.27"
