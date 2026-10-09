@@ -466,6 +466,16 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::En, "sort_title") => "Sorting".to_string(),
         (Language::De, "sort_title") => "Sortierung".to_string(),
 
+        // ── Behind indicator + auto-fetch (Task 5) ───────────────────
+        (Language::En, "branch_behind") => "Behind by {} commit(s)".to_string(),
+        (Language::De, "branch_behind") => "{} Commit(s) hinterher".to_string(),
+        (Language::En, "auto_fetch_label") => "Auto-fetch interval (minutes, 0 = off)".to_string(),
+        (Language::De, "auto_fetch_label") => "Auto-Fetch Intervall (Minuten, 0 = aus)".to_string(),
+        (Language::En, "auto_fetch_hint") => "Periodically runs git fetch --all for visible repos in background. 0 disables.".to_string(),
+        (Language::De, "auto_fetch_hint") => "Führt periodisch git fetch --all für sichtbare Repos im Hintergrund aus. 0 deaktiviert.".to_string(),
+        (Language::En, "auto_fetch_off") => "Disabled".to_string(),
+        (Language::De, "auto_fetch_off") => "Deaktiviert".to_string(),
+
         // fallback for any missing key -> return key itself
         (Language::En, _) => key.to_string(),
         (Language::De, _) => key.to_string(),
@@ -651,6 +661,23 @@ mod tests {
             de_p.contains("boom"),
             "fetch_partial DE must embed detail: {de_p}"
         );
+    }
+
+    #[test]
+    fn tr_behind_auto_fetch_keys_exist() {
+        for key in [
+            "branch_behind",
+            "auto_fetch_label",
+            "auto_fetch_hint",
+            "auto_fetch_off",
+        ] {
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+        }
+        let en = tr_fmt(Language::En, "branch_behind", &["3"]);
+        assert!(en.contains('3'), "branch_behind EN must embed count: {en}");
+        let de = tr_fmt(Language::De, "branch_behind", &["3"]);
+        assert!(de.contains('3'), "branch_behind DE must embed count: {de}");
     }
 
     #[test]

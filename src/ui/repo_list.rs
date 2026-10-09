@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::git::RepoInfo;
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_fmt};
 use egui::{Color32, RichText, Ui, Vec2};
 
 // Icons via egui include_image! (Simple Icons CC0 + Phosphor for folder)
@@ -25,6 +25,27 @@ const ICON_GIT_COMMIT: egui::ImageSource =
     egui::include_image!("../../assets/icons/git-commit.svg");
 const ICON_SEARCH: egui::ImageSource = egui::include_image!("../../assets/icons/search.svg");
 const ICON_REFRESH: egui::ImageSource = egui::include_image!("../../assets/icons/refresh.svg");
+const ICON_WARNING: egui::ImageSource = egui::include_image!("../../assets/icons/warning.svg");
+
+/// Tooltip-Text für den Branch-Button: Basis + optional `branch_behind`-Hinweis.
+pub fn branch_button_tooltip(
+    lang: crate::i18n::Language,
+    branch: &str,
+    detached: bool,
+    behind: usize,
+) -> String {
+    let base = if detached {
+        format!("{}: {}", branch, tr(lang, "detached_tooltip"))
+    } else {
+        format!("{} – {}", branch, tr(lang, "branch_switch_tooltip"))
+    };
+    if behind > 0 {
+        let behind_txt = tr_fmt(lang, "branch_behind", &[&behind.to_string()]);
+        format!("{base} • {behind_txt}")
+    } else {
+        base
+    }
+}
 
 fn ide_icon_for(ide_id: &str) -> egui::ImageSource<'static> {
     match ide_id {
@@ -258,19 +279,12 @@ fn show_repo_row(
                 } else {
                     ICON_GIT_BRANCH
                 };
-                let branch_tooltip = if repo.is_detached {
-                    format!(
-                        "{}: {}",
-                        repo.branch,
-                        tr(config.language, "detached_tooltip")
-                    )
-                } else {
-                    format!(
-                        "{} – {}",
-                        repo.branch,
-                        tr(config.language, "branch_switch_tooltip")
-                    )
-                };
+                let branch_tooltip = branch_button_tooltip(
+                    config.language,
+                    &repo.branch,
+                    repo.is_detached,
+                    repo.behind,
+                );
                 // Branch Dropdown: adaptive Breite für lange Branchenamen (140..280)
                 let branch_width = (branch_text.len() as f32 * 7.0 + 46.0).clamp(140.0, 280.0);
                 // Branch Dropdown: Chevron jetzt innerhalb des Buttons (rechtsbündig)
@@ -304,6 +318,20 @@ fn show_repo_row(
                         .on_hover_text(branch_tooltip.clone())
                     })
                     .inner;
+                // Task 5: Veraltet-Icon wenn behind>0 (Pattern app.rs: WARNING tint orange/rot)
+                if repo.behind > 0 {
+                    let behind_txt = tr_fmt(
+                        config.language,
+                        "branch_behind",
+                        &[&repo.behind.to_string()],
+                    );
+                    ui.add(
+                        egui::Image::new(ICON_WARNING)
+                            .fit_to_exact_size(Vec2::splat(14.0))
+                            .tint(Color32::from_rgb(200, 120, 40)),
+                    )
+                    .on_hover_text(behind_txt);
+                }
                 let should_toggle = btn_resp.clicked();
                 if should_toggle {
                     popup_open = !popup_open;
@@ -1526,5 +1554,24 @@ mod tests {
         assert_eq!(sorted[0].name, "Alpha");
         assert_eq!(sorted[1].name, "beta");
         assert_eq!(sorted[2].name, "zeta");
+    }
+
+    #[test]
+    fn branch_button_tooltip_embeds_behind() {
+        use crate::i18n::Language;
+        let clean_en = branch_button_tooltip(Language::En, "main", false, 0);
+        assert!(clean_en.contains("main"));
+        assert!(!clean_en.contains("Behind"));
+        let behind_en = branch_button_tooltip(Language::En, "main", false, 3);
+        assert!(behind_en.contains("main"));
+        assert!(behind_en.contains('3'));
+        assert!(behind_en.contains("Behind"));
+        let behind_de = branch_button_tooltip(Language::De, "main", false, 2);
+        assert!(behind_de.contains('2'));
+        assert!(behind_de.contains("hinterher"));
+        let detached = branch_button_tooltip(Language::En, "abc1234", true, 0);
+        assert!(detached.contains("Detached"));
+        let detached_behind = branch_button_tooltip(Language::En, "abc1234", true, 1);
+        assert!(detached_behind.contains('1'));
     }
 }

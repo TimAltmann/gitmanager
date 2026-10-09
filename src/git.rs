@@ -76,6 +76,10 @@ pub struct RepoInfo {
     pub selected_solution: Option<PathBuf>,
     pub custom_values: HashMap<String, String>,
     pub custom_errors: HashMap<String, String>,
+    /// Commits voraus (lokal vor Upstream). Scan-only, Default 0.
+    pub ahead: usize,
+    /// Commits hinterher (Upstream vor lokal). Scan-only, Default 0.
+    pub behind: usize,
 }
 
 impl RepoInfo {
@@ -95,6 +99,8 @@ impl RepoInfo {
             selected_solution: None,
             custom_values: HashMap::new(),
             custom_errors: HashMap::new(),
+            ahead: 0,
+            behind: 0,
         }
     }
 
@@ -360,6 +366,74 @@ pub fn is_partial_fetch_error(err: &anyhow::Error) -> bool {
     err.downcast_ref::<PartialFetch>().is_some()
 }
 
+/// Ermittelt (ahead, behind) des aktuellen Branches gegenüber Upstream.
+///
+/// Upstream-Auflösung: `branch_upstream` (lokaler Tracking-Branch) oder
+/// `origin/<branch>` als Fallback. Detached HEAD, fehlender Upstream oder
+/// kein Remote → `(0, 0)`. Scan-only, nie Err — Fehler bedeuten "unbekannt".
+pub fn ahead_behind(path: &Path) -> (usize, usize) {
+    let repo = match Repository::open(path) {
+        Ok(r) => r,
+        Err(_) => return (0, 0),
+    };
+    if repo.is_bare() {
+        return (0, 0);
+    }
+    let (branch, detached) = get_branch(&repo);
+    if detached {
+        return (0, 0);
+    }
+    if branch.is_empty() || branch == "no commits" || branch == "detached" {
+        return (0, 0);
+    }
+    // Lokale OID: refs/heads/<branch>, Fallback HEAD target.
+    let local_oid = match repo.refname_to_id(&format!("refs/heads/{branch}")) {
+        Ok(o) => o,
+        Err(_) => match repo.head().ok().and_then(|h| h.target()) {
+            Some(o) => o,
+            None => return (0, 0),
+        },
+    };
+    // 1) Tracking-Upstream via branch_upstream
+    if let Ok(local_branch) = repo.find_branch(&branch, BranchType::Local) {
+        if let Ok(upstream) = local_branch.upstream() {
+            // upstream.get().target() ist die OID des Upstream-Commits
+            if let Some(up_oid) = upstream.get().target() {
+                if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
+                    return (a, b);
+                }
+            } else if let Ok(up_ref) = upstream.get().peel_to_commit() {
+                if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_ref.id()) {
+                    return (a, b);
+                }
+            }
+            // Upstream bekannt aber graph failed → (0,0) statt Fallback-Raten
+            // (verhindert falsche origin/<branch>-Werte bei divergenten Refs).
+            // Falls upstream-OID fehlt, falle unten auf origin/<branch> zurück.
+            if upstream.get().target().is_some() {
+                return (0, 0);
+            }
+        }
+    }
+    // 2) Fallback: origin/<branch>
+    for candidate in [
+        format!("refs/remotes/origin/{branch}"),
+        format!("origin/{branch}"),
+    ] {
+        if let Ok(obj) = repo.revparse_single(&candidate) {
+            let up_oid = obj
+                .peel_to_commit()
+                .map(|c| c.id())
+                .unwrap_or_else(|_| obj.id());
+            if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
+                return (a, b);
+            }
+            return (0, 0);
+        }
+    }
+    (0, 0)
+}
+
 /// Öffnet den Explorer / Dateimanager im Repo-Verzeichnis
 pub fn open_in_explorer(path: &Path) -> anyhow::Result<()> {
     #[cfg(test)]
@@ -580,7 +654,11 @@ pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
     let (branch, is_detached) = get_branch(&repo);
     let dirty = is_dirty(&repo);
     let branches = list_branches(&path);
-    Some(RepoInfo::new(path, branch, dirty, is_detached).with_branches(branches))
+    let (ahead, behind) = ahead_behind(&path);
+    let mut info = RepoInfo::new(path, branch, dirty, is_detached).with_branches(branches);
+    info.ahead = ahead;
+    info.behind = behind;
+    Some(info)
 }
 
 // --- IDE & Agent Launch Helpers ---
@@ -1758,6 +1836,120 @@ mod tests {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path(), "main");
         assert!(fetch_all(dir.path()).is_ok());
+    }
+
+    // --- Task 5 TDD RED: ahead_behind mit 2 Clones (1 Commit voraus) ---
+    fn git_cmd(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} spawn failed: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} in {} failed: stdout={} stderr={}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn ahead_behind_two_clones_one_commit_behind() {
+        // Bare-Origin + 2 Clones: clone1 pusht 1 Commit voraus, clone2 fetcht → behind=1.
+        let base = tempdir().unwrap();
+        let origin = base.path().join("origin.git");
+        let c1 = base.path().join("c1");
+        let c2 = base.path().join("c2");
+        git_cmd(base.path(), &["init", "--bare", "origin.git"]);
+        git_cmd(base.path(), &["clone", "origin.git", "c1"]);
+        git_cmd(&c1, &["config", "user.name", "Test"]);
+        git_cmd(&c1, &["config", "user.email", "test@test.com"]);
+        git_cmd(&c1, &["checkout", "-b", "main"]);
+        fs::write(c1.join("a.txt"), "one\n").unwrap();
+        git_cmd(&c1, &["add", "a.txt"]);
+        git_cmd(&c1, &["commit", "-m", "initial"]);
+        git_cmd(&c1, &["push", "-u", "origin", "main"]);
+        // Origin-HEAD auf main zeigen, damit Folge-Clones direkt main auschecken
+        let _ = std::process::Command::new("git")
+            .args([
+                "--git-dir",
+                "origin.git",
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/main",
+            ])
+            .current_dir(base.path())
+            .output();
+        // Zweiter Clone kennt main bereits (explizit -b main für Robustheit)
+        git_cmd(base.path(), &["clone", "-b", "main", "origin.git", "c2"]);
+        git_cmd(&c2, &["config", "user.name", "Test"]);
+        git_cmd(&c2, &["config", "user.email", "test@test.com"]);
+        // c1 ein Commit voraus + push
+        fs::write(c1.join("b.txt"), "two\n").unwrap();
+        git_cmd(&c1, &["add", "b.txt"]);
+        git_cmd(&c1, &["commit", "-m", "second"]);
+        git_cmd(&c1, &["push", "origin", "main"]);
+        // c2 fetcht → kennt neuen origin/main, ist 1 behind
+        git_cmd(&c2, &["fetch", "origin"]);
+        let _ = &origin;
+        let (ahead_c2, behind_c2) = ahead_behind(&c2);
+        assert_eq!(ahead_c2, 0, "c2 should not be ahead");
+        assert_eq!(behind_c2, 1, "c2 should be 1 behind after fetch");
+        let (ahead_c1, behind_c1) = ahead_behind(&c1);
+        assert_eq!(
+            (ahead_c1, behind_c1),
+            (0, 0),
+            "up-to-date clone must be (0,0)"
+        );
+    }
+
+    #[test]
+    fn ahead_behind_detached_and_no_remote_is_zero() {
+        // Detached HEAD und Repo ohne Remote → (0,0), kein Panic.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        assert_eq!(ahead_behind(dir.path()), (0, 0));
+        // Detached
+        let repo = Repository::open(dir.path()).unwrap();
+        let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.set_head_detached(oid).unwrap();
+        drop(repo);
+        assert_eq!(ahead_behind(dir.path()), (0, 0));
+        // Ungültiger Pfad → (0,0)
+        assert_eq!(ahead_behind(Path::new("/nonexistent/xyz-123")), (0, 0));
+    }
+
+    #[test]
+    fn ahead_behind_ahead_one_when_local_commit_not_pushed() {
+        // Lokaler Commit ohne Push → ahead=1, behind=0.
+        let base = tempdir().unwrap();
+        git_cmd(base.path(), &["init", "--bare", "origin.git"]);
+        git_cmd(base.path(), &["clone", "origin.git", "c1"]);
+        let c1 = base.path().join("c1");
+        git_cmd(&c1, &["config", "user.name", "Test"]);
+        git_cmd(&c1, &["config", "user.email", "test@test.com"]);
+        git_cmd(&c1, &["checkout", "-b", "main"]);
+        fs::write(c1.join("a.txt"), "one\n").unwrap();
+        git_cmd(&c1, &["add", "a.txt"]);
+        git_cmd(&c1, &["commit", "-m", "initial"]);
+        git_cmd(&c1, &["push", "-u", "origin", "main"]);
+        // Lokaler Commit ohne Push
+        fs::write(c1.join("local.txt"), "local\n").unwrap();
+        git_cmd(&c1, &["add", "local.txt"]);
+        git_cmd(&c1, &["commit", "-m", "local-only"]);
+        let (ahead, behind) = ahead_behind(&c1);
+        assert_eq!(ahead, 1, "local-only commit must be ahead 1");
+        assert_eq!(behind, 0);
+    }
+
+    #[test]
+    fn get_repo_info_fills_ahead_behind_defaults() {
+        // Ohne Remote → (0,0); mit Remote nach Fetch → behind=1.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        let info = get_repo_info(dir.path().to_path_buf()).unwrap();
+        assert_eq!((info.ahead, info.behind), (0, 0));
     }
 
     #[test]

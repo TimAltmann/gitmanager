@@ -7,10 +7,13 @@ use std::path::{Path, PathBuf};
 
 // --- Default helpers ---
 fn default_config_version() -> u32 {
-    12
+    13
 }
 fn default_sort_mode() -> RepoSortMode {
     RepoSortMode::LastUsed
+}
+fn default_auto_fetch_interval() -> u64 {
+    10
 }
 
 /// Sortierung der Haupt-Repo-Liste (Task 4).
@@ -648,6 +651,10 @@ pub struct AppConfig {
 
     #[serde(default = "default_sort_mode")]
     pub main_sort_mode: RepoSortMode,
+
+    /// Auto-Fetch Intervall in Minuten (Task 5). 0 = aus. Default 10.
+    #[serde(default = "default_auto_fetch_interval")]
+    pub auto_fetch_interval_min: u64,
 }
 
 impl Default for AppConfig {
@@ -679,6 +686,7 @@ impl Default for AppConfig {
             repo_usage: HashMap::new(),
             autostart: false,
             main_sort_mode: default_sort_mode(),
+            auto_fetch_interval_min: default_auto_fetch_interval(),
         }
     }
 }
@@ -1060,6 +1068,13 @@ impl AppConfig {
             // v12: main_sort_mode eingeführt (Default LastUsed via serde).
             // Alte Configs ohne Feld erhalten automatisch LastUsed — hier nur Version bump.
             cfg.config_version = 12;
+            let _ = cfg.save();
+        }
+        if cfg.config_version < 13 {
+            // v13: auto_fetch_interval_min eingeführt (Default 10 via serde, 0=aus).
+            // Alte Configs ohne Feld erhalten automatisch 10 — hier nur Version bump.
+            // Kein Clamp: 0 ist bewusst "aus", Obergrenze offen (Praxis 5–60).
+            cfg.config_version = 13;
             let _ = cfg.save();
         }
         if cfg.branch_display_limit == 0 {
@@ -2052,7 +2067,7 @@ mod tests {
     fn config_default_has_valid_state() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.max_depth, 2);
-        assert_eq!(cfg.config_version, 12);
+        assert_eq!(cfg.config_version, 13);
         assert_eq!(cfg.active_profile_id, "dotnet");
         assert!(!cfg.profiles.is_empty());
         assert_eq!(cfg.agents.len(), 6);
@@ -2060,6 +2075,7 @@ mod tests {
         assert_eq!(cfg.terminal.preference, TerminalPreference::Auto);
         assert_eq!(cfg.terminal.fallback, TerminalPreference::Cmd);
         assert!(cfg.repo_state.is_empty());
+        assert_eq!(cfg.auto_fetch_interval_min, 10);
     }
 
     #[test]
@@ -2328,7 +2344,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded.roots.len(), 2);
         assert_eq!(loaded.max_depth, 3);
-        assert_eq!(loaded.config_version, 12);
+        assert_eq!(loaded.config_version, 13);
     }
 
     #[test]
@@ -2974,7 +2990,7 @@ mod tests {
     fn sort_mode_default_is_last_used() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.main_sort_mode, RepoSortMode::LastUsed);
-        assert_eq!(cfg.config_version, 12);
+        assert_eq!(cfg.config_version, 13);
     }
 
     #[test]
@@ -2999,5 +3015,24 @@ mod tests {
         let cfg: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.main_sort_mode, RepoSortMode::LastUsed);
         assert_eq!(cfg.config_version, 11);
+    }
+
+    #[test]
+    fn auto_fetch_default_is_10_and_zero_means_off() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.auto_fetch_interval_min, 10);
+        // serde default bei fehlendem Feld (v12-Config)
+        let json = r#"{"roots":[],"max_depth":2,"config_version":12}"#;
+        let old: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(old.auto_fetch_interval_min, 10);
+        // 0 bleibt 0 (aus), kein Clamp auf Default
+        let json_off =
+            r#"{"roots":[],"max_depth":2,"config_version":13,"auto_fetch_interval_min":0}"#;
+        let off: AppConfig = serde_json::from_str(json_off).unwrap();
+        assert_eq!(off.auto_fetch_interval_min, 0);
+        // Roundtrip
+        let json_rt = serde_json::to_string(&cfg).unwrap();
+        let rt: AppConfig = serde_json::from_str(&json_rt).unwrap();
+        assert_eq!(rt.auto_fetch_interval_min, 10);
     }
 }

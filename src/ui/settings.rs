@@ -729,6 +729,47 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
             .response
             .on_hover_text(tr(lang, "sort_tooltip"));
     }
+    // Task 5: Auto-Fetch Intervall (0 = aus, Default 10)
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    {
+        let lang = state.draft.language;
+        ui.label(
+            RichText::new(tr(lang, "auto_fetch_label"))
+                .size(13.0)
+                .strong(),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(tr(lang, "auto_fetch_hint"))
+                .size(11.0)
+                .color(Color32::from_rgb(100, 100, 100)),
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let mut mins = state.draft.auto_fetch_interval_min;
+            let off_txt = tr(lang, "auto_fetch_off");
+            let unit = if mins == 0 {
+                off_txt
+            } else {
+                "min".to_string()
+            };
+            let slider = egui::Slider::new(&mut mins, 0..=120).text(unit);
+            if ui.add(slider).changed() {
+                state.draft.auto_fetch_interval_min = mins;
+            }
+        });
+        ui.horizontal(|ui| {
+            let mut mins = state.draft.auto_fetch_interval_min;
+            if ui
+                .add(egui::DragValue::new(&mut mins).range(0..=120).speed(1.0))
+                .changed()
+            {
+                state.draft.auto_fetch_interval_min = mins.min(120);
+            }
+        });
+    }
 }
 
 fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {

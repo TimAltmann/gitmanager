@@ -94,6 +94,9 @@ pub struct MyApp {
     tray_dirty: bool,
     window_visible: bool,
     should_quit: bool,
+    /// Task 5: Zeitpunkt des letzten periodischen Auto-Fetch (throttled).
+    /// `None` = noch nie gelaufen (erster Durchlauf nach Startup-Scan fällig).
+    last_auto_fetch: Option<std::time::Instant>,
 }
 
 impl MyApp {
@@ -149,6 +152,9 @@ impl MyApp {
             tray_dirty: false,
             window_visible: true,
             should_quit: false,
+            // Task 5: direkt auf now setzen — erster Auto-Fetch erst nach Intervall,
+            // nicht sofort nach Startup-Scan (vermeidet Doppel-Fetch beim Start).
+            last_auto_fetch: Some(std::time::Instant::now()),
         };
         #[cfg(target_os = "windows")]
         {
@@ -440,6 +446,27 @@ fn should_sync_tray_service(
     }
 }
 
+/// Task 5: Entscheidung für periodischen Auto-Fetch (throttled, Pattern
+/// `should_sync_tray_service`): nur wenn Intervall > 0 (0 = aus) und seit dem
+/// letzten Lauf mindestens `interval_min` Minuten vergangen sind.
+/// `None` als `last` bedeutet "noch nie" → fällig.
+pub fn should_auto_fetch(
+    last: Option<std::time::Instant>,
+    interval_min: u64,
+    now: std::time::Instant,
+) -> bool {
+    if interval_min == 0 {
+        return false;
+    }
+    match last {
+        None => true,
+        Some(t) => {
+            now.saturating_duration_since(t)
+                >= std::time::Duration::from_secs(interval_min.saturating_mul(60))
+        }
+    }
+}
+
 /// Pure helper for minimize-to-tray decision (H1).
 /// `tray_available` must be true only when a tray icon + service actually exist,
 /// otherwise minimizing would hide the window with no way back.
@@ -483,6 +510,45 @@ impl MyApp {
     /// #5: Tray-Daten als geändert markieren (nächster Throttle-Sync übernimmt).
     fn mark_tray_dirty(&mut self) {
         self.tray_dirty = true;
+    }
+
+    /// Task 5: Periodischer Auto-Fetch im Hintergrund (throttled).
+    /// Nur sichtbare Repos (`self.repos` = bereits sortierte View-Liste),
+    /// nutzt ehrliches `fetch_all` (Fehler nur loggen, kein Error-Popup —
+    /// sonst würde ein Offline-Remote alle paar Minuten rot blinken).
+    /// Danach Rescan für frische `behind`-Counts.
+    fn maybe_auto_fetch(&mut self, ctx: &egui::Context) {
+        let interval = self.config.auto_fetch_interval_min;
+        if interval == 0 || self.scanning || self.repos.is_empty() {
+            // Idle-Wake für nächsten Check: min(Intervall, 60s), damit
+            // `logic()` auch ohne Events aufwacht.
+            if interval > 0 {
+                ctx.request_repaint_after(std::time::Duration::from_secs(60));
+            }
+            return;
+        }
+        let now = std::time::Instant::now();
+        if !should_auto_fetch(self.last_auto_fetch, interval, now) {
+            ctx.request_repaint_after(std::time::Duration::from_secs(60));
+            return;
+        }
+        self.last_auto_fetch = Some(now);
+        self.scanning = true;
+        let paths: Vec<PathBuf> = self.repos.iter().map(|r| r.path.clone()).collect();
+        let cfg = self.config.clone();
+        let tx = self.scan_tx.clone();
+        std::thread::spawn(move || {
+            for p in &paths {
+                if let Err(e) = crate::git::fetch_all(p) {
+                    // Still (kein Popup): nur loggen, Rescan liefert trotzdem frische Counts
+                    // für erreichbare Remotes.
+                    eprintln!("Auto-Fetch für {} fehlgeschlagen: {e:#}", p.display());
+                }
+            }
+            let repos = crate::scanner::scan_repos(&cfg);
+            let _ = tx.send(ScanResult::Repos(repos));
+        });
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 
     /// #12: Config-Save-Fehler einheitlich melden statt still zu verwerfen:
@@ -1423,6 +1489,8 @@ impl eframe::App for MyApp {
                 // Früherer Fallback (tray_event_rx + show_tray_popup_viewport) gestrichen.
             }
         }
+        // Task 5: periodischer Fetch (throttled, 0=aus) — auch bei hidden Window.
+        self.maybe_auto_fetch(ctx);
         self.handle_close_request(ctx);
     }
 
@@ -1889,6 +1957,24 @@ mod tests {
         assert!(should_sync_tray_service(true, Some(old), now));
     }
 
+    #[test]
+    fn should_auto_fetch_throttled_and_zero_off() {
+        // Task 5: 0 = aus, sonst Intervall-Minuten seit letztem Lauf.
+        let now = std::time::Instant::now();
+        assert!(!should_auto_fetch(None, 0, now));
+        assert!(!should_auto_fetch(Some(now), 0, now));
+        assert!(should_auto_fetch(None, 10, now));
+        let recent = now - std::time::Duration::from_secs(60);
+        assert!(!should_auto_fetch(Some(recent), 10, now));
+        let old = now - std::time::Duration::from_secs(10 * 60 + 1);
+        assert!(should_auto_fetch(Some(old), 10, now));
+        let just_under = now - std::time::Duration::from_secs(10 * 60 - 5);
+        assert!(!should_auto_fetch(Some(just_under), 10, now));
+        // 1-Min-Intervall
+        let old1 = now - std::time::Duration::from_secs(61);
+        assert!(should_auto_fetch(Some(old1), 1, now));
+    }
+
     fn test_app() -> MyApp {
         let (scan_tx, scan_rx) = mpsc::channel();
         let (launch_err_tx, launch_err_rx) = mpsc::channel();
@@ -1929,6 +2015,7 @@ mod tests {
             tray_dirty: false,
             window_visible: true,
             should_quit: false,
+            last_auto_fetch: None,
         }
     }
 
