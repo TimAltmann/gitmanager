@@ -14,6 +14,7 @@ const ICON_GEAR: egui::ImageSource = egui::include_image!("../assets/icons/gear.
 const ICON_REFRESH: egui::ImageSource = egui::include_image!("../assets/icons/refresh.svg");
 const ICON_WARNING: egui::ImageSource = egui::include_image!("../assets/icons/warning.svg");
 const ICON_CROSS: egui::ImageSource = egui::include_image!("../assets/icons/cross.svg");
+const ICON_SORT: egui::ImageSource = egui::include_image!("../assets/icons/chevron-down.svg");
 
 enum ScanResult {
     Repos(Vec<RepoInfo>),
@@ -1102,17 +1103,16 @@ impl MyApp {
                             ui.add_space(8.0);
                             ui.spinner();
                         }
-                        // Task 4: Sort-Modus-Umschalter neben Settings/Refresh
+                        // Task 4: Sort-Modus als Icon-Button mit Dropdown
+                        // (kein Text-Label im Button → kein Truncation des DE-Labels;
+                        // volle Labels nur im auto-großen Popup).
                         ui.add_space(8.0);
-                        let sort_label = match self.config.main_sort_mode {
-                            RepoSortMode::LastUsed => tr(lang, "sort_by_last_used"),
-                            RepoSortMode::Name => tr(lang, "sort_by_name"),
-                        };
                         let mut new_sort = self.config.main_sort_mode;
-                        egui::ComboBox::from_id_salt("sort_mode_top")
-                            .selected_text(sort_label)
-                            .width(130.0)
-                            .show_ui(ui, |ui| {
+                        ui.menu_image_button(
+                            egui::Image::new(ICON_SORT)
+                                .fit_to_exact_size(Vec2::splat(14.0))
+                                .tint(ui.visuals().text_color()),
+                            |ui| {
                                 for mode in RepoSortMode::all() {
                                     let label = match mode {
                                         RepoSortMode::LastUsed => tr(lang, "sort_by_last_used"),
@@ -1120,11 +1120,13 @@ impl MyApp {
                                     };
                                     if ui.selectable_label(new_sort == mode, label).clicked() {
                                         new_sort = mode;
+                                        ui.close();
                                     }
                                 }
-                            })
-                            .response
-                            .on_hover_text(tr(lang, "sort_tooltip"));
+                            },
+                        )
+                        .response
+                        .on_hover_text(tr(lang, "sort_tooltip"));
                         if new_sort != self.config.main_sort_mode {
                             self.config.main_sort_mode = new_sort;
                             if let Err(e) = self.config.save() {

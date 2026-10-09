@@ -463,6 +463,8 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "sort_by_last_used") => "Nach letzter Nutzung sortieren".to_string(),
         (Language::En, "sort_tooltip") => "Sort repositories".to_string(),
         (Language::De, "sort_tooltip") => "Repositories sortieren".to_string(),
+        (Language::En, "sort_title") => "Sorting".to_string(),
+        (Language::De, "sort_title") => "Sortierung".to_string(),
 
         // fallback for any missing key -> return key itself
         (Language::En, _) => key.to_string(),
@@ -612,7 +614,12 @@ mod tests {
 
     #[test]
     fn tr_sort_keys_exist() {
-        for key in ["sort_by_name", "sort_by_last_used", "sort_tooltip"] {
+        for key in [
+            "sort_by_name",
+            "sort_by_last_used",
+            "sort_tooltip",
+            "sort_title",
+        ] {
             assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
             assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
         }

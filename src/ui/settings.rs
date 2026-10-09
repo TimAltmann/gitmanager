@@ -704,7 +704,7 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
     ui.add_space(8.0);
     {
         let lang = state.draft.language;
-        ui.label(RichText::new(tr(lang, "sort_tooltip")).size(13.0).strong());
+        ui.label(RichText::new(tr(lang, "sort_title")).size(13.0).strong());
         ui.add_space(4.0);
         let selected = match state.draft.main_sort_mode {
             RepoSortMode::LastUsed => tr(lang, "sort_by_last_used"),
