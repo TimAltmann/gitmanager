@@ -35,6 +35,24 @@ pub fn fetch_error_i18n_key(fetch_partial: bool) -> &'static str {
     }
 }
 
+/// Mapt einen `fetch_all`-Fehler auf (UI-Detail, partial?) — English-neutral,
+/// ohne Wrapper/Hinweis (Wrapper + auth_hint werden lokalisiert in poll_scan
+/// angehängt). Geteilt von manuellem und periodischem Fetch (Finding E),
+/// damit beide Pfade identische Fehlersemantik haben.
+pub fn fetch_error_parts(e: &anyhow::Error) -> (String, bool) {
+    let partial = crate::git::is_partial_fetch_error(e);
+    // I1: strukturiertes Detail English-neutral (opake libgit2-Texte),
+    // ohne Wrapper/Hinweis — Wrapper + auth_hint lokalisiert in poll_scan.
+    let msg = if crate::git::is_fetch_error(e) {
+        e.downcast_ref::<crate::git::PartialFetch>()
+            .map(|p| p.detail_en())
+            .unwrap_or_else(|| format!("{e:#}"))
+    } else {
+        format!("{e:#}")
+    };
+    (msg, partial)
+}
+
 /// Reine Entscheidung für Settings-Save mit Autostart-Apply (I2, headless-testbar):
 /// `apply_failed=true` → Dialog offen halten, kein Scan (Korrektur/Retry);
 /// `false` → schließen + Scan. Gibt `(keep_open, should_scan)` zurück.
@@ -108,6 +126,14 @@ pub struct MyApp {
     /// Task 5: Zeitpunkt des letzten periodischen Auto-Fetch (throttled).
     /// `None` = noch nie gelaufen (erster Durchlauf nach Startup-Scan fällig).
     last_auto_fetch: Option<std::time::Instant>,
+    /// Finding D1: eigener Busy-Zustand für den periodischen Auto-Fetch.
+    /// Der Auto-Fetch setzt bewusst NICHT `scanning`, damit Refresh/Fetch
+    /// währenddessen klickbar bleiben (stiller Hintergrundlauf).
+    auto_fetching: bool,
+    /// Finding A: `true`, wenn sich die Hauptsortierung ändern kann
+    /// (Scan-Intake, `record_usage`, Sortmodus-Wechsel). Der Render-Pfad
+    /// sortiert nur dann statt pro Frame.
+    repo_sort_dirty: bool,
 }
 
 impl MyApp {
@@ -166,6 +192,8 @@ impl MyApp {
             // Task 5: direkt auf now setzen — erster Auto-Fetch erst nach Intervall,
             // nicht sofort nach Startup-Scan (vermeidet Doppel-Fetch beim Start).
             last_auto_fetch: Some(std::time::Instant::now()),
+            auto_fetching: false,
+            repo_sort_dirty: true,
         };
         #[cfg(target_os = "windows")]
         {
@@ -282,9 +310,12 @@ impl MyApp {
             match result {
                 ScanResult::Repos(repos) => {
                     self.scanning = false;
-                    // Task 4: View-Sortierung einmalig am Intake (pro Frame zusätzlich
-                    // in-place vor Render, damit MRU-Updates sofort sichtbar sind)
+                    self.auto_fetching = false;
+                    // Task 4: View-Sortierung einmalig am Intake (per Frame nur
+                    // noch bei dirty, siehe Render-Pfad) — Intake sortiert mit
+                    // aktueller Config und erfüllt damit pending dirty.
                     self.repos = sorted_main_repos(&repos, &self.config);
+                    self.repo_sort_dirty = false;
                     self.error = None;
                     // Review-Fix: dirty VOR dem direkten Sync markieren — bei
                     // WouldBlock bleibt das Flag (Backstop in sync_tray_service).
@@ -298,7 +329,9 @@ impl MyApp {
                     fetch_partial,
                 } => {
                     self.scanning = false;
+                    self.auto_fetching = false;
                     self.repos = sorted_main_repos(&repos, &self.config);
+                    self.repo_sort_dirty = false;
                     if let Some(raw) = fetch_error {
                         let key = fetch_error_i18n_key(fetch_partial);
                         // I1: Wrapper übersetzt, Detail opak; auth_hint lokalisiert anhängen.
@@ -338,6 +371,8 @@ impl MyApp {
                 Ok(cfg) => {
                     self.config = cfg;
                     self.error = None;
+                    // Finding A: neue Config kann Usage/Sortmodus geändert haben.
+                    self.repo_sort_dirty = true;
                     self.mark_tray_dirty();
                     self.sync_tray_service();
                     // Settings offen: nicht kompletten Draft verwerfen, nur auto-erkannte Programme mergen
@@ -536,12 +571,24 @@ impl MyApp {
     /// Danach Rescan für frische `behind`-Counts.
     fn maybe_auto_fetch(&mut self, ctx: &egui::Context) {
         let interval = self.config.auto_fetch_interval_min;
-        if interval == 0 || self.scanning || self.repos.is_empty() {
+        if interval == 0 || self.repos.is_empty() {
             // Idle-Wake für nächsten Check: min(Intervall, 60s), damit
             // `logic()` auch ohne Events aufwacht.
             if interval > 0 {
                 ctx.request_repaint_after(std::time::Duration::from_secs(60));
             }
+            return;
+        }
+        if self.auto_fetching {
+            // Läuft bereits: Ergebnis zeitnah anwenden (stiller Lauf ohne
+            // `scanning`, daher kein automatischer Repaint-Loop).
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            return;
+        }
+        if self.scanning {
+            // Manueller Scan/Fetch läuft: Auto auslassen statt blockieren
+            // (Finding D1) — nächster Tick holt es nach.
+            ctx.request_repaint_after(std::time::Duration::from_secs(60));
             return;
         }
         let now = std::time::Instant::now();
@@ -550,20 +597,33 @@ impl MyApp {
             return;
         }
         self.last_auto_fetch = Some(now);
-        self.scanning = true;
+        // Finding D1: bewusst NICHT `scanning` — Refresh/Fetch bleiben klickbar.
+        self.auto_fetching = true;
         let paths: Vec<PathBuf> = self.repos.iter().map(|r| r.path.clone()).collect();
         let cfg = self.config.clone();
         let tx = self.scan_tx.clone();
         std::thread::spawn(move || {
+            // Finding E: Fehler aggregieren statt nur loggen — erster Fehler
+            // geht als FetchDone mit (persistenter Banner), weiter fetchen,
+            // damit erreichbare Remotes trotzdem frische Counts liefern.
+            let mut fetch_error: Option<String> = None;
+            let mut fetch_partial = false;
             for p in &paths {
                 if let Err(e) = crate::git::fetch_all(p) {
-                    // Still (kein Popup): nur loggen, Rescan liefert trotzdem frische Counts
-                    // für erreichbare Remotes.
                     eprintln!("Auto-Fetch für {} fehlgeschlagen: {e:#}", p.display());
+                    if fetch_error.is_none() {
+                        let (msg, partial) = fetch_error_parts(&e);
+                        fetch_error = Some(msg);
+                        fetch_partial = partial;
+                    }
                 }
             }
             let repos = crate::scanner::scan_repos(&cfg);
-            let _ = tx.send(ScanResult::Repos(repos));
+            let _ = tx.send(ScanResult::FetchDone {
+                repos,
+                fetch_error,
+                fetch_partial,
+            });
         });
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
@@ -623,6 +683,17 @@ impl MyApp {
     fn sync_tray_service(&mut self) {
         // Review-Nit: erst prüfen, dann klonen (ohne Tray kein Clone).
         if let Some(shared) = &self.tray_shared {
+            // Finding B: Lock-Probe VOR den Deep-Clones — bei Contention
+            // (WouldBlock) wird kein Clone verworfen, nur dirty für Retry
+            // gesetzt. Der Lock wird weiterhin nur für den kurzen
+            // Zeiger-Tausch gehalten, nicht für die Clones.
+            // (Probe-Guard wird sofort gedroppt; Race zum zweiten Lock
+            // unten ist benign: WouldBlock → dirty → Throttle-Retry.)
+            let contended = matches!(shared.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+            if contended {
+                self.tray_dirty = true;
+                return;
+            }
             // #5: Klone VOR dem Lock erstellen — der Mutex wird nur für den kurzen
             // Zeiger-Tausch gehalten, nicht für die Deep-Clones von Repos/Config.
             let repos = self.repos.clone();
@@ -907,6 +978,8 @@ impl MyApp {
         // #12: Save-Fehler melden statt still verwerfen (einheitlich mit
         // SolutionSelect).
         self.mark_tray_dirty();
+        // Finding A: Usage ändert MRU → Hauptsortierung invalidieren.
+        self.repo_sort_dirty = true;
         if let Err(e) = self.config.save() {
             self.note_config_save_error(&e);
         }
@@ -1212,6 +1285,8 @@ impl MyApp {
                         .on_hover_text(tr(lang, "sort_tooltip"));
                         if new_sort != self.config.main_sort_mode {
                             self.config.main_sort_mode = new_sort;
+                            // Finding A: Moduswechsel invalidiert die Sortierung.
+                            self.repo_sort_dirty = true;
                             if let Err(e) = self.config.save() {
                                 self.error =
                                     Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
@@ -1632,7 +1707,11 @@ impl eframe::App for MyApp {
                 // repo_list wird &mut repos erwarten, wir haben &mut self.repos
                 // scanning → Fetch-/Refresh-Buttons disabled + Spinner während Fetch/Scan
                 // Task 4: Sortierung im View (Scanner bleibt alphabetisch)
-                sort_main_repos(&mut self.repos, &self.config);
+                // Finding A: nur bei dirty sortieren statt pro Frame (60fps).
+                if self.repo_sort_dirty {
+                    sort_main_repos(&mut self.repos, &self.config);
+                    self.repo_sort_dirty = false;
+                }
                 let fetching = self.scanning;
                 show_repo_list(ui, &mut self.repos, &self.config, &mut actions, fetching);
 
@@ -1815,6 +1894,9 @@ impl eframe::App for MyApp {
                     let cfg = self.config.clone();
                     let tx = self.scan_tx.clone();
                     self.scanning = true;
+                    // Manueller Fetch = frische Refs: Auto-Timer zurücksetzen,
+                    // damit der periodische Fetch nicht Sekunden später doppelt läuft.
+                    self.last_auto_fetch = Some(std::time::Instant::now());
                     self.status_message = Some(tr_fmt(
                         lang,
                         "fetching_branches",
@@ -1826,16 +1908,7 @@ impl eframe::App for MyApp {
                         let (fetch_error, fetch_partial) = match fetch_res {
                             Ok(()) => (None, false),
                             Err(e) => {
-                                let partial = crate::git::is_partial_fetch_error(&e);
-                                // I1: strukturiertes Detail English-neutral (opake libgit2-Texte),
-                                // ohne Wrapper/Hinweis — Wrapper + auth_hint lokalisiert in poll_scan.
-                                let msg = if crate::git::is_fetch_error(&e) {
-                                    e.downcast_ref::<crate::git::PartialFetch>()
-                                        .map(|p| p.detail_en())
-                                        .unwrap_or_else(|| format!("{e:#}"))
-                                } else {
-                                    format!("{e:#}")
-                                };
+                                let (msg, partial) = fetch_error_parts(&e);
                                 eprintln!(
                                     "Fetch fehlgeschlagen für {}: {msg}",
                                     path_clone.display()
@@ -2065,6 +2138,8 @@ mod tests {
             window_visible: true,
             should_quit: false,
             last_auto_fetch: None,
+            auto_fetching: false,
+            repo_sort_dirty: true,
         }
     }
 
@@ -2262,6 +2337,7 @@ mod tests {
     fn poll_scan_fetch_done_ok_clears_error() {
         let mut app = test_app();
         app.scanning = true;
+        app.auto_fetching = true;
         app.error = Some("stale".to_string());
         app.scan_tx
             .send(ScanResult::FetchDone {
@@ -2273,7 +2349,32 @@ mod tests {
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
         assert!(!app.scanning);
+        assert!(!app.auto_fetching);
         assert!(app.error.is_none(), "successful fetch must clear error");
+    }
+
+    #[test]
+    fn fetch_error_parts_maps_partial_complete_and_plain() {
+        // Finding E: identische Fehlersemantik für manuellen + Auto-Fetch.
+        use crate::git::PartialFetch;
+        let partial = anyhow::Error::new(PartialFetch {
+            succeeded: vec!["good".to_string()],
+            failed: vec![("bad".to_string(), "boom".to_string())],
+        });
+        let (msg, is_partial) = fetch_error_parts(&partial);
+        assert!(is_partial);
+        assert_eq!(msg, "'bad': boom; succeeded: 'good'");
+        let complete = anyhow::Error::new(PartialFetch {
+            succeeded: Vec::new(),
+            failed: vec![("bad".to_string(), "boom".to_string())],
+        });
+        let (msg_c, is_partial_c) = fetch_error_parts(&complete);
+        assert!(!is_partial_c);
+        assert_eq!(msg_c, "'bad': boom");
+        let plain = anyhow::anyhow!("plain setup failure");
+        let (msg_p, is_partial_p) = fetch_error_parts(&plain);
+        assert!(!is_partial_p);
+        assert_eq!(msg_p, "plain setup failure");
     }
 
     #[test]

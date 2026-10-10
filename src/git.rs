@@ -210,11 +210,20 @@ pub fn get_detailed_status(repo: &Repository) -> Vec<String> {
 }
 
 /// Listet lokale und remote Branches auf (für Dropdown). Remote als "origin/branch".
+/// Pfad-Wrapper um [`list_branches_in`] (nur Tests nutzen ihn direkt;
+/// produktiv läuft alles über das geöffnete Handle).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn list_branches(path: &Path) -> Vec<String> {
     let repo = match Repository::open(path) {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
+    list_branches_in(&repo)
+}
+
+/// Finding C: Variante mit bereits geöffnetem Handle — kein zweites
+/// `Repository::open` pro Scan (siehe `get_repo_info`).
+pub fn list_branches_in(repo: &Repository) -> Vec<String> {
     if repo.is_bare() {
         return Vec::new();
     }
@@ -403,15 +412,24 @@ pub fn is_fetch_error(err: &anyhow::Error) -> bool {
 /// Upstream-Auflösung: `branch_upstream` (lokaler Tracking-Branch) oder
 /// `origin/<branch>` als Fallback. Detached HEAD, fehlender Upstream oder
 /// kein Remote → `(0, 0)`. Scan-only, nie Err — Fehler bedeuten "unbekannt".
+/// Pfad-Wrapper um [`ahead_behind_in`] (nur Tests nutzen ihn direkt;
+/// produktiv läuft alles über das geöffnete Handle).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn ahead_behind(path: &Path) -> (usize, usize) {
     let repo = match Repository::open(path) {
         Ok(r) => r,
         Err(_) => return (0, 0),
     };
+    ahead_behind_in(&repo)
+}
+
+/// Finding C: Variante mit bereits geöffnetem Handle — kein drittes
+/// `Repository::open` pro Scan (siehe `get_repo_info`).
+pub fn ahead_behind_in(repo: &Repository) -> (usize, usize) {
     if repo.is_bare() {
         return (0, 0);
     }
-    let (branch, detached) = get_branch(&repo);
+    let (branch, detached) = get_branch(repo);
     if detached {
         return (0, 0);
     }
@@ -685,8 +703,9 @@ pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
     }
     let (branch, is_detached) = get_branch(&repo);
     let dirty = is_dirty(&repo);
-    let branches = list_branches(&path);
-    let (ahead, behind) = ahead_behind(&path);
+    // Finding C: geöffnetes Handle wiederverwenden statt 2× erneut öffnen.
+    let branches = list_branches_in(&repo);
+    let (ahead, behind) = ahead_behind_in(&repo);
     let mut info = RepoInfo::new(path, branch, dirty, is_detached).with_branches(branches);
     info.ahead = ahead;
     info.behind = behind;
@@ -1772,6 +1791,17 @@ mod tests {
         let _bare = Repository::init_bare(bare_dir.path()).unwrap();
         assert!(list_branches(bare_dir.path()).is_empty());
         assert!(list_branches(Path::new("/nonexistent/xyz")).is_empty());
+    }
+
+    #[test]
+    fn repo_handle_variants_match_path_variants() {
+        // Finding C: `_in`-Varianten mit geöffnetem Handle liefern dasselbe
+        // wie die Pfad-Varianten (die nur öffnen + delegieren).
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        let repo = Repository::open(dir.path()).unwrap();
+        assert_eq!(list_branches(dir.path()), list_branches_in(&repo));
+        assert_eq!(ahead_behind(dir.path()), ahead_behind_in(&repo));
     }
 
     #[test]

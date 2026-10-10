@@ -119,6 +119,9 @@ fn dropdown_button(
 }
 
 pub fn filter_branches(branches: &[String], filter: &str, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let filter_lower = filter.to_lowercase();
     let mut out = Vec::new();
     for b in branches {
@@ -137,17 +140,22 @@ pub fn filter_branches(branches: &[String], filter: &str, limit: usize) -> Vec<S
 /// `LastUsed` = MRU desc via `tray_popup::mru_timestamp`, Gleichstand sowie
 /// nie-genutzte Repos alphabetisch (case-insensitiv) am Ende.
 /// `Name` = alphabetisch wie bisher im Scanner.
+///
+/// Finding A: `sort_by_cached_key` wertet Schlüssel nur O(n)-mal aus statt
+/// O(n log n) (keine Allocs im Comparator). Zusammen mit `repo_sort_dirty`
+/// in `app.rs` läuft der Sort nur noch bei tatsächlicher Änderung, nicht
+/// pro Frame.
 pub fn sort_main_repos(repos: &mut [RepoInfo], config: &AppConfig) {
     match config.main_sort_mode {
         crate::config::RepoSortMode::Name => {
-            repos.sort_by_key(|a| a.name.to_lowercase());
+            repos.sort_by_cached_key(|a| a.name.to_lowercase());
         }
         crate::config::RepoSortMode::LastUsed => {
-            repos.sort_by(|a, b| {
-                let ta = crate::ui::tray_popup::mru_timestamp(config, &a.path);
-                let tb = crate::ui::tray_popup::mru_timestamp(config, &b.path);
-                tb.cmp(&ta)
-                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            repos.sort_by_cached_key(|a| {
+                (
+                    std::cmp::Reverse(crate::ui::tray_popup::mru_timestamp(config, &a.path)),
+                    a.name.to_lowercase(),
+                )
             });
         }
     }
@@ -1368,6 +1376,9 @@ mod tests {
         assert_eq!(limited[0], "main");
         let empty_filter = filter_branches(&branches, "xyz", 10);
         assert!(empty_filter.is_empty());
+        // Finding H: limit==0 liefert 0 statt 1 (Push-vor-Check-Falle).
+        assert!(filter_branches(&branches, "", 0).is_empty());
+        assert!(filter_branches(&branches, "feat", 0).is_empty());
     }
 
     #[test]

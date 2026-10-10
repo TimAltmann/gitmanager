@@ -1,7 +1,6 @@
 use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt, Language};
-use crate::ui::repo_list::filter_branches;
 use egui::{Color32, RichText, Vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -156,17 +155,27 @@ pub fn tray_branch_overflow_hint(
     Some(tr_fmt(lang, key, &[&remaining.to_string()]))
 }
 
-/// Task 6 fix (Finding 1): totale Trefferzahl via dieselbe
-/// `filter_branches`-Prädikat wie die angezeigte Liste (mit `usize::MAX`
-/// statt geclampetem Limit), damit `shown == Prefix(total)`.
-/// Verhindert Divergenz zwischen `+N weitere`-Zähler und angezeigten Einträgen.
+/// Task 6 fix (Finding F): totale Trefferzahl im selben Durchlauf wie die
+/// angezeigte Liste — gleiche Semantik wie `filter_branches` (leerer Filter =
+/// alles, case-insensitiv), aber ohne zweiten Volldurchlauf mit
+/// String-Clones nur zum Zählen. `shown == Prefix(total)` gilt weiterhin.
 pub fn tray_branch_match_counts(
     branches: &[String],
     filter: &str,
     limit: usize,
 ) -> (Vec<String>, usize) {
-    let shown = filter_branches(branches, filter, limit);
-    let total = filter_branches(branches, filter, usize::MAX).len();
+    let filter_lower = filter.to_lowercase();
+    let mut shown = Vec::new();
+    let mut total = 0usize;
+    for b in branches {
+        if !filter_lower.is_empty() && !b.to_lowercase().contains(&filter_lower) {
+            continue;
+        }
+        total += 1;
+        if shown.len() < limit {
+            shown.push(b.clone());
+        }
+    }
     (shown, total)
 }
 
@@ -484,7 +493,10 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                 if !branches.is_empty() {
                     // Task 6: pro-Repo Filter oben in der ComboBox (Filter-State
                     // pro Repo-Pfad, geleert bei Close).
-                    let filter = branch_filters.entry(repo.path.clone()).or_default();
+                    // Finding G: kein PathBuf-Clone pro Frame — nur lesend
+                    // nachschlagen; Key-Clone nur bei tatsächlicher Änderung.
+                    let mut filter_text =
+                        branch_filters.get(&repo.path).cloned().unwrap_or_default();
                     let current = truncate_label(&repo.branch, TRAY_LABEL_MAX_CHARS);
                     let combo_width = ui.available_width();
                     egui::ComboBox::from_id_salt(("tray_branch", repo.path.clone()))
@@ -502,7 +514,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                             // anfordern, damit Tippen ohne Extraklick filtert.
                             let edit_width = ui.available_width();
                             let edit_resp = ui.add(
-                                egui::TextEdit::singleline(&mut *filter)
+                                egui::TextEdit::singleline(&mut filter_text)
                                     .hint_text(tr(lang, "branch_search"))
                                     .desired_width(edit_width),
                             );
@@ -515,8 +527,8 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                             // filter_branches-Prädikat (MAX-Limit) — shown ist
                             // dadurch garantiert Prefix von total.
                             let (shown, total_matching) =
-                                tray_branch_match_counts(branches, filter.as_str(), limit);
-                            let filter_active = !filter.is_empty();
+                                tray_branch_match_counts(branches, filter_text.as_str(), limit);
+                            let filter_active = !filter_text.is_empty();
                             for b in &shown {
                                 let is_sel = *b == repo.branch;
                                 if ui
@@ -556,6 +568,16 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                         })
                         .response
                         .on_hover_text(&repo.branch);
+                    // Finding G: State zurückschreiben nur bei Änderung —
+                    // Key-Clone nur dann, leere Filter sofort entfernen.
+                    let stored = branch_filters.get(&repo.path);
+                    if stored.map(|s| s.as_str()) != Some(filter_text.as_str()) {
+                        if filter_text.is_empty() {
+                            branch_filters.remove(&repo.path);
+                        } else {
+                            branch_filters.insert(repo.path.clone(), filter_text);
+                        }
+                    }
                 } else {
                     ui.label(
                         RichText::new(truncate_label(&repo.branch, TRAY_LABEL_MAX_CHARS))
@@ -1184,6 +1206,11 @@ mod tests {
             total_none,
             filter_branches(&branches, "zzz-no-match", usize::MAX).len()
         );
+        // Finding F: Single-Pass zählt auch bei limit==0 alle Treffer,
+        // zeigt aber nichts (konsistent mit filter_branches-Guard).
+        let (shown_zero, total_zero) = tray_branch_match_counts(&branches, "", 0);
+        assert!(shown_zero.is_empty());
+        assert_eq!(total_zero, 60);
         use crate::i18n::Language;
         assert!(tray_branch_overflow_hint(Language::En, total_none, 0, true).is_none());
     }
