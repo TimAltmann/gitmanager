@@ -330,12 +330,15 @@ pub fn show_tray_popup_ui(
             // (z.B. Branch-Dialog nach Tray-Switch auf dirty Repo).
             if let Some(text) = notice {
                 ui.add_space(2.0);
+                // N5: Theme-Farben statt hardcoded Creme/Braun (Dark-Mode!).
+                // (warn_bg_color existiert in egui 0.36 nicht — faint_bg
+                // als neutraler Badge-Grund mit Warn-Textfarbe.)
                 let banner = egui::Button::new(
                     RichText::new(format!("⚠ {text}"))
                         .size(11.0)
-                        .color(Color32::from_rgb(140, 90, 10)),
+                        .color(ui.visuals().warn_fg_color),
                 )
-                .fill(Color32::from_rgb(255, 243, 220));
+                .fill(ui.visuals().faint_bg_color);
                 if ui
                     .add_sized([ui.available_width(), 26.0], banner)
                     .on_hover_text(text)

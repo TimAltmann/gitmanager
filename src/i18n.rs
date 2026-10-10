@@ -431,6 +431,8 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "fetch_partial") => "Fetch teilweise fehlgeschlagen: {}".to_string(),
         (Language::En, "auth_hint") => "Note: check Credentials/SSH (auth may be required)".to_string(),
         (Language::De, "auth_hint") => "Hinweis: Credentials/SSH prüfen (ggf. Auth erforderlich)".to_string(),
+        (Language::En, "fetch_aborted") => "Background fetch aborted (internal error)".to_string(),
+        (Language::De, "fetch_aborted") => "Hintergrund-Fetch abgebrochen (interner Fehler)".to_string(),
         (Language::En, "branch_switched_to") => "Branch switched to '{}': {}".to_string(),
         (Language::De, "branch_switched_to") => "Branch zu '{}' gewechselt: {}".to_string(),
         (Language::En, "ide_not_found") => "IDE '{}' not found".to_string(),
@@ -647,7 +649,12 @@ mod tests {
 
     #[test]
     fn tr_fetch_keys_exist() {
-        for key in ["fetch_failed", "fetch_partial", "auth_hint"] {
+        for key in [
+            "fetch_failed",
+            "fetch_partial",
+            "auth_hint",
+            "fetch_aborted",
+        ] {
             assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
             assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
         }

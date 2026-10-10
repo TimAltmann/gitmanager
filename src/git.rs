@@ -160,10 +160,13 @@ fn parse_head_file(git_dir: &Path) -> Option<String> {
 }
 
 /// Prüft ob uncommitted changes vorhanden sind (modified, staged, untracked)
+/// P1: ohne `recurse_untracked_dirs` — ein untracked Verzeichnis meldet
+/// libgit2 als einen Eintrag (z.B. `target/`), das reicht für Bool.
+/// Mit Rekursion würden tausende Dateien einzeln gestat'ed (pro Repo pro Scan).
 pub fn is_dirty(repo: &Repository) -> bool {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
+        .recurse_untracked_dirs(false)
         .include_ignored(false)
         .include_unmodified(false);
     match repo.statuses(Some(&mut opts)) {
@@ -181,6 +184,10 @@ pub fn is_merge_in_progress(repo: &Repository) -> bool {
     repo.state() != git2::RepositoryState::Clean
 }
 
+/// Maximale Dateianzahl für den Branch-Dialog (M2: Liste ist gecappt —
+/// UI kennzeichnet das ehrlich mit "+", siehe `capped_file_count_label`).
+pub const DETAILED_STATUS_CAP: usize = 100;
+
 pub fn get_detailed_status(repo: &Repository) -> Vec<String> {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
@@ -191,7 +198,7 @@ pub fn get_detailed_status(repo: &Repository) -> Vec<String> {
         .include_ignored(false);
     let mut files = Vec::new();
     if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
-        for entry in statuses.iter().take(100) {
+        for entry in statuses.iter().take(DETAILED_STATUS_CAP) {
             if let Ok(path) = entry.path() {
                 let status = entry.status();
                 let flag = if status.is_wt_new() {

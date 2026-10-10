@@ -46,11 +46,21 @@ fn crash_log_filename() -> String {
     format!("gitmanager_crash-{}-{}-{}.log", ms, std::process::id(), n)
 }
 
+/// N6: `--minimized` an genau einer Stelle entschieden (Single Source) —
+/// `main()` (Viewport) und `MyApp::new` (window_visible) nutzen beide das.
+/// Nur auf Windows (ohne Tray kein Rückweg ins unsichtbare Fenster).
+pub fn start_minimized_flag() -> bool {
+    cfg!(target_os = "windows") && std::env::args().any(|a| a == "--minimized")
+}
+
 fn main() -> eframe::Result<()> {
-    // Panic hook für Tray-Crashes (F-17): vorherigen Hook chainen, Crash-Log mit
-    // Millisekunden-Timestamp + PID (keine Kollision pro Sekunde) nach
-    // ProjectDirs::from("com","gitmanager","gitmanager").data_local_dir()
-    // (Windows: %LOCALAPPDATA%\com\gitmanager\gitmanager), Fallback CWD.
+    // P2a: globaler Connect-Timeout für libgit2 (Default: OS-TCP, bei
+    // Blackhole-Remotes minutenlang). Gilt prozessweit für alle Fetches;
+    // betrifft nur die Connect-Phase, nicht langsame Transfers.
+    let _ = unsafe { git2::opts::set_server_connect_timeout_in_milliseconds(30_000) }; // Panic hook für Tray-Crashes (F-17): vorherigen Hook chainen, Crash-Log mit
+                                                                                       // Millisekunden-Timestamp + PID (keine Kollision pro Sekunde) nach
+                                                                                       // ProjectDirs::from("com","gitmanager","gitmanager").data_local_dir()
+                                                                                       // (Windows: %LOCALAPPDATA%\com\gitmanager\gitmanager), Fallback CWD.
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut msg = format!("PANIC: {}\n", info);
@@ -91,10 +101,7 @@ fn main() -> eframe::Result<()> {
 
     let icon = load_icon();
     // M1: --minimized für Autostart (Tray-Start ohne volles Fenster).
-    // F1#9: nur auf Windows auswerten — ohne Tray (Linux/macOS) gäbe es
-    // keinen Rückweg ins unsichtbar gestartete Fenster.
-    let start_minimized =
-        cfg!(target_os = "windows") && std::env::args().any(|a| a == "--minimized");
+    let start_minimized = start_minimized_flag();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1080.0, 680.0])
         .with_min_inner_size([920.0, 560.0])
@@ -132,6 +139,26 @@ mod tests {
             names.insert(crash_log_filename());
         }
         assert_eq!(names.len(), 100);
+    }
+
+    #[test]
+    fn start_minimized_flag_off_without_arg() {
+        // N6: Test-Runner läuft ohne --minimized → Flag aus.
+        // (Mit Flag ließe sich env nicht setzen — Verhalten via Codepfad klar.)
+        assert!(!start_minimized_flag());
+    }
+
+    #[test]
+    fn libgit2_connect_timeout_roundtrips() {
+        // P2a: Timeout-Optik existiert und ist setzbar (schützt vor
+        // Blackhole-Hängern); main() setzt 30 s, hier Roundtrip prüfen.
+        unsafe {
+            git2::opts::set_server_connect_timeout_in_milliseconds(30_000).unwrap();
+            assert_eq!(
+                git2::opts::get_server_connect_timeout_in_milliseconds().unwrap(),
+                30_000
+            );
+        }
     }
 
     #[test]

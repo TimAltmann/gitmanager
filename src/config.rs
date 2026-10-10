@@ -1079,26 +1079,35 @@ impl AppConfig {
             cfg.config_version = 13;
         }
         // M5: auch laufende Configs clampen (JSON-Handedit mit 1000 o.ä.).
-        // K1/K2: nur bei tatsächlicher Änderung speichern (ein Save statt
-        // drei Zwischen-Saves + stiller In-Memory-Clamp).
-        let clamped = cfg.auto_fetch_interval_min.min(120);
-        let clamp_changed = clamped != cfg.auto_fetch_interval_min;
-        cfg.auto_fetch_interval_min = clamped;
+        // K1/K2/N2: alle numerischen Clamps gleich behandeln — bei tatsächlicher
+        // Änderung einmalig speichern (statt drei Zwischen-Saves / stiller Clamps).
+        let clamped_fetch = cfg.auto_fetch_interval_min.min(120);
+        let clamped_branch = if cfg.branch_display_limit == 0 {
+            default_branch_limit()
+        } else {
+            cfg.branch_display_limit.clamp(50, 500)
+        };
+        let clamped_tray = if cfg.tray_branch_limit == 0 {
+            default_tray_branch_limit()
+        } else {
+            cfg.tray_branch_limit.clamp(5, 50)
+        };
+        let clamped_max = if cfg.tray_icons.max_display == 0 {
+            default_tray_max_display()
+        } else {
+            cfg.tray_icons.max_display.clamp(5, 50)
+        };
+        let clamp_changed = clamped_fetch != cfg.auto_fetch_interval_min
+            || clamped_branch != cfg.branch_display_limit
+            || clamped_tray != cfg.tray_branch_limit
+            || clamped_max != cfg.tray_icons.max_display;
+        cfg.auto_fetch_interval_min = clamped_fetch;
+        cfg.branch_display_limit = clamped_branch;
+        cfg.tray_branch_limit = clamped_tray;
+        cfg.tray_icons.max_display = clamped_max;
         if cfg.config_version != loaded_version || clamp_changed {
             let _ = cfg.save();
         }
-        if cfg.branch_display_limit == 0 {
-            cfg.branch_display_limit = default_branch_limit();
-        }
-        cfg.branch_display_limit = cfg.branch_display_limit.clamp(50, 500);
-        if cfg.tray_branch_limit == 0 {
-            cfg.tray_branch_limit = default_tray_branch_limit();
-        }
-        cfg.tray_branch_limit = cfg.tray_branch_limit.clamp(5, 50);
-        if cfg.tray_icons.max_display == 0 {
-            cfg.tray_icons.max_display = default_tray_max_display();
-        }
-        cfg.tray_icons.max_display = cfg.tray_icons.max_display.clamp(5, 50);
         cfg.tray_icons.hidden_icon_ids.sort();
         cfg.tray_icons.hidden_icon_ids.dedup();
         {

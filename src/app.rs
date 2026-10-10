@@ -25,6 +25,11 @@ enum ScanResult {
         fetch_is_fetch_error: bool,
         is_auto: bool,
     },
+    /// H3: Worker-Thread ist vor `send` abgestürzt — setzt nur Flags +
+    /// Fehler zurück, rührt `repos` bewusst NICHT an (kein Listen-Wipe).
+    FetchAborted {
+        reason_key: &'static str,
+    },
 }
 
 /// Wählt den i18n-Key für Fetch-Fehler: `fetch_partial` bei Teil-Fehlschlag
@@ -54,6 +59,40 @@ pub fn fetch_error_parts(e: &anyhow::Error) -> (String, bool, bool) {
         format!("{e:#}")
     };
     (msg, partial, is_fetch)
+}
+
+/// M2: Zähler-Label für die gecappte Dialog-Dateiliste
+/// (`DETAILED_STATUS_CAP` in git.rs) — ab Cap ehrlich mit "+".
+pub fn capped_file_count_label(count: usize) -> String {
+    if count >= crate::git::DETAILED_STATUS_CAP {
+        format!("{}+", crate::git::DETAILED_STATUS_CAP)
+    } else {
+        count.to_string()
+    }
+}
+
+/// Finding L1/M1 + N9: Fehler-Aggregation über Repos/Threads in EINEM
+/// Aufruf — gespeichertes Detail und Partial-Flag gehören zusammen.
+/// Erster Fehler wird gemerkt; ist ein späterer Fehler partiell und der
+/// gemerkte nicht, ersetzt der partielle (Detail mit `succeeded`-Liste ist
+/// informativer als ein Complete-Detail mit falschem Partial-Flag).
+/// Einmal binden statt `fetch_error_parts` doppelt aufzurufen.
+fn aggregate_fetch_error(
+    slot_err: &mut Option<String>,
+    slot_partial: &mut bool,
+    slot_is_fetch: &mut bool,
+    e: &anyhow::Error,
+) {
+    let (msg, partial, is_fetch) = fetch_error_parts(e);
+    if slot_err.is_none() {
+        *slot_err = Some(msg);
+        *slot_partial = partial;
+        *slot_is_fetch = is_fetch;
+    } else if partial && !*slot_partial {
+        *slot_err = Some(msg);
+        *slot_partial = true;
+        *slot_is_fetch = is_fetch;
+    }
 }
 
 /// Reine Entscheidung für Settings-Save mit Autostart-Apply (I2, headless-testbar):
@@ -133,6 +172,11 @@ pub struct MyApp {
     /// Der Auto-Fetch setzt bewusst NICHT `scanning`, damit Refresh/Fetch
     /// währenddessen klickbar bleiben (stiller Hintergrundlauf).
     auto_fetching: bool,
+    /// P2b/L2: manueller Refresh während Auto-Fetch — Intent merken statt
+    /// verwerfen; der `FetchDone(is_auto)`-Arm holt ihn nach.
+    pending_scan: bool,
+    /// L4: Zähler aufeinanderfolgender Config-Save-Fehler (Backoff fürs Log).
+    config_save_fail_streak: u32,
     /// Finding A: `true`, wenn sich die Hauptsortierung ändern kann
     /// (Scan-Intake, `record_usage`, Sortmodus-Wechsel). Der Render-Pfad
     /// sortiert nur dann statt pro Frame.
@@ -155,9 +199,8 @@ impl MyApp {
             eprintln!("Autostart-Sync fehlgeschlagen: {e:#}");
         }
         // M1: --minimized (Autostart) startet versteckt im Tray.
-        // F1#9: nur auf Windows — ohne Tray kein unsichtbarer Start.
-        let start_minimized =
-            cfg!(target_os = "windows") && std::env::args().any(|a| a == "--minimized");
+        // N6: gleiche Entscheidung wie main() (Single Source).
+        let start_minimized = crate::start_minimized_flag();
         crate::ui::theme::apply_theme(&cc.egui_ctx, &config.theme);
         // SVG Icons loader für egui_extras
         egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -207,6 +250,8 @@ impl MyApp {
             // nicht sofort nach Startup-Scan (vermeidet Doppel-Fetch beim Start).
             last_auto_fetch: Some(std::time::Instant::now()),
             auto_fetching: false,
+            pending_scan: false,
+            config_save_fail_streak: 0,
             repo_sort_dirty: true,
             config_save_pending: false,
             last_config_save: None,
@@ -320,7 +365,9 @@ impl MyApp {
         }
         // L2: kein paralleler Lauf zum Auto-Fetch — zwei libgit2-Fetches
         // auf denselben Repos racen um FETCH_HEAD/refs (cannot lock ref).
+        // P2b: Intent merken statt verwerfen — FetchDone(is_auto) holt nach.
         if self.auto_fetching {
+            self.pending_scan = true;
             self.status_message = Some(tr(self.config.language, "auto_fetch_running"));
             self.status_message_time = Some(std::time::Instant::now());
             return;
@@ -330,8 +377,19 @@ impl MyApp {
         let cfg = self.config.clone();
         let tx = self.scan_tx.clone();
         std::thread::spawn(move || {
-            let repos = scan_repos(&cfg);
-            let _ = tx.send(ScanResult::Repos(repos));
+            // H3: Panic darf `scanning` nicht hängen lassen — Fallback
+            // resettet Flags + zeigt Fehler (Liste bleibt erhalten).
+            let msg =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan_repos(&cfg))) {
+                    Ok(repos) => ScanResult::Repos(repos),
+                    Err(_) => {
+                        eprintln!("start_scan-Thread abgestürzt (panic vor send)");
+                        ScanResult::FetchAborted {
+                            reason_key: "fetch_aborted",
+                        }
+                    }
+                };
+            let _ = tx.send(msg);
         });
     }
 
@@ -351,6 +409,8 @@ impl MyApp {
                     sort_main_repos(&mut repos, &self.config);
                     self.repos = repos;
                     self.repo_sort_dirty = false;
+                    // P2b: abgeschlossener Scan erfüllt gemerkten Refresh.
+                    self.pending_scan = false;
                     self.error = None;
                     // Review-Fix: dirty VOR dem direkten Sync markieren — bei
                     // WouldBlock bleibt das Flag (Backstop in sync_tray_service).
@@ -378,6 +438,11 @@ impl MyApp {
                         // I6: Timestamp = Ende statt Start — bei langsamem Fetch
                         // (> Intervall) kein Back-to-Back-Dauerfeuer.
                         self.last_auto_fetch = Some(std::time::Instant::now());
+                        // P2b: gemerkten manuellen Refresh jetzt nachholen.
+                        if self.pending_scan {
+                            self.pending_scan = false;
+                            self.start_scan();
+                        }
                     }
                     let mut repos = repos;
                     sort_main_repos(&mut repos, &self.config);
@@ -404,6 +469,26 @@ impl MyApp {
                     }
                     self.mark_tray_dirty();
                     self.sync_tray_service();
+                    ctx.request_repaint();
+                }
+                ScanResult::FetchAborted { reason_key } => {
+                    // H3: Thread-Panic vor send — Flags lösen (kein ewiger
+                    // Spinner), Fehler persistent zeigen, Liste behalten.
+                    // Wie Auto-FetchDone als Intervall-Ende werten (kein
+                    // sofortiges Back-to-Back mit Panic-Loop).
+                    self.scanning = false;
+                    self.auto_fetching = false;
+                    self.last_auto_fetch = Some(std::time::Instant::now());
+                    let msg = tr(self.config.language, reason_key);
+                    let msg = if msg == reason_key {
+                        reason_key.to_string()
+                    } else {
+                        msg
+                    };
+                    self.error = Some(msg.clone());
+                    self.status_message = Some(msg);
+                    self.status_message_time = Some(std::time::Instant::now());
+                    self.mark_tray_dirty();
                     ctx.request_repaint();
                 }
             }
@@ -675,17 +760,25 @@ impl MyApp {
             // Repos sonst N×Latenz. Ohne rayon: simple Chunk-Worker mit Mutex.
             let parallel = std::cmp::min(4, paths.len().max(1));
             if parallel <= 1 {
-                for p in &paths {
-                    if let Err(e) = crate::git::fetch_all(p) {
-                        eprintln!("Auto-Fetch für {} fehlgeschlagen: {e:#}", p.display());
-                        if fetch_error.is_none() {
-                            let (msg, partial, is_fetch) = fetch_error_parts(&e);
-                            fetch_error = Some(msg);
-                            fetch_partial = partial;
-                            fetch_is_fetch_error = is_fetch;
-                        } else if fetch_error_parts(&e).1 {
-                            fetch_partial = true;
+                // H3: Panic im Fetch darf Scan + Send nicht verhindern —
+                // als Fehler notieren, mit Rescan fortfahren.
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    for p in &paths {
+                        if let Err(e) = crate::git::fetch_all(p) {
+                            eprintln!("Auto-Fetch für {} fehlgeschlagen: {e:#}", p.display());
+                            aggregate_fetch_error(
+                                &mut fetch_error,
+                                &mut fetch_partial,
+                                &mut fetch_is_fetch_error,
+                                &e,
+                            );
                         }
+                    }
+                }));
+                if r.is_err() {
+                    eprintln!("Auto-Fetch-Worker abgestürzt (panic im fetch)");
+                    if fetch_error.is_none() {
+                        fetch_error = Some("background fetch worker panicked".to_string());
                     }
                 }
             } else {
@@ -703,20 +796,23 @@ impl MyApp {
                         if let Err(e) = crate::git::fetch_all(&p) {
                             eprintln!("Auto-Fetch für {} fehlgeschlagen: {e:#}", p.display());
                             if let Ok(mut g) = fe.lock() {
-                                if g.0.is_none() {
-                                    let (msg, partial, is_fetch) = fetch_error_parts(&e);
-                                    g.0 = Some(msg);
-                                    g.1 = partial;
-                                    g.2 = is_fetch;
-                                } else if fetch_error_parts(&e).1 {
-                                    g.1 = true;
-                                }
+                                // Disjunkte Tuple-Felder separat binden (kein
+                                // Mehrfach-Borrow des Guards).
+                                let (e0, e1, e2) = &mut *g;
+                                aggregate_fetch_error(e0, e1, e2, &e);
                             }
                         }
                     }));
                 }
                 for h in handles {
-                    let _ = h.join();
+                    // H3: abgestürzter Worker (panic) — Rest wurde von den
+                    // Überlebenden per Queue abgearbeitet; nur vermerken.
+                    if h.join().is_err() {
+                        eprintln!("Auto-Fetch-Worker abgestürzt (panic im Thread)");
+                        if fetch_error.is_none() {
+                            fetch_error = Some("background fetch worker panicked".to_string());
+                        }
+                    }
                 }
                 if let Ok(g) = first_err.lock() {
                     fetch_error = g.0.clone();
@@ -724,7 +820,20 @@ impl MyApp {
                     fetch_is_fetch_error = g.2;
                 };
             }
-            let repos = crate::scanner::scan_repos(&cfg);
+            // H3: Panic im Scan darf Flags nicht hängen lassen —
+            // FetchAborted resettet (Liste bleibt erhalten, kein Wipe).
+            let repos = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::scanner::scan_repos(&cfg)
+            })) {
+                Ok(r) => r,
+                Err(_) => {
+                    eprintln!("Auto-Fetch-Scan abgestürzt (panic vor send)");
+                    let _ = tx.send(ScanResult::FetchAborted {
+                        reason_key: "fetch_aborted",
+                    });
+                    return;
+                }
+            };
             let _ = tx.send(ScanResult::FetchDone {
                 repos,
                 fetch_error,
@@ -1100,8 +1209,8 @@ impl MyApp {
         // File-Syncs auslösen. Nur pending markieren, flush 1× pro Frame.
         self.config_save_pending = true;
         // F1#6/P1: kein direkter sync_tray_service() (Deep-Clone pro Klick) —
-        // der Throttle-Sync in logic() übernimmt.
-        self.mark_tray_dirty();
+        // der Throttle-Sync in logic() übernimmt (N1: das Markieren oben
+        // genügt — Flag ist idempotent, kein zweites nötig).
     }
 
     /// P5: gebatchter Config-Save — max. 1 File-Sync pro Aufruf, Fehler via
@@ -1125,7 +1234,20 @@ impl MyApp {
         if let Err(e) = self.config.save() {
             // Retry beim nächsten Frame statt still zu verwerfen.
             self.config_save_pending = true;
-            self.note_config_save_error(&e);
+            self.config_save_fail_streak = self.config_save_fail_streak.saturating_add(1);
+            if self.config_save_fail_streak <= 5 {
+                self.note_config_save_error(&e);
+            } else {
+                // L4: Backoff — Banner behalten (sichtbar), aber Log nicht mit
+                // ~5 Zeilen/s fluten (volle Disk/Rechte = Dauerzustand).
+                self.error = Some(tr_fmt(
+                    self.config.language,
+                    "save_failed",
+                    &[&format!("{e:#}")],
+                ));
+            }
+        } else {
+            self.config_save_fail_streak = 0;
         }
     }
 
@@ -1600,7 +1722,9 @@ impl MyApp {
                     ui.label(
                         RichText::new(format!(
                             "{} {}",
-                            dlg.dirty_files.len(),
+                            // M2: gecappte Liste ehrlich kennzeichnen (Cap 100
+                            // in get_detailed_status) statt exakt zu wirken.
+                            capped_file_count_label(dlg.dirty_files.len()),
                             tr(lang, "affected_files")
                         ))
                         .size(11.0)
@@ -2096,26 +2220,43 @@ impl eframe::App for MyApp {
                     ));
                     self.status_message_time = Some(std::time::Instant::now());
                     std::thread::spawn(move || {
-                        let fetch_res = crate::git::fetch_all(&path_clone);
-                        let (fetch_error, fetch_partial, fetch_is_fetch_error) = match fetch_res {
-                            Ok(()) => (None, false, false),
-                            Err(e) => {
-                                let (msg, partial, is_fetch) = fetch_error_parts(&e);
-                                eprintln!(
-                                    "Fetch fehlgeschlagen für {}: {msg}",
-                                    path_clone.display()
-                                );
-                                (Some(msg), partial, is_fetch)
-                            }
-                        };
-                        let repos = crate::scanner::scan_repos(&cfg);
-                        let _ = tx.send(ScanResult::FetchDone {
-                            repos,
-                            fetch_error,
-                            fetch_partial,
-                            fetch_is_fetch_error,
-                            is_auto: false,
-                        });
+                        // H3: Panic vor send darf `scanning` nicht hängen
+                        // lassen — FetchAborted resettet Flags ohne Listen-Wipe.
+                        let msg =
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                let fetch_res = crate::git::fetch_all(&path_clone);
+                                let (fetch_error, fetch_partial, fetch_is_fetch_error) =
+                                    match fetch_res {
+                                        Ok(()) => (None, false, false),
+                                        Err(e) => {
+                                            let (msg, partial, is_fetch) = fetch_error_parts(&e);
+                                            eprintln!(
+                                                "Fetch fehlgeschlagen für {}: {msg}",
+                                                path_clone.display()
+                                            );
+                                            (Some(msg), partial, is_fetch)
+                                        }
+                                    };
+                                let repos = crate::scanner::scan_repos(&cfg);
+                                (fetch_error, fetch_partial, fetch_is_fetch_error, repos)
+                            })) {
+                                Ok((fetch_error, fetch_partial, fetch_is_fetch_error, repos)) => {
+                                    ScanResult::FetchDone {
+                                        repos,
+                                        fetch_error,
+                                        fetch_partial,
+                                        fetch_is_fetch_error,
+                                        is_auto: false,
+                                    }
+                                }
+                                Err(_) => {
+                                    eprintln!("Manueller Fetch-Thread abgestürzt (panic vor send)");
+                                    ScanResult::FetchAborted {
+                                        reason_key: "fetch_aborted",
+                                    }
+                                }
+                            };
+                        let _ = tx.send(msg);
                     });
                 }
                 if let Some(repo_path) = actions.explorer_open {
@@ -2333,9 +2474,11 @@ mod tests {
             should_quit: false,
             last_auto_fetch: None,
             auto_fetching: false,
-            repo_sort_dirty: true,
+            pending_scan: false,
+            config_save_fail_streak: 0,
             config_save_pending: false,
             last_config_save: None,
+            repo_sort_dirty: true,
         }
     }
 
@@ -2395,6 +2538,7 @@ mod tests {
         match result {
             ScanResult::Repos(v) => assert!(v.is_empty()),
             ScanResult::FetchDone { .. } => panic!("expected Repos"),
+            ScanResult::FetchAborted { .. } => panic!("expected Repos"),
         }
         let info =
             crate::git::RepoInfo::new(PathBuf::from("/tmp/repo"), "main".to_string(), false, false);
@@ -2402,6 +2546,7 @@ mod tests {
         match result2 {
             ScanResult::Repos(v) => assert_eq!(v.len(), 1),
             ScanResult::FetchDone { .. } => panic!("expected Repos"),
+            ScanResult::FetchAborted { .. } => panic!("expected Repos"),
         }
         let fetch_done = ScanResult::FetchDone {
             repos: vec![],
@@ -2423,6 +2568,7 @@ mod tests {
                 assert!(!fetch_partial);
             }
             ScanResult::Repos(_) => panic!("expected FetchDone"),
+            ScanResult::FetchAborted { .. } => panic!("expected FetchDone"),
         }
     }
 
@@ -2710,6 +2856,91 @@ mod tests {
         app.auto_fetching = false;
         app.start_scan();
         assert!(app.scanning);
+    }
+
+    #[test]
+    fn aggregate_fetch_error_prefers_partial_detail() {
+        // L1/M1: Detail + Flag gehören zusammen — partielles Detail
+        // ersetzt gespeichertes Complete, umgekehrt nicht.
+        use crate::git::PartialFetch;
+        let mut slot = (None, false, false);
+        let complete = anyhow::Error::new(PartialFetch {
+            succeeded: Vec::new(),
+            failed: vec![("a".to_string(), "boom".to_string())],
+        });
+        aggregate_fetch_error(&mut slot.0, &mut slot.1, &mut slot.2, &complete);
+        assert_eq!(slot.0.as_deref(), Some("'a': boom"));
+        assert!(!slot.1);
+        let partial = anyhow::Error::new(PartialFetch {
+            succeeded: vec!["g".to_string()],
+            failed: vec![("b".to_string(), "x".to_string())],
+        });
+        aggregate_fetch_error(&mut slot.0, &mut slot.1, &mut slot.2, &partial);
+        assert!(slot.1);
+        assert_eq!(slot.0.as_deref(), Some("'b': x; succeeded: 'g'"));
+        // Späteres Complete verdrängt Partial nicht mehr.
+        aggregate_fetch_error(&mut slot.0, &mut slot.1, &mut slot.2, &complete);
+        assert!(slot.1);
+        assert!(slot.0.as_deref() == Some("'b': x; succeeded: 'g'"));
+    }
+
+    #[test]
+    fn pending_scan_runs_after_auto_fetch_done() {
+        // P2b: gemerkter Refresh wird nach Auto-FetchDone nachgeholt.
+        let mut app = test_app();
+        app.auto_fetching = true;
+        app.start_scan();
+        assert!(app.pending_scan);
+        assert!(!app.scanning);
+        let ctx = egui::Context::default();
+        app.scan_tx
+            .send(ScanResult::FetchDone {
+                repos: vec![],
+                fetch_error: None,
+                fetch_partial: false,
+                fetch_is_fetch_error: false,
+                is_auto: true,
+            })
+            .unwrap();
+        app.poll_scan(&ctx);
+        assert!(!app.pending_scan);
+        assert!(app.scanning, "pending refresh must start after auto done");
+    }
+
+    #[test]
+    fn fetch_aborted_resets_flags_keeps_repos() {
+        // H3: Abort resettet Flags + zeigt Fehler, wischt Liste nicht.
+        let mut app = test_app();
+        app.scanning = true;
+        app.auto_fetching = true;
+        app.repos = vec![crate::git::RepoInfo::new(
+            PathBuf::from("/tmp/repo"),
+            "main".to_string(),
+            false,
+            false,
+        )];
+        app.scan_tx
+            .send(ScanResult::FetchAborted {
+                reason_key: "fetch_aborted",
+            })
+            .unwrap();
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(!app.scanning);
+        assert!(!app.auto_fetching);
+        assert_eq!(app.repos.len(), 1);
+        assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn capped_file_count_label_marks_cap() {
+        // M2: ab Cap ehrlich mit "+".
+        assert_eq!(capped_file_count_label(0), "0");
+        assert_eq!(capped_file_count_label(99), "99");
+        assert_eq!(
+            capped_file_count_label(crate::git::DETAILED_STATUS_CAP),
+            format!("{}+", crate::git::DETAILED_STATUS_CAP)
+        );
     }
 
     #[test]

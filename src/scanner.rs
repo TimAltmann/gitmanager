@@ -43,7 +43,15 @@ pub fn scan_repos(config: &AppConfig) -> Vec<RepoInfo> {
         }
         let repos = scan_single_root(root, config.max_depth);
         for repo in repos {
-            if seen_paths.insert(repo.path.clone()) {
+            // N10: kanonischer Dedup-Schlüssel — dieselbe .git über
+            // verschiedene Pfad-Schreibweisen (Case, Symlink, überlappende
+            // Roots) darf nur einmal in die Liste (sonst parallele Fetches
+            // auf denselben Refs). Anzeigepfad bleibt unverändert.
+            let key = repo
+                .path
+                .canonicalize()
+                .unwrap_or_else(|_| repo.path.clone());
+            if seen_paths.insert(key) {
                 all_repos.push(repo);
             }
         }
@@ -513,6 +521,30 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(scan_repos(&cfg3).len(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_dedups_same_repo_via_symlink_root() {
+        // N10: dieselbe .git über zwei Pfad-Schreibweisen (Symlink-Root)
+        // darf nur einmal in die Liste (sonst parallele Fetches auf
+        // denselben Refs). WalkDir folgt Symlinks nicht von selbst —
+        // der kanonische Dedup-Schlüssel fängt es.
+        let tmp = tempdir().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let repo = real.join("repo");
+        fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let cfg = AppConfig {
+            roots: vec![real, link],
+            max_depth: 3,
+            ..Default::default()
+        };
+        let repos = scan_repos(&cfg);
+        assert_eq!(repos.len(), 1, "same .git via symlink must dedup");
     }
 
     // --- scan_solutions_for_repo (F-145 - F-152) ---
