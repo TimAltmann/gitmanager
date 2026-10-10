@@ -314,10 +314,11 @@ mod imp {
             guard.branch_filters.clone()
         };
 
-        // M1+N1: erst MRU-sortieren + truncaten (nur sichtbare Top-N klonen),
-        // dann Höhe pro sichtbarem Repo summieren (exakt bei gemischten Dropdowns).
+        // P1+P2: keine Full-Clones pro Frame — nur Refs auf Arc-Daten,
+        // sortiert via O(n) Timestamps + Sort (n<=50, vernachlässigbar).
+        // Kein Cache nötig: teuer waren die Deep-Clones, nicht der Sort.
         let tray_limit = config_arc.tray_icons.max_display.clamp(5, 50);
-        let repos_visible = tray_popup::sorted_visible_repos(&repos_arc, &config_arc, tray_limit);
+        let repos_visible = tray_popup::sorted_visible_refs(&repos_arc, &config_arc, tray_limit);
         let popup_width: f32 = 360.0;
         let popup_height: f32 =
             tray_popup::popup_height_for_visible(&repos_visible, notice.as_deref());

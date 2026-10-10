@@ -184,11 +184,14 @@ pub fn is_merge_in_progress(repo: &Repository) -> bool {
 pub fn get_detailed_status(repo: &Repository) -> Vec<String> {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
+        // P4: kein recurse in untracked Dirs auf dem UI-Thread — bei großen
+        // Repos (node_modules/target) sonst hunderte ms Freeze. Top-Level
+        // reicht für den Dialog; Details sieht man in der IDE.
+        .recurse_untracked_dirs(false)
         .include_ignored(false);
     let mut files = Vec::new();
     if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
-        for entry in statuses.iter() {
+        for entry in statuses.iter().take(100) {
             if let Ok(path) = entry.path() {
                 let status = entry.status();
                 let flag = if status.is_wt_new() {
@@ -465,20 +468,51 @@ pub fn ahead_behind_in(repo: &Repository) -> (usize, usize) {
             }
         }
     }
-    // 2) Fallback: origin/<branch>
-    for candidate in [
-        format!("refs/remotes/origin/{branch}"),
-        format!("origin/{branch}"),
-    ] {
-        if let Ok(obj) = repo.revparse_single(&candidate) {
-            let up_oid = obj
-                .peel_to_commit()
-                .map(|c| c.id())
-                .unwrap_or_else(|_| obj.id());
-            if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
-                return (a, b);
+    // 2) Fallback: alle Remotes statt nur origin (I4) — sonst liefert
+    // ein upstream-Remote oder Firmen-Remote ≠ origin immer (0,0).
+    // Zuerst branch.<name>.remote lesen (explizites Tracking ohne upstream-Ref),
+    // dann alle Remotes iterieren.
+    if let Ok(cfg_branch_remote) = repo
+        .config()
+        .and_then(|c| c.get_string(&format!("branch.{branch}.remote")))
+    {
+        for candidate in [
+            format!("refs/remotes/{cfg_branch_remote}/{branch}"),
+            format!("{cfg_branch_remote}/{branch}"),
+        ] {
+            if let Ok(obj) = repo.revparse_single(&candidate) {
+                let up_oid = obj
+                    .peel_to_commit()
+                    .map(|c| c.id())
+                    .unwrap_or_else(|_| obj.id());
+                if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
+                    return (a, b);
+                }
+                return (0, 0);
             }
-            return (0, 0);
+        }
+    }
+    if let Ok(remotes) = repo.remotes() {
+        for remote_res in remotes.iter() {
+            let remote_name = match remote_res {
+                Ok(Some(n)) => n.to_string(),
+                _ => continue,
+            };
+            for candidate in [
+                format!("refs/remotes/{remote_name}/{branch}"),
+                format!("{remote_name}/{branch}"),
+            ] {
+                if let Ok(obj) = repo.revparse_single(&candidate) {
+                    let up_oid = obj
+                        .peel_to_commit()
+                        .map(|c| c.id())
+                        .unwrap_or_else(|_| obj.id());
+                    if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
+                        return (a, b);
+                    }
+                    return (0, 0);
+                }
+            }
         }
     }
     (0, 0)
@@ -558,6 +592,20 @@ fn set_head_from_reference(
     Ok(())
 }
 
+/// K2: Kurzname eines Remote-Branch — nur das `refs/remotes/<remote>/`-Präfix
+/// strippen, nicht das letzte `/`-Segment (sonst wird `feature/foo` zu `foo`).
+pub fn remote_short_name(full_ref: &str, branch_name: &str) -> String {
+    if let Some(rest) = full_ref.strip_prefix("refs/remotes/") {
+        if let Some((_, short)) = rest.split_once('/') {
+            return short.to_string();
+        }
+    }
+    if let Some(rest) = branch_name.strip_prefix("origin/") {
+        return rest.to_string();
+    }
+    branch_name.to_string()
+}
+
 /// Führt sicheren Branch-Wechsel durch (nur wenn keine Konflikte, sonst Fehler)
 pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
     let repo = preflight_checkout(path)?;
@@ -590,15 +638,18 @@ pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
             .name()
             .map_err(|e| anyhow::anyhow!("Ungültige Referenz: {e}"))?;
         if name.starts_with("refs/remotes/") {
-            let short = branch_name.split('/').next_back().unwrap_or(branch_name);
+            // K2: nur Remote-Präfix strippen (siehe remote_short_name).
+            let short = remote_short_name(name, branch_name);
             let commit = object
                 .peel_to_commit()
                 .map_err(|e| anyhow::anyhow!("Commit nicht gefunden: {e}"))?;
-            if repo.find_branch(short, BranchType::Local).is_err() {
+            if repo.find_branch(&short, BranchType::Local).is_err() {
                 let mut local_branch = repo
-                    .branch(short, &commit, false)
+                    .branch(&short, &commit, false)
                     .map_err(|e| anyhow::anyhow!("Lokalen Branch erstellen fehlgeschlagen: {e}"))?;
-                let _ = local_branch.set_upstream(Some(name));
+                // Upstream als Kurzname (origin/feature/foo), nicht Full-Ref.
+                let upstream = name.strip_prefix("refs/remotes/").unwrap_or(name);
+                let _ = local_branch.set_upstream(Some(upstream));
             }
             repo.set_head(&format!("refs/heads/{short}"))
                 .map_err(|e| anyhow::anyhow!("HEAD setzen fehlgeschlagen: {e}"))?;
@@ -623,6 +674,32 @@ pub fn checkout_branch_force(path: &Path, branch_name: &str) -> anyhow::Result<(
     set_head_from_reference(&repo, reference.as_ref(), &object)
 }
 
+/// M4: typisierter Stash-Pop-Konflikt — statt String-Match
+/// (`contains("Stash pop fehlgeschlagen")`, fragil bei Text/i18n) prüft die
+/// UI via `is_stash_pop_failed()` per Downcast. Display-Text bleibt kompatibel.
+#[derive(Debug)]
+pub struct StashPopFailed {
+    pub detail: String,
+}
+
+impl std::fmt::Display for StashPopFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Branch gewechselt, aber Stash pop fehlgeschlagen (Konflikte) – Stash bleibt unter stash@{{0}} erhalten: {}",
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for StashPopFailed {}
+
+/// True wenn `err` ein Stash-Pop-Konflikt nach erfolgreichem Checkout ist
+/// (Checkout ok, Pop gescheitert — Rescan trotzdem sinnvoll).
+pub fn is_stash_pop_failed(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<StashPopFailed>().is_some()
+}
+
 /// Stash + Checkout (für Dirty-Dialog Option)
 pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<()> {
     let mut repo =
@@ -644,8 +721,14 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<()> 
         }
     }
     // Jetzt checkout
+    let stashed = stash_result.is_ok();
     match checkout_branch(path, branch_name) {
         Ok(()) => {
+            // Nur poppen wenn tatsächlich gestasht wurde — sonst würde
+            // stash_pop(0) einen alten, bewusst aufgehobenen Stash poppen (K1).
+            if !stashed {
+                return Ok(());
+            }
             // Versuche stash pop, aber ignoriere Konflikte (lasse stash bestehen)
             let mut repo2 = Repository::open(path)
                 .map_err(|e| anyhow::anyhow!("Repo erneut öffnen fehlgeschlagen: {e}"))?;
@@ -653,8 +736,10 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<()> 
                 eprintln!(
                     "Stash pop nach Checkout fehlgeschlagen (Konflikt), Stash bleibt erhalten: {e}"
                 );
-                // Lasse stash bestehen, informiere Nutzer
-                anyhow::bail!("Branch gewechselt, aber Stash pop fehlgeschlagen (Konflikte) – Stash bleibt unter stash@{{0}} erhalten: {e}");
+                // Lasse stash bestehen, informiere Nutzer (M4: typisiert).
+                return Err(anyhow::Error::new(StashPopFailed {
+                    detail: format!("{e}"),
+                }));
             }
             Ok(())
         }
@@ -2203,19 +2288,69 @@ mod tests {
         let repo = Repository::open(dir.path()).unwrap();
         let head = repo.head().unwrap().peel_to_commit().unwrap();
         repo.branch("feature", &head, false).unwrap();
-        // clean repo: nothing to stash, but stash_and_checkout should still checkout and then stash_pop fail with no stash? Actually code does stash_save and then checkout and stash_pop
-        // On clean, stash_save returns NotFound, but checkout should succeed, then stash_pop(0) will fail because no stash
-        // The code will then bail with "Branch gewechselt, aber Stash pop fehlgeschlagen"
-        // So result is Err containing that message
+        // K1: clean repo ohne Änderungen → kein Stash, kein Pop → Ok.
+        // Früher wurde trotzdem stash_pop(0) versucht (fremder Stash-Risk).
         let res = stash_and_checkout(dir.path(), "feature");
-        // Could be Ok if stash_pop succeeds? On clean there's no stash to pop, so pop fails
-        // Accept either Ok (if no stash) or Err with stash pop message, but not panic
-        assert!(res.is_ok() || res.is_err());
-        if let Err(e) = res {
-            // if err, should mention branch or stash
-            let msg = e.to_string();
-            assert!(msg.contains("Branch") || msg.contains("Stash") || msg.contains("stash"));
+        assert!(res.is_ok(), "clean checkout must succeed without pop: {res:?}");
+    }
+
+    #[test]
+    fn stash_and_checkout_clean_preserves_preexisting_stash() {
+        // K1-Regression: clean Repo + alter stash@{0} → Switch darf den alten
+        // Stash weder poppen noch löschen.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        {
+            let mut repo = Repository::open(dir.path()).unwrap();
+            let head_id = repo.head().unwrap().peel_to_commit().unwrap().id();
+            let head = repo.find_commit(head_id).unwrap();
+            repo.branch("feature", &head, false).unwrap();
+            drop(head);
+            // Alten Stash anlegen (dirty → stash, dann liegt stash@{0}).
+            fs::write(dir.path().join("old.txt"), "old").unwrap();
+            let sig = repo.signature().unwrap();
+            repo.stash_save(&sig, "old stash", Some(git2::StashFlags::INCLUDE_UNTRACKED))
+                .unwrap();
+            assert!(
+                repo.revparse_single("stash@{0}").is_ok(),
+                "precondition: stash must exist"
+            );
         }
+        let res = stash_and_checkout(dir.path(), "feature");
+        assert!(res.is_ok(), "clean switch must not pop old stash: {res:?}");
+        let repo = Repository::open(dir.path()).unwrap();
+        assert!(
+            repo.revparse_single("stash@{0}").is_ok(),
+            "preexisting stash must be preserved"
+        );
+    }
+
+    #[test]
+    fn remote_short_name_keeps_slashes() {
+        // K2: origin/feature/foo → feature/foo (nicht foo).
+        assert_eq!(
+            remote_short_name("refs/remotes/origin/feature/foo", "origin/feature/foo"),
+            "feature/foo"
+        );
+        assert_eq!(
+            remote_short_name("refs/remotes/upstream/bugfix/bar", "upstream/bugfix/bar"),
+            "bugfix/bar"
+        );
+        assert_eq!(
+            remote_short_name("refs/remotes/origin/main", "origin/main"),
+            "main"
+        );
+    }
+
+    #[test]
+    fn stash_pop_failed_typed_detection() {
+        // M4: typisiert statt String-Match.
+        let err = anyhow::Error::new(StashPopFailed {
+            detail: "conflict".to_string(),
+        });
+        assert!(is_stash_pop_failed(&err));
+        let other = anyhow::anyhow!("plain");
+        assert!(!is_stash_pop_failed(&other));
     }
 
     #[test]

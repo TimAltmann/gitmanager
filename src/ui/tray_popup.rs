@@ -218,7 +218,7 @@ pub fn should_close_tray_popup(a: &TrayPopupActions) -> bool {
 /// Klick öffnet das Hauptfenster.
 pub fn show_tray_popup_ui(
     ui: &mut egui::Ui,
-    repos: &[RepoInfo],
+    repos: &[&RepoInfo],
     config: &AppConfig,
     actions: &mut TrayPopupActions,
     notice: Option<&str>,
@@ -381,7 +381,7 @@ pub fn show_tray_popup_ui(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.add_space(2.0);
-                    for repo in repos.iter() {
+                    for repo in repos.iter().copied() {
                         let profile = config.get_effective_profile_for_repo(&repo.path);
                         let owned_ides;
                         let owned_agents;
@@ -792,13 +792,21 @@ pub fn calculate_popup_position(
     let mut x = tray_rect.center().x - popup_size.x / 2.0;
     let mut y = tray_rect.min.y - popup_size.y - 4.0;
 
-    // Clamp to screen bounds with 4px margin
+    // Clamp to screen bounds with 4px margin.
+    // M3: safe-clamp — wenn popup > screen (min>max), würde clamp() panicken.
+    // Dann via min/max-Swap nie panicken (Popup bleibt ggf. leicht off-screen,
+    // aber kein Crash; praktisch nie: 360px vs. 1920px).
+    fn safe_clamp(v: f32, lo: f32, hi: f32) -> f32 {
+        v.clamp(lo.min(hi), lo.max(hi))
+    }
     let margin = 4.0;
-    x = x.clamp(
+    x = safe_clamp(
+        x,
         screen_rect.min.x + margin,
         screen_rect.max.x - popup_size.x - margin,
     );
-    y = y.clamp(
+    y = safe_clamp(
+        y,
         screen_rect.min.y + margin,
         screen_rect.max.y - popup_size.y - margin,
     );
@@ -831,11 +839,15 @@ const POPUP_NOTICE_H: f32 = 36.0;
 /// Popup-Höhe aus den sichtbaren Repos summiert (66px normal, 94px pro Repo
 /// mit Solution-Dropdown + 90px Chrome). Exakt auch bei gemischten Zeilen.
 /// Mit Notice-Banner (#3) kommen 36px dazu.
-pub fn popup_height_for_visible(visible_repos: &[RepoInfo], notice: Option<&str>) -> f32 {
+/// Generisch über Borrow, damit Tray pro Frame mit Refs (ohne Clone) rechnen kann.
+pub fn popup_height_for_visible<T: std::borrow::Borrow<RepoInfo>>(
+    visible_repos: &[T],
+    notice: Option<&str>,
+) -> f32 {
     let rows: f32 = visible_repos
         .iter()
         .map(|r| {
-            if r.solutions.len() > 1 {
+            if r.borrow().solutions.len() > 1 {
                 ROW_H_DROPDOWN
             } else {
                 ROW_H
@@ -862,8 +874,23 @@ pub fn sorted_visible_indices(repos: &[RepoInfo], config: &AppConfig, limit: usi
     idx
 }
 
+/// P1: Referenzen statt Full-Clones pro Frame — der Tray-Hot-Path (30fps)
+/// darf keine Vec<String>-Branches/Solutions klonen. Caller hält Arc<Vec>.
+pub fn sorted_visible_refs<'a>(
+    repos: &'a [RepoInfo],
+    config: &AppConfig,
+    limit: usize,
+) -> Vec<&'a RepoInfo> {
+    sorted_visible_indices(repos, config, limit)
+        .into_iter()
+        .map(|i| &repos[i])
+        .collect()
+}
+
 /// Returns only the visible Top-N repos, MRU-sorted (N1: avoids full Vec deep-clone
 /// per frame; clones only what is actually displayed).
+/// Hinweis (P1): produktiv `sorted_visible_refs` nutzen (kein Clone);
+/// diese Clone-Variante nur für Tests/Compat.
 pub fn sorted_visible_repos(repos: &[RepoInfo], config: &AppConfig, limit: usize) -> Vec<RepoInfo> {
     sorted_visible_indices(repos, config, limit)
         .into_iter()
@@ -900,6 +927,16 @@ mod tests {
     }
 
     #[test]
+    fn popup_oversized_never_panics() {
+        // M3: popup > screen (min>max) darf nicht panicken.
+        let tray = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(20.0, 20.0));
+        let popup = egui::vec2(3000.0, 2000.0);
+        let screen = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1920.0, 1080.0));
+        let pos = calculate_popup_position(tray, popup, screen);
+        assert!(pos.x.is_finite() && pos.y.is_finite());
+    }
+
+    #[test]
     fn popup_near_right_edge_clamped() {
         let tray = egui::Rect::from_min_size(egui::pos2(1910.0, 1050.0), egui::vec2(20.0, 20.0));
         let popup = egui::vec2(360.0, 480.0);
@@ -933,7 +970,10 @@ mod tests {
             popup_height_for_visible(&repos, None),
             2.0 * 66.0 + 94.0 + 90.0
         );
-        assert_eq!(popup_height_for_visible(&[], None), 280.0);
+        assert_eq!(
+            popup_height_for_visible::<RepoInfo>(&[], None),
+            280.0
+        );
         // Homogen (Clamp beachten: 2 Zeilen lägen unter MIN 280):
         assert_eq!(
             popup_height_for_visible(&[mk(0), mk(1), mk(0), mk(1)], None),
@@ -1244,6 +1284,6 @@ mod tests {
             with_notice > plain,
             "notice must grow popup: {plain} -> {with_notice}"
         );
-        assert_eq!(popup_height_for_visible(&[], None), 280.0);
+        assert_eq!(popup_height_for_visible::<RepoInfo>(&[], None), 280.0);
     }
 }

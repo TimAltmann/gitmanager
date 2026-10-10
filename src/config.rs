@@ -1073,10 +1073,13 @@ impl AppConfig {
         if cfg.config_version < 13 {
             // v13: auto_fetch_interval_min eingeführt (Default 10 via serde, 0=aus).
             // Alte Configs ohne Feld erhalten automatisch 10 — hier nur Version bump.
-            // Kein Clamp: 0 ist bewusst "aus", Obergrenze offen (Praxis 5–60).
+            // M5: auf 0..=120 clampen (UI-Slider-Range) — 0 bleibt "aus".
+            cfg.auto_fetch_interval_min = cfg.auto_fetch_interval_min.min(120);
             cfg.config_version = 13;
             let _ = cfg.save();
         }
+        // M5: auch laufende Configs clampen (JSON-Handedit mit 1000 o.ä.).
+        cfg.auto_fetch_interval_min = cfg.auto_fetch_interval_min.min(120);
         if cfg.branch_display_limit == 0 {
             cfg.branch_display_limit = default_branch_limit();
         }

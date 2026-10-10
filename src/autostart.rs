@@ -46,14 +46,34 @@ mod imp {
             .context("Run-Key öffnen fehlgeschlagen")
     }
 
+    /// Erwarteter Run-Value: exe in Quotes + --minimized (Tray-Start ohne
+    /// volles Fenster, M1). Legacy-Werte ohne Flag werden beim nächsten
+    /// Start einmalig migriert, danach kein Rewrite mehr.
+    fn expected_value() -> Result<String> {
+        let exe = std::env::current_exe().context("current_exe ermitteln fehlgeschlagen")?;
+        Ok(format!("\"{}\" --minimized", exe.display()))
+    }
+
     pub fn set(enabled: bool) -> Result<()> {
-        let key = run_key()?;
         if enabled {
-            let exe = std::env::current_exe().context("current_exe ermitteln fehlgeschlagen")?;
-            let value = format!("\"{}\"", exe.display());
-            key.set_value(RUN_VALUE_NAME, &value)
+            let want = expected_value()?;
+            // M1: kein Rewrite bei jedem Start — nur schreiben wenn abweichend.
+            if let Ok(key) = run_key_read() {
+                if let Ok(cur) = key.get_value::<String, _>(RUN_VALUE_NAME) {
+                    if cur == want {
+                        return Ok(());
+                    }
+                }
+            }
+            let key = run_key()?;
+            key.set_value(RUN_VALUE_NAME, &want)
                 .context("Run-Key schreiben fehlgeschlagen")?;
         } else {
+            // M1: kein Delete-Versuch wenn bereits aus.
+            if !is_enabled() {
+                return Ok(());
+            }
+            let key = run_key()?;
             match key.delete_value(RUN_VALUE_NAME) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

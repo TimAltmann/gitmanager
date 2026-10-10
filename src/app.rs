@@ -3,7 +3,7 @@ use crate::git::{launch_agent, launch_ide, RepoInfo};
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::scanner::scan_repos;
 use crate::ui::{
-    repo_list::{show_repo_list, sort_main_repos, sorted_main_repos, RepoListActions},
+    repo_list::{show_repo_list, sort_main_repos, RepoListActions},
     settings::SettingsState,
 };
 use egui::{Color32, RichText, Vec2};
@@ -22,6 +22,8 @@ enum ScanResult {
         repos: Vec<RepoInfo>,
         fetch_error: Option<String>,
         fetch_partial: bool,
+        fetch_is_fetch_error: bool,
+        is_auto: bool,
     },
 }
 
@@ -35,22 +37,23 @@ pub fn fetch_error_i18n_key(fetch_partial: bool) -> &'static str {
     }
 }
 
-/// Mapt einen `fetch_all`-Fehler auf (UI-Detail, partial?) — English-neutral,
+/// Mapt einen `fetch_all`-Fehler auf (UI-Detail, partial?, is_fetch?) — English-neutral,
 /// ohne Wrapper/Hinweis (Wrapper + auth_hint werden lokalisiert in poll_scan
 /// angehängt). Geteilt von manuellem und periodischem Fetch (Finding E),
 /// damit beide Pfade identische Fehlersemantik haben.
-pub fn fetch_error_parts(e: &anyhow::Error) -> (String, bool) {
+pub fn fetch_error_parts(e: &anyhow::Error) -> (String, bool, bool) {
     let partial = crate::git::is_partial_fetch_error(e);
+    let is_fetch = crate::git::is_fetch_error(e);
     // I1: strukturiertes Detail English-neutral (opake libgit2-Texte),
     // ohne Wrapper/Hinweis — Wrapper + auth_hint lokalisiert in poll_scan.
-    let msg = if crate::git::is_fetch_error(e) {
+    let msg = if is_fetch {
         e.downcast_ref::<crate::git::PartialFetch>()
             .map(|p| p.detail_en())
             .unwrap_or_else(|| format!("{e:#}"))
     } else {
         format!("{e:#}")
     };
-    (msg, partial)
+    (msg, partial, is_fetch)
 }
 
 /// Reine Entscheidung für Settings-Save mit Autostart-Apply (I2, headless-testbar):
@@ -134,6 +137,13 @@ pub struct MyApp {
     /// (Scan-Intake, `record_usage`, Sortmodus-Wechsel). Der Render-Pfad
     /// sortiert nur dann statt pro Frame.
     repo_sort_dirty: bool,
+    /// P5: gebatchte Config-Saves — `record_usage` markiert nur pending,
+    /// `flush_config_save` schreibt max. 1× pro Frame (statt N File-Syncs
+    /// bei N Tray-Actions im selben Frame).
+    #[cfg_attr(not(test), allow(dead_code))]
+    config_save_pending: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
+    last_config_save: Option<std::time::Instant>,
 }
 
 impl MyApp {
@@ -141,9 +151,13 @@ impl MyApp {
         let config = AppConfig::load();
         // Startup-Sync: Run-Key mit aktueller exe synchronisieren (falls exe verschoben).
         // Best effort — kein Start-Abbruch bei Registry-Fehlern.
+        // M1: set() selbst ist idempotent (kein Rewrite wenn Wert identisch),
+        // daher hier kein is_enabled-Vorabcheck nötig.
         if let Err(e) = crate::autostart::apply_autostart(config.autostart) {
             eprintln!("Autostart-Sync fehlgeschlagen: {e:#}");
         }
+        // M1: --minimized (Autostart) startet versteckt im Tray.
+        let start_minimized = std::env::args().any(|a| a == "--minimized");
         crate::ui::theme::apply_theme(&cc.egui_ctx, &config.theme);
         // SVG Icons loader für egui_extras
         egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -187,13 +201,15 @@ impl MyApp {
             #[cfg(target_os = "windows")]
             last_tray_sync: None,
             tray_dirty: false,
-            window_visible: true,
+            window_visible: !start_minimized,
             should_quit: false,
             // Task 5: direkt auf now setzen — erster Auto-Fetch erst nach Intervall,
             // nicht sofort nach Startup-Scan (vermeidet Doppel-Fetch beim Start).
             last_auto_fetch: Some(std::time::Instant::now()),
             auto_fetching: false,
             repo_sort_dirty: true,
+            config_save_pending: false,
+            last_config_save: None,
         };
         #[cfg(target_os = "windows")]
         {
@@ -268,22 +284,22 @@ impl MyApp {
         }
         // Update checker (async, 2s delay to not affect startup)
         // Nur wenn in den Settings aktiviert (F-06 Opt-out, Default AN)
+        // M2: kein Thread + kein Sleep wenn deaktiviert.
         {
             let current_version = env!("CARGO_PKG_VERSION").to_string();
-            let enabled = app.config.check_for_updates;
-            std::thread::spawn(move || {
-                if !enabled {
-                    let _ = update_tx.send(Ok(None));
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                // Diagnosefähig (M2): Fehler mit Kontext weiterreichen statt still zu schlucken.
-                let outcome = crate::updater::check_for_update_result(&current_version);
-                if let Err(ref e) = outcome {
-                    eprintln!("Update-Check fehlgeschlagen: {e} (offline/Proxy/TLS?)");
-                }
-                let _ = update_tx.send(outcome);
-            });
+            if !app.config.check_for_updates {
+                let _ = update_tx.send(Ok(None));
+            } else {
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    // Diagnosefähig (M2): Fehler mit Kontext weiterreichen statt still zu schlucken.
+                    let outcome = crate::updater::check_for_update_result(&current_version);
+                    if let Err(ref e) = outcome {
+                        eprintln!("Update-Check fehlgeschlagen: {e} (offline/Proxy/TLS?)");
+                    }
+                    let _ = update_tx.send(outcome);
+                });
+            }
         }
         app.start_scan();
         // Initial size matches viewport default (1080x680) – used for collapse logic
@@ -310,11 +326,16 @@ impl MyApp {
             match result {
                 ScanResult::Repos(repos) => {
                     self.scanning = false;
-                    self.auto_fetching = false;
+                    // I1: auto_fetching NICHT hier löschen — ein laufender
+                    // Auto-Fetch würde sonst als fertig gelten und sofort ein
+                    // zweiter Auto-Fetch starten (Ref-Race). Nur FetchDone
+                    // mit is_auto löscht das Flag.
                     // Task 4: View-Sortierung einmalig am Intake (per Frame nur
                     // noch bei dirty, siehe Render-Pfad) — Intake sortiert mit
                     // aktueller Config und erfüllt damit pending dirty.
-                    self.repos = sorted_main_repos(&repos, &self.config);
+                    let mut repos = repos;
+                    sort_main_repos(&mut repos, &self.config);
+                    self.repos = repos;
                     self.repo_sort_dirty = false;
                     self.error = None;
                     // Review-Fix: dirty VOR dem direkten Sync markieren — bei
@@ -327,17 +348,32 @@ impl MyApp {
                     repos,
                     fetch_error,
                     fetch_partial,
+                    fetch_is_fetch_error,
+                    is_auto,
                 } => {
                     self.scanning = false;
-                    self.auto_fetching = false;
-                    self.repos = sorted_main_repos(&repos, &self.config);
+                    // I1: nur Auto-FetchDone löscht auto_fetching — manueller
+                    // Fetch (is_auto=false) lässt einen laufenden Auto-Fetch in Ruhe.
+                    if is_auto {
+                        self.auto_fetching = false;
+                        // I6: Timestamp = Ende statt Start — bei langsamem Fetch
+                        // (> Intervall) kein Back-to-Back-Dauerfeuer.
+                        self.last_auto_fetch = Some(std::time::Instant::now());
+                    }
+                    let mut repos = repos;
+                    sort_main_repos(&mut repos, &self.config);
+                    self.repos = repos;
                     self.repo_sort_dirty = false;
                     if let Some(raw) = fetch_error {
                         let key = fetch_error_i18n_key(fetch_partial);
-                        // I1: Wrapper übersetzt, Detail opak; auth_hint lokalisiert anhängen.
-                        // raw ist English-neutral ohne Hinweis (detail_en bzw. Setup-Fehler).
-                        let hint = tr(self.config.language, "auth_hint");
-                        let arg = format!("{raw}. {hint}");
+                        // I2: auth_hint nur bei echten Remote-Fehlern — bei
+                        // Open-/Setup-Fehlern wäre "Credentials prüfen" irreführend.
+                        let arg = if fetch_is_fetch_error {
+                            let hint = tr(self.config.language, "auth_hint");
+                            format!("{raw}. {hint}")
+                        } else {
+                            raw
+                        };
                         let msg = tr_fmt(self.config.language, key, &[&arg]);
                         // Fallback falls Key fehlt (sollte nicht passieren, i18n-Test sichert ab)
                         let msg = if msg == key { arg } else { msg };
@@ -441,7 +477,7 @@ impl MyApp {
                 if tray_branch_switch_opens_main_window() {
                     self.show_main_window(ctx);
                 }
-                self.handle_branch_switch(path, branch);
+                self.handle_branch_switch(ctx, path, branch);
             }
             // Dialog/Fehler landen in branch_dialog/error ohne direkten Sync
             // (#3 Badge) → dirty, damit der nächste Throttle-Sync übernimmt.
@@ -466,13 +502,16 @@ pub fn dedup_branch_switches(
     switches: Vec<(std::path::PathBuf, String)>,
 ) -> Vec<(std::path::PathBuf, String)> {
     use std::collections::HashMap;
-    let mut last_idx: HashMap<std::path::PathBuf, usize> = HashMap::new();
+    // I3: Key via repo_state_key normalisieren (Windows case-insensitiv),
+    // sonst werden C:\Repo und c:\repo als verschiedene Repos behandelt.
+    let mut last_idx: HashMap<String, usize> = HashMap::new();
     let mut out: Vec<(std::path::PathBuf, String)> = Vec::with_capacity(switches.len());
     for (path, branch) in switches {
-        if let Some(&i) = last_idx.get(&path) {
+        let key = crate::config::AppConfig::repo_state_key(&path);
+        if let Some(&i) = last_idx.get(&key) {
             out[i].1 = branch;
         } else {
-            last_idx.insert(path.clone(), out.len());
+            last_idx.insert(key, out.len());
             out.push((path, branch));
         }
     }
@@ -596,7 +635,8 @@ impl MyApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(60));
             return;
         }
-        self.last_auto_fetch = Some(now);
+        // I6: Timestamp erst im FetchDone-Arm (Ende) setzen — nicht hier am
+        // Start, sonst Back-to-Back bei Fetch-Dauer > Intervall.
         // Finding D1: bewusst NICHT `scanning` — Refresh/Fetch bleiben klickbar.
         self.auto_fetching = true;
         let paths: Vec<PathBuf> = self.repos.iter().map(|r| r.path.clone()).collect();
@@ -608,21 +648,67 @@ impl MyApp {
             // damit erreichbare Remotes trotzdem frische Counts liefern.
             let mut fetch_error: Option<String> = None;
             let mut fetch_partial = false;
-            for p in &paths {
-                if let Err(e) = crate::git::fetch_all(p) {
-                    eprintln!("Auto-Fetch für {} fehlgeschlagen: {e:#}", p.display());
-                    if fetch_error.is_none() {
-                        let (msg, partial) = fetch_error_parts(&e);
-                        fetch_error = Some(msg);
-                        fetch_partial = partial;
+            let mut fetch_is_fetch_error = false;
+            // P6: begrenzt parallel (max 4 Threads) statt seriell — bei vielen
+            // Repos sonst N×Latenz. Ohne rayon: simple Chunk-Worker mit Mutex.
+            let parallel = std::cmp::min(4, paths.len().max(1));
+            if parallel <= 1 {
+                for p in &paths {
+                    if let Err(e) = crate::git::fetch_all(p) {
+                        eprintln!("Auto-Fetch für {} fehlgeschlagen: {e:#}", p.display());
+                        if fetch_error.is_none() {
+                            let (msg, partial, is_fetch) = fetch_error_parts(&e);
+                            fetch_error = Some(msg);
+                            fetch_partial = partial;
+                            fetch_is_fetch_error = is_fetch;
+                        } else if fetch_error_parts(&e).1 {
+                            fetch_partial = true;
+                        }
                     }
                 }
+            } else {
+                let queue = std::sync::Arc::new(std::sync::Mutex::new(paths));
+                let first_err = std::sync::Arc::new(std::sync::Mutex::new(
+                    (None, false, false),
+                ));
+                let mut handles = Vec::new();
+                for _ in 0..parallel {
+                    let q = queue.clone();
+                    let fe = first_err.clone();
+                    handles.push(std::thread::spawn(move || loop {
+                        let next = q.lock().ok().and_then(|mut g| g.pop());
+                        let Some(p) = next else { break };
+                        if let Err(e) = crate::git::fetch_all(&p) {
+                            eprintln!("Auto-Fetch für {} fehlgeschlagen: {e:#}", p.display());
+                            if let Ok(mut g) = fe.lock() {
+                                if g.0.is_none() {
+                                    let (msg, partial, is_fetch) = fetch_error_parts(&e);
+                                    g.0 = Some(msg);
+                                    g.1 = partial;
+                                    g.2 = is_fetch;
+                                } else if fetch_error_parts(&e).1 {
+                                    g.1 = true;
+                                }
+                            }
+                        }
+                    }));
+                }
+                for h in handles {
+                    let _ = h.join();
+                }
+                if let Ok(g) = first_err.lock() {
+                    fetch_error = g.0.clone();
+                    fetch_partial = g.1;
+                    fetch_is_fetch_error = g.2;
+                };
             }
             let repos = crate::scanner::scan_repos(&cfg);
             let _ = tx.send(ScanResult::FetchDone {
                 repos,
                 fetch_error,
                 fetch_partial,
+                fetch_is_fetch_error,
+                is_auto: true,
             });
         });
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -928,6 +1014,8 @@ impl MyApp {
                 }
             }
         }
+        // P5: gebatcht — 1 Save max. statt N Saves bei N Actions im Frame.
+        self.flush_config_save();
     }
 
     #[cfg(target_os = "windows")]
@@ -980,13 +1068,37 @@ impl MyApp {
         self.mark_tray_dirty();
         // Finding A: Usage ändert MRU → Hauptsortierung invalidieren.
         self.repo_sort_dirty = true;
-        if let Err(e) = self.config.save() {
-            self.note_config_save_error(&e);
-        }
+        // P5: nicht sofort speichern — N Actions im selben Frame würden N
+        // File-Syncs auslösen. Nur pending markieren, flush 1× pro Frame.
+        self.config_save_pending = true;
         self.sync_tray_service();
     }
 
-    fn handle_branch_switch(&mut self, repo_path: PathBuf, target_branch: String) {
+    /// P5: gebatchter Config-Save — max. 1 File-Sync pro Aufruf, Fehler via
+    /// note_config_save_error (wie bisher in record_usage).
+    fn flush_config_save(&mut self) {
+        if !self.config_save_pending {
+            return;
+        }
+        // Throttle: max. 1 Save / 200ms, sonst pending für nächsten Frame.
+        if let Some(t) = self.last_config_save {
+            if t.elapsed() < std::time::Duration::from_millis(200) {
+                return;
+            }
+        }
+        self.config_save_pending = false;
+        self.last_config_save = Some(std::time::Instant::now());
+        if let Err(e) = self.config.save() {
+            self.note_config_save_error(&e);
+        }
+    }
+
+    fn handle_branch_switch(
+        &mut self,
+        ctx: &egui::Context,
+        repo_path: PathBuf,
+        target_branch: String,
+    ) {
         // Prüfe dirty und conflicts
         let repo_path_clone = repo_path.clone();
         let target_clone = target_branch.clone();
@@ -1001,10 +1113,16 @@ impl MyApp {
                     target_branch,
                     repo.state()
                 ));
+                // I5: echte Fehler müssen bei hidden Window revealen — sonst
+                // klickt der Nutzer im Tray und sieht nichts.
+                self.mark_tray_dirty();
+                if should_reveal_main_on_error(self.window_visible, self.should_quit) {
+                    self.show_main_window(ctx);
+                }
                 return;
             }
             if dirty {
-                // Zeige Dialog
+                // Zeige Dialog (P4: get_detailed_status ohne recurse, gecappt)
                 let files = crate::git::get_detailed_status(&repo);
                 self.branch_dialog = Some(BranchDialog {
                     repo_path,
@@ -1055,7 +1173,8 @@ impl MyApp {
                     self.error = Some(format!("Branch-Wechsel fehlgeschlagen: {e:#}"));
                 }
                 // Bei stash_and_checkout kann es sein dass stash pop fehlgeschlagen ist, aber checkout ok – dann trotzdem neu scannen
-                if e.to_string().contains("Stash pop fehlgeschlagen") {
+                // M4: typisiert statt String-Match.
+                if crate::git::is_stash_pop_failed(&e) {
                     self.start_scan();
                 }
             }
@@ -1150,11 +1269,20 @@ impl MyApp {
                                 .selected_text(current_text)
                                 .width(120.0)
                                 .show_ui(ui, |ui| {
-                                    let agents_snapshot = self.config.agents.clone();
-                                    for a in &agents_snapshot {
-                                        let mut is_active = self.config.is_agent_active(&a.id);
-                                        if ui.checkbox(&mut is_active, &a.display_name).clicked() {
-                                            self.config.toggle_agent_active(&a.id);
+                                    // M6: keine Full-Clones pro Frame — nur
+                                    // (id, display_name) snapshotten (2 Strings
+                                    // statt kompletter AgentProfile inkl.
+                                    // terminal_override). Mutiert wird via id.
+                                    let snapshot: Vec<(String, String)> = self
+                                        .config
+                                        .agents
+                                        .iter()
+                                        .map(|a| (a.id.clone(), a.display_name.clone()))
+                                        .collect();
+                                    for (id, name) in &snapshot {
+                                        let mut is_active = self.config.is_agent_active(id);
+                                        if ui.checkbox(&mut is_active, name).clicked() {
+                                            self.config.toggle_agent_active(id);
                                             agents_changed = true;
                                             if let Err(e) = self.config.save() {
                                                 save_err = Some(format!("{e:#}"));
@@ -1163,9 +1291,15 @@ impl MyApp {
                                     }
                                     ui.separator();
                                     if ui.button("Alle aktivieren").clicked() {
-                                        for a in &self.config.agents.clone() {
-                                            if !self.config.is_agent_active(&a.id) {
-                                                self.config.toggle_agent_active(&a.id);
+                                        let ids: Vec<String> = self
+                                            .config
+                                            .agents
+                                            .iter()
+                                            .map(|a| a.id.clone())
+                                            .collect();
+                                        for id in &ids {
+                                            if !self.config.is_agent_active(id) {
+                                                self.config.toggle_agent_active(id);
                                                 agents_changed = true;
                                             }
                                         }
@@ -1584,6 +1718,9 @@ impl eframe::App for MyApp {
         // Task 5: periodischer Fetch (throttled, 0=aus) — auch bei hidden Window.
         self.maybe_auto_fetch(ctx);
         self.handle_close_request(ctx);
+        // P5: gebatchte Usage-Saves hier flush (deckt auch ui()-Actions vom
+        // Vorframe ab — max. 1 Save pro Frame).
+        self.flush_config_save();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1905,15 +2042,15 @@ impl eframe::App for MyApp {
                     self.status_message_time = Some(std::time::Instant::now());
                     std::thread::spawn(move || {
                         let fetch_res = crate::git::fetch_all(&path_clone);
-                        let (fetch_error, fetch_partial) = match fetch_res {
-                            Ok(()) => (None, false),
+                        let (fetch_error, fetch_partial, fetch_is_fetch_error) = match fetch_res {
+                            Ok(()) => (None, false, false),
                             Err(e) => {
-                                let (msg, partial) = fetch_error_parts(&e);
+                                let (msg, partial, is_fetch) = fetch_error_parts(&e);
                                 eprintln!(
                                     "Fetch fehlgeschlagen für {}: {msg}",
                                     path_clone.display()
                                 );
-                                (Some(msg), partial)
+                                (Some(msg), partial, is_fetch)
                             }
                         };
                         let repos = crate::scanner::scan_repos(&cfg);
@@ -1921,6 +2058,8 @@ impl eframe::App for MyApp {
                             repos,
                             fetch_error,
                             fetch_partial,
+                            fetch_is_fetch_error,
+                            is_auto: false,
                         });
                     });
                 }
@@ -2140,6 +2279,8 @@ mod tests {
             last_auto_fetch: None,
             auto_fetching: false,
             repo_sort_dirty: true,
+            config_save_pending: false,
+            last_config_save: None,
         }
     }
 
@@ -2211,12 +2352,16 @@ mod tests {
             repos: vec![],
             fetch_error: None,
             fetch_partial: false,
+            fetch_is_fetch_error: false,
+            is_auto: false,
         };
         match fetch_done {
             ScanResult::FetchDone {
                 repos,
                 fetch_error,
                 fetch_partial,
+                fetch_is_fetch_error: _,
+                is_auto: _,
             } => {
                 assert!(repos.is_empty());
                 assert!(fetch_error.is_none());
@@ -2242,6 +2387,8 @@ mod tests {
                 repos: vec![],
                 fetch_error: Some("'origin': auth failed".to_string()),
                 fetch_partial: false,
+                fetch_is_fetch_error: true,
+                is_auto: false,
             })
             .expect("send fetch done");
         let ctx = egui::Context::default();
@@ -2275,6 +2422,8 @@ mod tests {
                 // I1: Background liefert English-neutral (detail_en), kein Deutsch.
                 fetch_error: Some("'bad': timeout; succeeded: 'good'".to_string()),
                 fetch_partial: true,
+                fetch_is_fetch_error: true,
+                is_auto: false,
             })
             .expect("send fetch done");
         let ctx = egui::Context::default();
@@ -2307,6 +2456,8 @@ mod tests {
                 repos: vec![],
                 fetch_error: Some("'bad': timeout; succeeded: 'good'".to_string()),
                 fetch_partial: true,
+                fetch_is_fetch_error: true,
+                is_auto: false,
             })
             .expect("send");
         let ctx = egui::Context::default();
@@ -2344,6 +2495,8 @@ mod tests {
                 repos: vec![],
                 fetch_error: None,
                 fetch_partial: false,
+                fetch_is_fetch_error: false,
+                is_auto: true,
             })
             .expect("send fetch done");
         let ctx = egui::Context::default();
@@ -2361,20 +2514,100 @@ mod tests {
             succeeded: vec!["good".to_string()],
             failed: vec![("bad".to_string(), "boom".to_string())],
         });
-        let (msg, is_partial) = fetch_error_parts(&partial);
+        let (msg, is_partial, is_fetch) = fetch_error_parts(&partial);
         assert!(is_partial);
+        assert!(is_fetch);
         assert_eq!(msg, "'bad': boom; succeeded: 'good'");
         let complete = anyhow::Error::new(PartialFetch {
             succeeded: Vec::new(),
             failed: vec![("bad".to_string(), "boom".to_string())],
         });
-        let (msg_c, is_partial_c) = fetch_error_parts(&complete);
+        let (msg_c, is_partial_c, is_fetch_c) = fetch_error_parts(&complete);
         assert!(!is_partial_c);
+        assert!(is_fetch_c);
         assert_eq!(msg_c, "'bad': boom");
         let plain = anyhow::anyhow!("plain setup failure");
-        let (msg_p, is_partial_p) = fetch_error_parts(&plain);
+        let (msg_p, is_partial_p, is_fetch_p) = fetch_error_parts(&plain);
         assert!(!is_partial_p);
+        assert!(!is_fetch_p);
         assert_eq!(msg_p, "plain setup failure");
+    }
+
+    #[test]
+    fn poll_scan_repos_keeps_auto_fetching() {
+        // I1: manueller Scan (Repos) darf einen laufenden Auto-Fetch nicht
+        // als fertig markieren — sonst zwei parallele fetch_all (Ref-Race).
+        let mut app = test_app();
+        app.scanning = true;
+        app.auto_fetching = true;
+        app.scan_tx.send(ScanResult::Repos(vec![])).unwrap();
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(!app.scanning);
+        assert!(app.auto_fetching, "Repos must not clear auto_fetching");
+    }
+
+    #[test]
+    fn poll_scan_manual_fetch_done_keeps_auto_fetching() {
+        // I1: manueller Fetch (is_auto=false) lässt Auto-Flag in Ruhe.
+        let mut app = test_app();
+        app.auto_fetching = true;
+        app.scan_tx
+            .send(ScanResult::FetchDone {
+                repos: vec![],
+                fetch_error: None,
+                fetch_partial: false,
+                fetch_is_fetch_error: false,
+                is_auto: false,
+            })
+            .unwrap();
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(app.auto_fetching, "manual FetchDone must not clear auto flag");
+    }
+
+    #[test]
+    fn poll_scan_auto_fetch_done_clears_and_timestamps() {
+        // I1+I6: nur Auto-FetchDone löscht Flag + setzt Ende-Timestamp.
+        let mut app = test_app();
+        app.auto_fetching = true;
+        assert!(app.last_auto_fetch.is_none());
+        app.scan_tx
+            .send(ScanResult::FetchDone {
+                repos: vec![],
+                fetch_error: None,
+                fetch_partial: false,
+                fetch_is_fetch_error: false,
+                is_auto: true,
+            })
+            .unwrap();
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(!app.auto_fetching);
+        assert!(app.last_auto_fetch.is_some(), "auto FetchDone must timestamp end");
+    }
+
+    #[test]
+    fn poll_scan_plain_error_has_no_auth_hint() {
+        // I2: Open-/Setup-Fehler ohne auth_hint (irreführend sonst).
+        let mut app = test_app();
+        app.scanning = true;
+        app.scan_tx
+            .send(ScanResult::FetchDone {
+                repos: vec![],
+                fetch_error: Some("Failed to open repository: xyz".to_string()),
+                fetch_partial: false,
+                fetch_is_fetch_error: false,
+                is_auto: false,
+            })
+            .unwrap();
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        let err = app.error.expect("error must be set");
+        assert!(
+            !err.contains(&crate::i18n::tr(app.config.language, "auth_hint")),
+            "plain error must not append auth_hint, got: {err}"
+        );
     }
 
     #[test]

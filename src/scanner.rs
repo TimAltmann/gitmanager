@@ -49,7 +49,7 @@ pub fn scan_repos(config: &AppConfig) -> Vec<RepoInfo> {
         }
     }
 
-    all_repos.sort_by_key(|a| a.name.to_lowercase());
+    all_repos.sort_by_cached_key(|a| a.name.to_lowercase());
 
     // Zweite Stufe: Solution-Dateien pro Repo scannen (parallel)
     all_repos.par_iter_mut().for_each(|repo| {
