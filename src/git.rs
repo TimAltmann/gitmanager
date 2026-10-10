@@ -488,16 +488,20 @@ pub fn ahead_behind_in(repo: &Repository) -> (usize, usize) {
                 if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
                     return (a, b);
                 }
-                return (0, 0);
+                // F2#2: Graph-Fehler → nicht (0,0), sondern unten andere
+                // Remotes versuchen (Upstream-bekannt-Regel oben bleibt).
             }
         }
     }
     if let Ok(remotes) = repo.remotes() {
-        for remote_res in remotes.iter() {
-            let remote_name = match remote_res {
-                Ok(Some(n)) => n.to_string(),
-                _ => continue,
-            };
+        // L5: `origin` zuerst prüfen — bei Forks (origin+upstream) würde
+        // alphabetisch sonst der falsche Remote den Zähler liefern.
+        let mut names: Vec<String> = remotes
+            .iter()
+            .filter_map(|r| r.ok().flatten().map(|n| n.to_string()))
+            .collect();
+        names.sort_by_key(|n| (n != "origin", n.clone()));
+        for remote_name in &names {
             for candidate in [
                 format!("refs/remotes/{remote_name}/{branch}"),
                 format!("{remote_name}/{branch}"),
@@ -510,7 +514,7 @@ pub fn ahead_behind_in(repo: &Repository) -> (usize, usize) {
                     if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
                         return (a, b);
                     }
-                    return (0, 0);
+                    // F2#2: Graph-Fehler → nächsten Remote versuchen.
                 }
             }
         }
@@ -602,6 +606,11 @@ pub fn remote_short_name(full_ref: &str, branch_name: &str) -> String {
     }
     if let Some(rest) = branch_name.strip_prefix("origin/") {
         return rest.to_string();
+    }
+    // F1#7: generisch erstes Segment strippen (z.B. `upstream/foo` → `foo`),
+    // statt nur `origin/` zu kennen.
+    if let Some((_, short)) = branch_name.split_once('/') {
+        return short.to_string();
     }
     branch_name.to_string()
 }
@@ -2291,7 +2300,10 @@ mod tests {
         // K1: clean repo ohne Änderungen → kein Stash, kein Pop → Ok.
         // Früher wurde trotzdem stash_pop(0) versucht (fremder Stash-Risk).
         let res = stash_and_checkout(dir.path(), "feature");
-        assert!(res.is_ok(), "clean checkout must succeed without pop: {res:?}");
+        assert!(
+            res.is_ok(),
+            "clean checkout must succeed without pop: {res:?}"
+        );
     }
 
     #[test]
@@ -2340,6 +2352,11 @@ mod tests {
             remote_short_name("refs/remotes/origin/main", "origin/main"),
             "main"
         );
+        // F1#7: Fallback ohne refs/remotes/-Prefix strippt generisch das
+        // erste Segment (nicht nur `origin/`).
+        assert_eq!(remote_short_name("", "upstream/foo"), "foo");
+        assert_eq!(remote_short_name("", "origin/foo"), "foo");
+        assert_eq!(remote_short_name("", "main"), "main");
     }
 
     #[test]

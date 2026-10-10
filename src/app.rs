@@ -140,9 +140,7 @@ pub struct MyApp {
     /// P5: gebatchte Config-Saves — `record_usage` markiert nur pending,
     /// `flush_config_save` schreibt max. 1× pro Frame (statt N File-Syncs
     /// bei N Tray-Actions im selben Frame).
-    #[cfg_attr(not(test), allow(dead_code))]
     config_save_pending: bool,
-    #[cfg_attr(not(test), allow(dead_code))]
     last_config_save: Option<std::time::Instant>,
 }
 
@@ -157,7 +155,9 @@ impl MyApp {
             eprintln!("Autostart-Sync fehlgeschlagen: {e:#}");
         }
         // M1: --minimized (Autostart) startet versteckt im Tray.
-        let start_minimized = std::env::args().any(|a| a == "--minimized");
+        // F1#9: nur auf Windows — ohne Tray kein unsichtbarer Start.
+        let start_minimized =
+            cfg!(target_os = "windows") && std::env::args().any(|a| a == "--minimized");
         crate::ui::theme::apply_theme(&cc.egui_ctx, &config.theme);
         // SVG Icons loader für egui_extras
         egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -238,6 +238,13 @@ impl MyApp {
                 // Als sichtbarer Fehler im Hauptfenster (nicht nur stderr).
                 app.error = Some(crate::i18n::tr(app.config.language, "tray_creation_error"));
                 eprintln!("Tray icon creation failed");
+                // L3: Tray-Erstellung fehlgeschlagen → kein unsichtbarer Start
+                // (App wäre sonst unerreichbar); Fehler steht oben im Banner.
+                if start_minimized {
+                    app.window_visible = true;
+                    cc.egui_ctx
+                        .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                }
             }
         }
         // Auto-Erkennung asynchron (verhindert UI Freeze beim Start)
@@ -311,6 +318,13 @@ impl MyApp {
         if self.scanning {
             return;
         }
+        // L2: kein paralleler Lauf zum Auto-Fetch — zwei libgit2-Fetches
+        // auf denselben Repos racen um FETCH_HEAD/refs (cannot lock ref).
+        if self.auto_fetching {
+            self.status_message = Some(tr(self.config.language, "auto_fetch_running"));
+            self.status_message_time = Some(std::time::Instant::now());
+            return;
+        }
         self.scanning = true;
         self.error = None;
         let cfg = self.config.clone();
@@ -351,7 +365,12 @@ impl MyApp {
                     fetch_is_fetch_error,
                     is_auto,
                 } => {
-                    self.scanning = false;
+                    // L4: `scanning` nur für manuelle Läufe zurücksetzen — ein
+                    // parallel eintreffendes Auto-FetchDone darf den Spinner
+                    // eines noch laufenden manuellen Laufs nicht löschen.
+                    if !is_auto {
+                        self.scanning = false;
+                    }
                     // I1: nur Auto-FetchDone löscht auto_fetching — manueller
                     // Fetch (is_auto=false) lässt einen laufenden Auto-Fetch in Ruhe.
                     if is_auto {
@@ -604,9 +623,12 @@ impl MyApp {
     }
 
     /// Task 5: Periodischer Auto-Fetch im Hintergrund (throttled).
-    /// Nur sichtbare Repos (`self.repos` = bereits sortierte View-Liste),
-    /// nutzt ehrliches `fetch_all` (Fehler nur loggen, kein Error-Popup —
-    /// sonst würde ein Offline-Remote alle paar Minuten rot blinken).
+    /// Scope: ALLE gescannten Repos (Default-Intervall 10 min, 0 = aus) —
+    /// der Veraltet-Indikator im Hauptfenster braucht frische Counts überall,
+    /// nicht nur für die Tray-Top-N.
+    /// Fehler gehen als FetchDone mit und setzen bewusst den persistenten
+    /// Banner (Entscheidung: sichtbar statt still — Offline-Remotes sind
+    /// ein Dauerzustand, kein Rauschen); Erfolg löscht ihn wieder.
     /// Danach Rescan für frische `behind`-Counts.
     fn maybe_auto_fetch(&mut self, ctx: &egui::Context) {
         let interval = self.config.auto_fetch_interval_min;
@@ -668,15 +690,15 @@ impl MyApp {
                 }
             } else {
                 let queue = std::sync::Arc::new(std::sync::Mutex::new(paths));
-                let first_err = std::sync::Arc::new(std::sync::Mutex::new(
-                    (None, false, false),
-                ));
+                let first_err = std::sync::Arc::new(std::sync::Mutex::new((None, false, false)));
                 let mut handles = Vec::new();
                 for _ in 0..parallel {
                     let q = queue.clone();
                     let fe = first_err.clone();
                     handles.push(std::thread::spawn(move || loop {
-                        let next = q.lock().ok().and_then(|mut g| g.pop());
+                        // F1#8: Poison-Recovery wie im Tray-Pfad — ein poisoned
+                        // Mutex darf nicht still den Rest der Queue verwerfen.
+                        let next = q.lock().unwrap_or_else(|e| e.into_inner()).pop();
                         let Some(p) = next else { break };
                         if let Err(e) = crate::git::fetch_all(&p) {
                             eprintln!("Auto-Fetch für {} fehlgeschlagen: {e:#}", p.display());
@@ -727,7 +749,9 @@ impl MyApp {
 
     fn show_main_window(&mut self, ctx: &egui::Context) {
         self.window_visible = true;
-        self.should_quit = false;
+        // F2#3: `should_quit` NICHT zurücksetzen — ein ausstehender Quit
+        // (Tray-Quit + Close-Cmd bereits unterwegs) gewinnt gegen ein
+        // nebenläufiges ShowMain; sonst überlebt die App den Quit-Wunsch.
         // Also clear popup in dedicated tray service (efficient: shared state)
         #[cfg(target_os = "windows")]
         if let Some(shared) = &self.tray_shared {
@@ -858,6 +882,10 @@ impl MyApp {
                 }
                 crate::tray_service::TrayAction::Quit => {
                     self.should_quit = true;
+                    // L6: Usage-Timestamps nicht verlieren — Force-Flush
+                    // (Throttle umgehen), sonst bleibt pending ungespeichert.
+                    self.last_config_save = None;
+                    self.flush_config_save(ctx);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 crate::tray_service::TrayAction::BranchSwitch(path, branch) => {
@@ -1015,7 +1043,7 @@ impl MyApp {
             }
         }
         // P5: gebatcht — 1 Save max. statt N Saves bei N Actions im Frame.
-        self.flush_config_save();
+        self.flush_config_save(ctx);
     }
 
     #[cfg(target_os = "windows")]
@@ -1071,24 +1099,32 @@ impl MyApp {
         // P5: nicht sofort speichern — N Actions im selben Frame würden N
         // File-Syncs auslösen. Nur pending markieren, flush 1× pro Frame.
         self.config_save_pending = true;
-        self.sync_tray_service();
+        // F1#6/P1: kein direkter sync_tray_service() (Deep-Clone pro Klick) —
+        // der Throttle-Sync in logic() übernimmt.
+        self.mark_tray_dirty();
     }
 
     /// P5: gebatchter Config-Save — max. 1 File-Sync pro Aufruf, Fehler via
     /// note_config_save_error (wie bisher in record_usage).
-    fn flush_config_save(&mut self) {
+    /// F2#5/L6: Throttle-Hit plant Repaint (sonst hängt pending bei
+    /// eingestelltem egui-Repaint), Fehler re-armt Retry, Quit flusht force.
+    fn flush_config_save(&mut self, ctx: &egui::Context) {
         if !self.config_save_pending {
             return;
         }
         // Throttle: max. 1 Save / 200ms, sonst pending für nächsten Frame.
         if let Some(t) = self.last_config_save {
-            if t.elapsed() < std::time::Duration::from_millis(200) {
+            let elapsed = t.elapsed();
+            if elapsed < std::time::Duration::from_millis(200) {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200) - elapsed);
                 return;
             }
         }
         self.config_save_pending = false;
         self.last_config_save = Some(std::time::Instant::now());
         if let Err(e) = self.config.save() {
+            // Retry beim nächsten Frame statt still zu verwerfen.
+            self.config_save_pending = true;
             self.note_config_save_error(&e);
         }
     }
@@ -1104,7 +1140,17 @@ impl MyApp {
         let target_clone = target_branch.clone();
         // Öffne Repo um Status zu prüfen
         if let Some(repo) = crate::git::open_repo(&repo_path) {
-            let dirty = crate::git::is_dirty(&repo);
+            // F1#5: Dirty-Flag aus letztem Scan wiederverwenden statt teurem
+            // Live-Check (recurse_untracked_dirs, unbegrenzt) auf dem UI-Thread.
+            // Fallback Live-Check, falls Repo (noch) nicht in der Liste.
+            // Beide Fehlerrichtungen failen safe: false-clean → Checkout
+            // scheitert im Dry-Run mit Fehler; false-dirty → Dialog zu viel.
+            let dirty = self
+                .repos
+                .iter()
+                .find(|r| r.path == repo_path)
+                .map(|r| r.dirty)
+                .unwrap_or_else(|| crate::git::is_dirty(&repo));
             let has_conflicts = crate::git::has_merge_conflicts(&repo);
             let in_progress = crate::git::is_merge_in_progress(&repo);
             if has_conflicts || in_progress {
@@ -1636,8 +1682,10 @@ impl MyApp {
         if !self.show_update_dialog {
             return;
         }
+        // F2#8: kein Clone pro Frame — disjunkte Field-Borrows
+        // (`update_info` vs. `show_update_dialog`) statt owned Kopie.
         let info = match &self.update_info {
-            Some(i) => i.clone(),
+            Some(i) => i,
             None => {
                 self.show_update_dialog = false;
                 return;
@@ -1720,7 +1768,7 @@ impl eframe::App for MyApp {
         self.handle_close_request(ctx);
         // P5: gebatchte Usage-Saves hier flush (deckt auch ui()-Actions vom
         // Vorframe ab — max. 1 Save pro Frame).
-        self.flush_config_save();
+        self.flush_config_save(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2025,6 +2073,13 @@ impl eframe::App for MyApp {
                         self.status_message_time = Some(std::time::Instant::now());
                         self.start_scan();
                     }
+                }
+                // L2: wie start_scan — kein manueller Fetch während
+                // Auto-Fetch läuft (Ref-Race); Request verwerfen + Hinweis.
+                if self.auto_fetching && actions.fetch_branches.is_some() {
+                    self.status_message = Some(tr(lang, "auto_fetch_running"));
+                    self.status_message_time = Some(std::time::Instant::now());
+                    actions.fetch_branches = None;
                 }
                 if let Some(repo_path) = actions.fetch_branches {
                     let path_clone = repo_path.clone();
@@ -2501,7 +2556,12 @@ mod tests {
             .expect("send fetch done");
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
-        assert!(!app.scanning);
+        // L4: Auto-FetchDone räumt eigenen Flag/Timestamp, lässt aber einen
+        // parallelen manuellen Lauf (scanning) in Ruhe.
+        assert!(
+            app.scanning,
+            "auto FetchDone must not clear manual scanning"
+        );
         assert!(!app.auto_fetching);
         assert!(app.error.is_none(), "successful fetch must clear error");
     }
@@ -2563,7 +2623,10 @@ mod tests {
             .unwrap();
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
-        assert!(app.auto_fetching, "manual FetchDone must not clear auto flag");
+        assert!(
+            app.auto_fetching,
+            "manual FetchDone must not clear auto flag"
+        );
     }
 
     #[test]
@@ -2584,7 +2647,69 @@ mod tests {
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
         assert!(!app.auto_fetching);
-        assert!(app.last_auto_fetch.is_some(), "auto FetchDone must timestamp end");
+        assert!(
+            app.last_auto_fetch.is_some(),
+            "auto FetchDone must timestamp end"
+        );
+    }
+
+    #[test]
+    fn poll_scan_auto_fetch_done_keeps_manual_scanning() {
+        // L4: Auto-FetchDone darf den Spinner eines parallelen manuellen
+        // Laufs nicht löschen (nur is_auto=false setzt scanning zurück).
+        let mut app = test_app();
+        app.scanning = true;
+        app.scan_tx
+            .send(ScanResult::FetchDone {
+                repos: vec![],
+                fetch_error: None,
+                fetch_partial: false,
+                fetch_is_fetch_error: false,
+                is_auto: true,
+            })
+            .unwrap();
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(
+            app.scanning,
+            "auto FetchDone must not clear manual scanning"
+        );
+        // Manueller FetchDone räumt auf wie bisher.
+        app.scan_tx
+            .send(ScanResult::FetchDone {
+                repos: vec![],
+                fetch_error: None,
+                fetch_partial: false,
+                fetch_is_fetch_error: false,
+                is_auto: false,
+            })
+            .unwrap();
+        app.poll_scan(&ctx);
+        assert!(!app.scanning);
+    }
+
+    #[test]
+    fn start_scan_skips_while_auto_fetching() {
+        // L2: kein paralleler manueller Scan während Auto-Fetch läuft
+        // (Ref-Race) — mit Hinweis statt stillem Ignore.
+        let mut app = test_app();
+        app.auto_fetching = true;
+        app.start_scan();
+        assert!(
+            !app.scanning,
+            "must not spawn manual scan during auto-fetch"
+        );
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|m| m.to_lowercase().contains("auto-fetch")),
+            "skip needs visible reason, got {:?}",
+            app.status_message
+        );
+        // Ohne Auto-Lauf normaler Start.
+        app.auto_fetching = false;
+        app.start_scan();
+        assert!(app.scanning);
     }
 
     #[test]

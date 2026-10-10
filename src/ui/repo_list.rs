@@ -163,6 +163,9 @@ pub fn sort_main_repos(repos: &mut [RepoInfo], config: &AppConfig) {
 
 /// Geklonte, sortierte Kopie (Test-/Reuse-freundlich). Render-Pfad nutzt
 /// `sort_main_repos` in-place, um Klone pro Frame zu vermeiden.
+/// Nur in Tests genutzt (Prod-Pfad sortiert in-place) — analog zu den
+/// Pfad-Wrappern in `git.rs`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn sorted_main_repos(repos: &[RepoInfo], config: &AppConfig) -> Vec<RepoInfo> {
     let mut out = repos.to_vec();
     sort_main_repos(&mut out, config);
@@ -294,7 +297,9 @@ fn show_repo_row(
                     repo.behind,
                 );
                 // Branch Dropdown: adaptive Breite für lange Branchenamen (140..280)
-                let branch_width = (branch_text.len() as f32 * 7.0 + 46.0).clamp(140.0, 280.0);
+                // F1#10: Zeichen statt Bytes zählen (Umlaute/Emoji).
+                let branch_width =
+                    (branch_text.chars().count() as f32 * 7.0 + 46.0).clamp(140.0, 280.0);
                 // Branch Dropdown: Chevron jetzt innerhalb des Buttons (rechtsbündig)
                 let btn_resp = ui
                     .horizontal(|ui| {

@@ -1058,17 +1058,18 @@ impl AppConfig {
             cfg.config_version = 10;
             let _ = cfg.save();
         }
+        // K1: Versionen ab hier ohne Zwischen-Save — einmalig am Ende.
+        let loaded_version = cfg.config_version;
         if cfg.config_version < 11 {
             // v11: Autostart via Registry Run-Key (Windows), Default false via serde.
             // Kein Pfad-Schreiben hier — Registry-Sync erfolgt in app.rs (Save + Startup).
+            // K1: kein Zwischen-Save — einmalig am Ende von try_load().
             cfg.config_version = 11;
-            let _ = cfg.save();
         }
         if cfg.config_version < 12 {
             // v12: main_sort_mode eingeführt (Default LastUsed via serde).
             // Alte Configs ohne Feld erhalten automatisch LastUsed — hier nur Version bump.
             cfg.config_version = 12;
-            let _ = cfg.save();
         }
         if cfg.config_version < 13 {
             // v13: auto_fetch_interval_min eingeführt (Default 10 via serde, 0=aus).
@@ -1076,10 +1077,16 @@ impl AppConfig {
             // M5: auf 0..=120 clampen (UI-Slider-Range) — 0 bleibt "aus".
             cfg.auto_fetch_interval_min = cfg.auto_fetch_interval_min.min(120);
             cfg.config_version = 13;
-            let _ = cfg.save();
         }
         // M5: auch laufende Configs clampen (JSON-Handedit mit 1000 o.ä.).
-        cfg.auto_fetch_interval_min = cfg.auto_fetch_interval_min.min(120);
+        // K1/K2: nur bei tatsächlicher Änderung speichern (ein Save statt
+        // drei Zwischen-Saves + stiller In-Memory-Clamp).
+        let clamped = cfg.auto_fetch_interval_min.min(120);
+        let clamp_changed = clamped != cfg.auto_fetch_interval_min;
+        cfg.auto_fetch_interval_min = clamped;
+        if cfg.config_version != loaded_version || clamp_changed {
+            let _ = cfg.save();
+        }
         if cfg.branch_display_limit == 0 {
             cfg.branch_display_limit = default_branch_limit();
         }

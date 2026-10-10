@@ -91,7 +91,10 @@ fn main() -> eframe::Result<()> {
 
     let icon = load_icon();
     // M1: --minimized für Autostart (Tray-Start ohne volles Fenster).
-    let start_minimized = std::env::args().any(|a| a == "--minimized");
+    // F1#9: nur auf Windows auswerten — ohne Tray (Linux/macOS) gäbe es
+    // keinen Rückweg ins unsichtbar gestartete Fenster.
+    let start_minimized =
+        cfg!(target_os = "windows") && std::env::args().any(|a| a == "--minimized");
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1080.0, 680.0])
         .with_min_inner_size([920.0, 560.0])

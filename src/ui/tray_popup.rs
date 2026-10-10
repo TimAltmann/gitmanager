@@ -891,6 +891,7 @@ pub fn sorted_visible_refs<'a>(
 /// per frame; clones only what is actually displayed).
 /// Hinweis (P1): produktiv `sorted_visible_refs` nutzen (kein Clone);
 /// diese Clone-Variante nur für Tests/Compat.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn sorted_visible_repos(repos: &[RepoInfo], config: &AppConfig, limit: usize) -> Vec<RepoInfo> {
     sorted_visible_indices(repos, config, limit)
         .into_iter()
@@ -970,10 +971,7 @@ mod tests {
             popup_height_for_visible(&repos, None),
             2.0 * 66.0 + 94.0 + 90.0
         );
-        assert_eq!(
-            popup_height_for_visible::<RepoInfo>(&[], None),
-            280.0
-        );
+        assert_eq!(popup_height_for_visible::<RepoInfo>(&[], None), 280.0);
         // Homogen (Clamp beachten: 2 Zeilen lägen unter MIN 280):
         assert_eq!(
             popup_height_for_visible(&[mk(0), mk(1), mk(0), mk(1)], None),
