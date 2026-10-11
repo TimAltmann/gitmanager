@@ -61,14 +61,24 @@ pub fn fetch_error_parts(e: &anyhow::Error) -> (String, bool, bool) {
     (msg, partial, is_fetch)
 }
 
-/// M2: Zähler-Label für die gecappte Dialog-Dateiliste
-/// (`DETAILED_STATUS_CAP` in git.rs) — ab Cap ehrlich mit "+".
-pub fn capped_file_count_label(count: usize) -> String {
-    if count >= crate::git::DETAILED_STATUS_CAP {
+/// M2: Zähler-Label für die gecappte Dialog-Dateiliste — nur bei
+/// tatsächlicher Trunkierung mit "+" (`files_truncated` aus
+/// `get_detailed_status`), nicht schon bei exakt CAP Einträgen (F1#F3).
+pub fn capped_file_count_label(count: usize, truncated: bool) -> String {
+    if truncated {
         format!("{}+", crate::git::DETAILED_STATUS_CAP)
     } else {
         count.to_string()
     }
+}
+
+/// F1#F1: Anzeigename für Fetch-Fehlermeldungen — `file_name` reicht
+/// (voller Pfad zu lang für Banner/Tooltip-Kurzform).
+fn short_repo_name(p: &Path) -> String {
+    p.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| p.display().to_string())
 }
 
 /// Finding L1/M1 + N9: Fehler-Aggregation über Repos/Threads in EINEM
@@ -77,13 +87,22 @@ pub fn capped_file_count_label(count: usize) -> String {
 /// gemerkte nicht, ersetzt der partielle (Detail mit `succeeded`-Liste ist
 /// informativer als ein Complete-Detail mit falschem Partial-Flag).
 /// Einmal binden statt `fetch_error_parts` doppelt aufzurufen.
-fn aggregate_fetch_error(
+/// F1#F1: mit Repo-Kontext — der Auto-Fetch läuft über N Repos, ein Detail
+/// ohne Repo-Name ist im Banner nicht zuordenbar (`p.file_name()`, voller
+/// Pfad zu lang für Banner; Tooltip trägt ggf. Details).
+fn aggregate_named_fetch_error(
     slot_err: &mut Option<String>,
     slot_partial: &mut bool,
     slot_is_fetch: &mut bool,
+    repo_name: &str,
     e: &anyhow::Error,
 ) {
     let (msg, partial, is_fetch) = fetch_error_parts(e);
+    let msg = if repo_name.is_empty() {
+        msg
+    } else {
+        format!("{repo_name}: {msg}")
+    };
     if slot_err.is_none() {
         *slot_err = Some(msg);
         *slot_partial = partial;
@@ -92,6 +111,26 @@ fn aggregate_fetch_error(
         *slot_err = Some(msg);
         *slot_partial = true;
         *slot_is_fetch = is_fetch;
+    }
+}
+
+/// F2#B1/F3#1: führt Worker-Panic-Marker + Shared-State zusammen — der
+/// Panic-Marker geht nicht verloren, wenn Shared leer ist (und umgekehrt
+/// überschreibt ein vorhandener Shared-Fehler keinen gesetzten Marker
+/// ohne Inhalt). Reine Funktion, separat getestet.
+fn merge_parallel_fetch_result(
+    slot_err: &mut Option<String>,
+    slot_partial: &mut bool,
+    slot_is_fetch: &mut bool,
+    shared: (Option<String>, bool, bool),
+    worker_panicked: bool,
+) {
+    if shared.0.is_some() {
+        *slot_err = shared.0;
+        *slot_partial = shared.1;
+        *slot_is_fetch = shared.2;
+    } else if worker_panicked && slot_err.is_none() {
+        *slot_err = Some("background fetch worker panicked".to_string());
     }
 }
 
@@ -111,6 +150,8 @@ struct BranchDialog {
     target_branch: String,
     error: Option<String>,
     dirty_files: Vec<String>,
+    /// F1#F3: true wenn die Liste am Cap trunkiert wurde (Label mit "+").
+    files_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,6 +520,12 @@ impl MyApp {
                     self.scanning = false;
                     self.auto_fetching = false;
                     self.last_auto_fetch = Some(std::time::Instant::now());
+                    // F1#F2: gemerkten Refresh auch nach Abort nachholen
+                    // (wie Auto-FetchDone) — sonst wartet er bis Intervall.
+                    if self.pending_scan {
+                        self.pending_scan = false;
+                        self.start_scan();
+                    }
                     let msg = tr(self.config.language, reason_key);
                     let msg = if msg == reason_key {
                         reason_key.to_string()
@@ -766,10 +813,12 @@ impl MyApp {
                     for p in &paths {
                         if let Err(e) = crate::git::fetch_all(p) {
                             eprintln!("Auto-Fetch für {} fehlgeschlagen: {e:#}", p.display());
-                            aggregate_fetch_error(
+                            let repo_name = short_repo_name(p);
+                            aggregate_named_fetch_error(
                                 &mut fetch_error,
                                 &mut fetch_partial,
                                 &mut fetch_is_fetch_error,
+                                &repo_name,
                                 &e,
                             );
                         }
@@ -795,29 +844,37 @@ impl MyApp {
                         let Some(p) = next else { break };
                         if let Err(e) = crate::git::fetch_all(&p) {
                             eprintln!("Auto-Fetch für {} fehlgeschlagen: {e:#}", p.display());
-                            if let Ok(mut g) = fe.lock() {
-                                // Disjunkte Tuple-Felder separat binden (kein
-                                // Mehrfach-Borrow des Guards).
-                                let (e0, e1, e2) = &mut *g;
-                                aggregate_fetch_error(e0, e1, e2, &e);
-                            }
+                            // F3#12: Poison-Recovery wie beim Queue-Pop (statt
+                            // Fehlerverlust durch `if let Ok`).
+                            let mut g = fe.lock().unwrap_or_else(|e| e.into_inner());
+                            // Disjunkte Tuple-Felder separat binden (kein
+                            // Mehrfach-Borrow des Guards).
+                            let repo_name = short_repo_name(&p);
+                            let (e0, e1, e2) = &mut *g;
+                            aggregate_named_fetch_error(e0, e1, e2, &repo_name, &e);
                         }
                     }));
                 }
+                // F2#B1/F3#1: Worker-Panic merken — der Merge unten darf den
+                // Marker nicht mit leerem Shared-State überschreiben.
+                let mut worker_panicked = false;
                 for h in handles {
                     // H3: abgestürzter Worker (panic) — Rest wurde von den
                     // Überlebenden per Queue abgearbeitet; nur vermerken.
                     if h.join().is_err() {
                         eprintln!("Auto-Fetch-Worker abgestürzt (panic im Thread)");
-                        if fetch_error.is_none() {
-                            fetch_error = Some("background fetch worker panicked".to_string());
-                        }
+                        worker_panicked = true;
                     }
                 }
                 if let Ok(g) = first_err.lock() {
-                    fetch_error = g.0.clone();
-                    fetch_partial = g.1;
-                    fetch_is_fetch_error = g.2;
+                    let shared = (g.0.clone(), g.1, g.2);
+                    merge_parallel_fetch_result(
+                        &mut fetch_error,
+                        &mut fetch_partial,
+                        &mut fetch_is_fetch_error,
+                        shared,
+                        worker_panicked,
+                    );
                 };
             }
             // H3: Panic im Scan darf Flags nicht hängen lassen —
@@ -894,6 +951,13 @@ impl MyApp {
                 if let Some(shared) = &self.tray_shared {
                     clear_tray_popup(shared);
                 }
+            } else {
+                // F1#F4: echter Fenster-Close — gebatchte Usage-Saves forcen
+                // wie bei Tray-Quit, sonst gehen MRU-Timestamps im
+                // Throttle-Fenster (<200 ms) verloren.
+                self.last_config_save = None;
+                self.config_save_pending = true;
+                self.flush_config_save(ctx);
             }
         }
     }
@@ -993,7 +1057,9 @@ impl MyApp {
                     self.should_quit = true;
                     // L6: Usage-Timestamps nicht verlieren — Force-Flush
                     // (Throttle umgehen), sonst bleibt pending ungespeichert.
+                    // pending=true erzwingen (Backoff-Give-up nicht im Weg).
                     self.last_config_save = None;
+                    self.config_save_pending = true;
                     self.flush_config_save(ctx);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -1245,6 +1311,9 @@ impl MyApp {
                     "save_failed",
                     &[&format!("{e:#}")],
                 ));
+                // F3#2: Dauer-Retry stoppen (kein 5-Hz-fsync-Loop) — nächste
+                // User-Action (record_usage) und Quit-/Close-Flush re-armen.
+                self.config_save_pending = false;
             }
         } else {
             self.config_save_fail_streak = 0;
@@ -1291,12 +1360,13 @@ impl MyApp {
             }
             if dirty {
                 // Zeige Dialog (P4: get_detailed_status ohne recurse, gecappt)
-                let files = crate::git::get_detailed_status(&repo);
+                let (files, files_truncated) = crate::git::get_detailed_status(&repo);
                 self.branch_dialog = Some(BranchDialog {
                     repo_path,
                     target_branch,
                     error: None,
                     dirty_files: files,
+                    files_truncated,
                 });
                 return;
             }
@@ -1724,7 +1794,7 @@ impl MyApp {
                             "{} {}",
                             // M2: gecappte Liste ehrlich kennzeichnen (Cap 100
                             // in get_detailed_status) statt exakt zu wirken.
-                            capped_file_count_label(dlg.dirty_files.len()),
+                            capped_file_count_label(dlg.dirty_files.len(), dlg.files_truncated),
                             tr(lang, "affected_files")
                         ))
                         .size(11.0)
@@ -1841,7 +1911,9 @@ impl MyApp {
                                 ui.label(
                                     RichText::new(body)
                                         .size(11.0)
-                                        .color(Color32::from_rgb(80, 80, 80)),
+                                        // F3#14: Theme-Text statt hardcoded Grau
+                                        // (in Dark-Themes sonst unlesbar).
+                                        .color(ui.visuals().weak_text_color()),
                                 );
                             });
                     }
@@ -2386,6 +2458,7 @@ mod tests {
             target_branch: "feature".to_string(),
             error: None,
             dirty_files: vec![],
+            files_truncated: false,
         };
         assert_eq!(dlg.repo_path, PathBuf::from("/tmp/repo"));
         assert_eq!(dlg.target_branch, "feature");
@@ -2397,6 +2470,7 @@ mod tests {
             target_branch: "main".to_string(),
             error: Some("err".to_string()),
             dirty_files: vec!["modified: foo.txt".to_string()],
+            files_truncated: false,
         };
         assert_eq!(dlg2.error, Some("err".to_string()));
         assert_eq!(dlg2.dirty_files.len(), 1);
@@ -2862,26 +2936,96 @@ mod tests {
     fn aggregate_fetch_error_prefers_partial_detail() {
         // L1/M1: Detail + Flag gehören zusammen — partielles Detail
         // ersetzt gespeichertes Complete, umgekehrt nicht.
+        // (Leerer Repo-Name = kein Präfix; mit Name siehe named-Test.)
         use crate::git::PartialFetch;
         let mut slot = (None, false, false);
         let complete = anyhow::Error::new(PartialFetch {
             succeeded: Vec::new(),
             failed: vec![("a".to_string(), "boom".to_string())],
         });
-        aggregate_fetch_error(&mut slot.0, &mut slot.1, &mut slot.2, &complete);
+        aggregate_named_fetch_error(&mut slot.0, &mut slot.1, &mut slot.2, "", &complete);
         assert_eq!(slot.0.as_deref(), Some("'a': boom"));
         assert!(!slot.1);
         let partial = anyhow::Error::new(PartialFetch {
             succeeded: vec!["g".to_string()],
             failed: vec![("b".to_string(), "x".to_string())],
         });
-        aggregate_fetch_error(&mut slot.0, &mut slot.1, &mut slot.2, &partial);
+        aggregate_named_fetch_error(&mut slot.0, &mut slot.1, &mut slot.2, "", &partial);
         assert!(slot.1);
         assert_eq!(slot.0.as_deref(), Some("'b': x; succeeded: 'g'"));
         // Späteres Complete verdrängt Partial nicht mehr.
-        aggregate_fetch_error(&mut slot.0, &mut slot.1, &mut slot.2, &complete);
+        aggregate_named_fetch_error(&mut slot.0, &mut slot.1, &mut slot.2, "", &complete);
         assert!(slot.1);
         assert!(slot.0.as_deref() == Some("'b': x; succeeded: 'g'"));
+    }
+
+    #[test]
+    fn merge_parallel_fetch_result_keeps_panic_marker() {
+        // F2#B1/F3#1: Panic-Marker geht nicht verloren, wenn Shared leer ist;
+        // vorhandener Shared-Fehler gewinnt über fehlenden Marker.
+        let mut slot = (None, false, false);
+        merge_parallel_fetch_result(
+            &mut slot.0,
+            &mut slot.1,
+            &mut slot.2,
+            (Some("shared".to_string()), true, true),
+            true,
+        );
+        assert_eq!(slot.0.as_deref(), Some("shared"));
+        assert!(slot.1);
+        let mut slot2: (Option<String>, bool, bool) = (None, false, false);
+        merge_parallel_fetch_result(
+            &mut slot2.0,
+            &mut slot2.1,
+            &mut slot2.2,
+            (None, false, false),
+            true,
+        );
+        assert_eq!(slot2.0.as_deref(), Some("background fetch worker panicked"));
+        let mut slot3: (Option<String>, bool, bool) = (None, false, false);
+        merge_parallel_fetch_result(
+            &mut slot3.0,
+            &mut slot3.1,
+            &mut slot3.2,
+            (None, false, false),
+            false,
+        );
+        assert!(slot3.0.is_none(), "no panic, no error → stays clean");
+    }
+
+    #[test]
+    fn aggregate_named_fetch_error_prefixes_repo() {
+        // F1#F1: Auto-Banner braucht Repo-Kontext (N Repos!).
+        use crate::git::PartialFetch;
+        let err = anyhow::Error::new(PartialFetch {
+            succeeded: Vec::new(),
+            failed: vec![("origin".to_string(), "timeout".to_string())],
+        });
+        let mut slot = (None, false, false);
+        aggregate_named_fetch_error(&mut slot.0, &mut slot.1, &mut slot.2, "myrepo", &err);
+        assert_eq!(slot.0.as_deref(), Some("myrepo: 'origin': timeout"));
+        assert_eq!(
+            short_repo_name(std::path::Path::new("/a/b/myrepo")),
+            "myrepo"
+        );
+        assert_eq!(short_repo_name(std::path::Path::new("myrepo")), "myrepo");
+    }
+
+    #[test]
+    fn fetch_aborted_honors_pending_scan() {
+        // F1#F2: gemerkter Refresh geht auch bei Abort nicht verloren.
+        let mut app = test_app();
+        app.pending_scan = true;
+        app.scan_tx
+            .send(ScanResult::FetchAborted {
+                reason_key: "fetch_aborted",
+            })
+            .unwrap();
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(!app.pending_scan);
+        assert!(app.scanning, "pending refresh must start after abort");
+        assert!(app.error.is_some());
     }
 
     #[test]
@@ -2934,11 +3078,15 @@ mod tests {
 
     #[test]
     fn capped_file_count_label_marks_cap() {
-        // M2: ab Cap ehrlich mit "+".
-        assert_eq!(capped_file_count_label(0), "0");
-        assert_eq!(capped_file_count_label(99), "99");
+        // M2/F1#F3: "+" nur bei echter Trunkierung, nicht bei exakt CAP.
+        assert_eq!(capped_file_count_label(0, false), "0");
+        assert_eq!(capped_file_count_label(99, false), "99");
         assert_eq!(
-            capped_file_count_label(crate::git::DETAILED_STATUS_CAP),
+            capped_file_count_label(crate::git::DETAILED_STATUS_CAP, false),
+            format!("{}", crate::git::DETAILED_STATUS_CAP)
+        );
+        assert_eq!(
+            capped_file_count_label(crate::git::DETAILED_STATUS_CAP, true),
             format!("{}+", crate::git::DETAILED_STATUS_CAP)
         );
     }

@@ -502,7 +502,9 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                         branch_filters.get(&repo.path).cloned().unwrap_or_default();
                     let current = truncate_label(&repo.branch, TRAY_LABEL_MAX_CHARS);
                     let combo_width = ui.available_width();
-                    egui::ComboBox::from_id_salt(("tray_branch", repo.path.clone()))
+                    // F3#8: Borrow statt Clone als Salt (wird sofort gehasht;
+                    // Pfad lebt in `repos`, Eindeutigkeit bleibt Pfad-basiert).
+                    egui::ComboBox::from_id_salt(("tray_branch", repo.path.as_os_str()))
                         .selected_text(&current)
                         .width(combo_width)
                         .show_ui(ui, |ui| {
@@ -608,7 +610,8 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                     .unwrap_or_else(|| "–".to_string());
                 let selected_text = truncate_label(&selected_full, TRAY_LABEL_MAX_CHARS);
                 let combo_width = ui.available_width();
-                egui::ComboBox::from_id_salt(("tray_solution", repo.path.clone()))
+                // F3#8: wie Branch-Dropdown (Borrow statt Clone).
+                egui::ComboBox::from_id_salt(("tray_solution", repo.path.as_os_str()))
                     .selected_text(selected_text)
                     .width(combo_width)
                     .show_ui(ui, |ui| {

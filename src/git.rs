@@ -188,7 +188,10 @@ pub fn is_merge_in_progress(repo: &Repository) -> bool {
 /// UI kennzeichnet das ehrlich mit "+", siehe `capped_file_count_label`).
 pub const DETAILED_STATUS_CAP: usize = 100;
 
-pub fn get_detailed_status(repo: &Repository) -> Vec<String> {
+/// Detaillierter Status für den Branch-Dialog: (Dateiliste auf CAP
+/// trunkiert, `truncated` sagt ob gekappt wurde — F1#F3: bei exakt CAP
+/// Einträgen ist nichts abgeschnitten, Label ohne "+").
+pub fn get_detailed_status(repo: &Repository) -> (Vec<String>, bool) {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
         // P4: kein recurse in untracked Dirs auf dem UI-Thread — bei großen
@@ -198,7 +201,7 @@ pub fn get_detailed_status(repo: &Repository) -> Vec<String> {
         .include_ignored(false);
     let mut files = Vec::new();
     if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
-        for entry in statuses.iter().take(DETAILED_STATUS_CAP) {
+        for entry in statuses.iter().take(DETAILED_STATUS_CAP + 1) {
             if let Ok(path) = entry.path() {
                 let status = entry.status();
                 let flag = if status.is_wt_new() {
@@ -216,7 +219,12 @@ pub fn get_detailed_status(repo: &Repository) -> Vec<String> {
             }
         }
     }
-    files
+    if files.len() > DETAILED_STATUS_CAP {
+        files.truncate(DETAILED_STATUS_CAP);
+        (files, true)
+    } else {
+        (files, false)
+    }
 }
 
 /// Listet lokale und remote Branches auf (für Dropdown). Remote als "origin/branch".
@@ -1762,7 +1770,8 @@ mod tests {
             "ignored.txt should be ignored via .gitignore"
         );
         // also verify that ignored file is not in detailed status when ignored, but untracked non-ignored would be
-        let status = get_detailed_status(&repo3);
+        let (status, truncated) = get_detailed_status(&repo3);
+        assert!(!truncated, "small status must not be truncated");
         assert!(
             !status.iter().any(|s| s.contains("ignored.txt")),
             "ignored file should not appear in status"
@@ -1815,7 +1824,8 @@ mod tests {
     fn get_detailed_status_classifies() {
         let dir = tempdir().unwrap();
         let repo = init_repo_with_commit(dir.path(), "main");
-        let status = get_detailed_status(&repo);
+        let (status, truncated) = get_detailed_status(&repo);
+        assert!(!truncated);
         assert!(status.is_empty());
         fs::write(dir.path().join("untracked.txt"), "hi").unwrap();
         fs::write(dir.path().join("README.md"), "modified").unwrap();
@@ -1824,7 +1834,8 @@ mod tests {
         idx.add_path(Path::new("untracked.txt")).unwrap();
         idx.write().unwrap();
         // need to stage untracked? Actually add makes it staged
-        let status2 = get_detailed_status(&repo2);
+        let (status2, truncated2) = get_detailed_status(&repo2);
+        assert!(!truncated2);
         // should contain untracked or staged and modified
         assert!(!status2.is_empty());
         // check prefixes
@@ -1838,7 +1849,8 @@ mod tests {
         let mut idx3 = repo3.index().unwrap();
         idx3.add_path(Path::new("staged2.txt")).unwrap();
         idx3.write().unwrap();
-        let status3 = get_detailed_status(&repo3);
+        let (status3, truncated3) = get_detailed_status(&repo3);
+        assert!(!truncated3);
         let has_staged = status3
             .iter()
             .any(|s| s.contains("staged") || s.contains("untracked"));
