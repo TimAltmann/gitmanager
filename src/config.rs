@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 // --- Default helpers ---
 fn default_config_version() -> u32 {
-    13
+    14
 }
 fn default_sort_mode() -> RepoSortMode {
     RepoSortMode::LastUsed
@@ -34,6 +34,23 @@ fn default_tray_max_display() -> usize {
     10
 }
 
+/// Tray-Icon-Stil: Dark = weißes Icon für dunkle Taskleiste (bisheriges
+/// `icon_tray.png`), Light = dunkles Icon für helle Taskleiste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayIconTheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl TrayIconTheme {
+    #[allow(dead_code)]
+    pub fn all() -> Vec<TrayIconTheme> {
+        vec![TrayIconTheme::Dark, TrayIconTheme::Light]
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrayIconConfig {
     /// Reihenfolge der Icons im Tray-Popup (IDs in Anzeigereihenfolge)
@@ -45,6 +62,9 @@ pub struct TrayIconConfig {
     /// Maximale Anzahl angezeigter Repos im Popup (für MRU)
     #[serde(default = "default_tray_max_display")]
     pub max_display: usize,
+    /// Tray-Icon-Stil (Dark/Light), Default Dark = bisheriges Verhalten.
+    #[serde(default)]
+    pub icon_theme: TrayIconTheme,
 }
 
 impl Default for TrayIconConfig {
@@ -53,6 +73,7 @@ impl Default for TrayIconConfig {
             icon_order: Vec::new(),
             hidden_icon_ids: Vec::new(),
             max_display: default_tray_max_display(),
+            icon_theme: TrayIconTheme::Dark,
         }
     }
 }
@@ -1078,6 +1099,11 @@ impl AppConfig {
             cfg.auto_fetch_interval_min = cfg.auto_fetch_interval_min.min(120);
             cfg.config_version = 13;
         }
+        if cfg.config_version < 14 {
+            // v14: tray_icons.icon_theme eingeführt (Default Dark via serde).
+            // Alte Configs ohne Feld erhalten automatisch Dark = bisheriges Weiß-Icon.
+            cfg.config_version = 14;
+        }
         // M5: auch laufende Configs clampen (JSON-Handedit mit 1000 o.ä.).
         // K1/K2/N2: alle numerischen Clamps gleich behandeln — bei tatsächlicher
         // Änderung einmalig speichern (statt drei Zwischen-Saves / stiller Clamps).
@@ -2086,7 +2112,7 @@ mod tests {
     fn config_default_has_valid_state() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.max_depth, 2);
-        assert_eq!(cfg.config_version, 13);
+        assert_eq!(cfg.config_version, 14);
         assert_eq!(cfg.active_profile_id, "dotnet");
         assert!(!cfg.profiles.is_empty());
         assert_eq!(cfg.agents.len(), 6);
@@ -2363,7 +2389,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded.roots.len(), 2);
         assert_eq!(loaded.max_depth, 3);
-        assert_eq!(loaded.config_version, 13);
+        assert_eq!(loaded.config_version, 14);
     }
 
     #[test]
@@ -3009,7 +3035,7 @@ mod tests {
     fn sort_mode_default_is_last_used() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.main_sort_mode, RepoSortMode::LastUsed);
-        assert_eq!(cfg.config_version, 13);
+        assert_eq!(cfg.config_version, 14);
     }
 
     #[test]
@@ -3053,5 +3079,21 @@ mod tests {
         let json_rt = serde_json::to_string(&cfg).unwrap();
         let rt: AppConfig = serde_json::from_str(&json_rt).unwrap();
         assert_eq!(rt.auto_fetch_interval_min, 10);
+    }
+
+    #[test]
+    fn tray_icon_theme_default_is_dark_and_roundtrips() {
+        // RED: Tray-Icon soll konfigurierbar Dark/Light sein, Default Dark (bisheriges Weiß-Icon).
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.tray_icons.icon_theme, TrayIconTheme::Dark);
+        for theme in [TrayIconTheme::Dark, TrayIconTheme::Light] {
+            let json = serde_json::to_string(&theme).unwrap();
+            let de: TrayIconTheme = serde_json::from_str(&json).unwrap();
+            assert_eq!(theme, de);
+        }
+        // Alte Config ohne Feld (v13) muss auf Dark fallen (kein Breaking Change).
+        let json_old = r#"{"roots":[],"max_depth":2,"config_version":13}"#;
+        let old: AppConfig = serde_json::from_str(json_old).unwrap();
+        assert_eq!(old.tray_icons.icon_theme, TrayIconTheme::Dark);
     }
 }

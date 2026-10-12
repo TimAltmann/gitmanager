@@ -288,6 +288,10 @@ pub fn list_branches_in(repo: &Repository) -> Vec<String> {
 /// statt `fetch_failed` wählen und Wrapper/Hinweis via i18n lokalisieren kann.
 /// `eprintln!` bleibt als Log erhalten.
 ///
+/// Auth: libgit2 mit Credential-Callbacks (SSH-Agent, Default-Keys,
+/// git-credential-helper) zuerst; bei Fehlschlag Fallback auf System-`git fetch`
+/// (nutzt Credential-Manager/SSH-Agent des Users — nötig für authentifizierte
+/// Repos). Branch-Wechsel ist lokal und braucht kein Netzwerk, Fetch schon.
 /// Signatur bleibt `fetch_all(path: &Path) -> anyhow::Result<()>` (Task 5 baut darauf).
 pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
     let repo =
@@ -310,20 +314,10 @@ pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
                 continue;
             }
         };
-        match repo.find_remote(&remote_name) {
-            Ok(mut remote) => {
-                let mut opts = git2::FetchOptions::new();
-                opts.prune(git2::FetchPrune::On);
-                match remote.fetch(&[] as &[&str], Some(&mut opts), None) {
-                    Ok(()) => succeeded.push(remote_name),
-                    Err(e) => {
-                        eprintln!("Fetch für Remote '{remote_name}' fehlgeschlagen: {e}");
-                        failed.push((remote_name, e.to_string()));
-                    }
-                }
-            }
+        match fetch_one_remote(&repo, path, &remote_name) {
+            Ok(()) => succeeded.push(remote_name),
             Err(e) => {
-                eprintln!("Remote '{remote_name}' nicht gefunden: {e}");
+                eprintln!("Fetch für Remote '{remote_name}' fehlgeschlagen: {e}");
                 failed.push((remote_name, e.to_string()));
             }
         }
@@ -335,6 +329,178 @@ pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
     // UI baut Wrapper/Hinweis lokalisiert via tr_fmt(fetch_failed/fetch_partial) +
     // tr(auth_hint); Detail bleibt English-neutral mit opakem libgit2-Text.
     Err(anyhow::Error::new(PartialFetch { succeeded, failed }))
+}
+
+/// Ein Remote fetchen: libgit2 mit Auth-Callbacks, Fallback auf System-`git`.
+fn fetch_one_remote(repo: &Repository, repo_path: &Path, remote_name: &str) -> anyhow::Result<()> {
+    match repo.find_remote(remote_name) {
+        Ok(mut remote) => {
+            let remote_url = remote.url().unwrap_or("").to_string();
+            // Repo-Config für credential.helper (https) — Snapshot vor Callbacks.
+            let repo_config = repo.config().ok();
+            let mut callbacks = git2::RemoteCallbacks::new();
+            callbacks.credentials(move |url, username_from_url, allowed| {
+                fetch_credentials(&repo_config, url, username_from_url, allowed, &remote_url)
+            });
+            // Zertifikatsprüfung NICHT deaktivieren (TLS bleibt verifiziert).
+            let mut opts = git2::FetchOptions::new();
+            opts.prune(git2::FetchPrune::On);
+            opts.remote_callbacks(callbacks);
+            match remote.fetch(&[] as &[&str], Some(&mut opts), None) {
+                Ok(()) => Ok(()),
+                Err(lib_err) => {
+                    eprintln!(
+                        "libgit2 fetch für Remote '{remote_name}' fehlgeschlagen ({lib_err}), versuche System-git..."
+                    );
+                    // Fallback: System-git nutzt Credential-Manager/SSH-Agent des Users.
+                    match fetch_with_git_cli(repo_path, remote_name) {
+                        Ok(()) => {
+                            eprintln!(
+                                "System-git fetch für Remote '{remote_name}' erfolgreich (Fallback)"
+                            );
+                            Ok(())
+                        }
+                        Err(cli_err) => {
+                            eprintln!(
+                                "System-git fetch für Remote '{remote_name}' ebenfalls fehlgeschlagen: {cli_err:#}"
+                            );
+                            // Strukturierter Fehler bleibt libgit2-basiert (English-neutral,
+                            // keine lokalisierten git-CLI-Texte) — CLI nur im Log.
+                            Err(anyhow::anyhow!("{lib_err}"))
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Remote '{remote_name}' nicht gefunden: {e}");
+            Err(anyhow::anyhow!("{e}"))
+        }
+    }
+}
+
+/// Credential-Callback für libgit2: SSH-Agent → Default-Keys → credential.helper → default.
+///
+/// `repo_config` ist der Snapshot der Repo-Config (für `credential.helper` bei https).
+/// `callback_url` ist die URL aus dem Callback, `remote_url` der konfigurierte
+/// Remote (Fallback wenn Callback-URL leer).
+fn fetch_credentials(
+    repo_config: &Option<git2::Config>,
+    callback_url: &str,
+    username_from_url: Option<&str>,
+    allowed: git2::CredentialType,
+    remote_url: &str,
+) -> Result<git2::Cred, git2::Error> {
+    let url = if callback_url.is_empty() {
+        remote_url
+    } else {
+        callback_url
+    };
+    let username = username_from_url.unwrap_or("git");
+    // 1) SSH-Key via Agent (typisch für git@github.com:... mit laufendem Agent).
+    if allowed.is_ssh_key() {
+        if let Ok(cred) = git2::Cred::ssh_key_from_agent(username) {
+            return Ok(cred);
+        }
+        // 2) Default-Keys aus ~/.ssh (ohne Passphrase; mit Passphrase schlägt
+        // libgit2 hier fehl → dann greift der System-git-Fallback mit Prompt/Agent).
+        for key_path in default_ssh_key_paths() {
+            if key_path.exists() {
+                let pub_path = key_path.with_extension("pub");
+                let pub_opt = if pub_path.exists() {
+                    Some(pub_path.as_path())
+                } else {
+                    None
+                };
+                if let Ok(cred) = git2::Cred::ssh_key(username, pub_opt, &key_path, None) {
+                    return Ok(cred);
+                }
+            }
+        }
+    }
+    // 3) https via git-credential-helper (Windows Credential Manager etc.).
+    if allowed.is_user_pass_plaintext() {
+        if let Some(cfg) = repo_config {
+            if let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url) {
+                return Ok(cred);
+            }
+        }
+    }
+    // 4) Default (NTLM/Kerberos u.ä.).
+    if allowed.is_default() {
+        if let Ok(cred) = git2::Cred::default() {
+            return Ok(cred);
+        }
+    }
+    // 5) Username-only (z.B. SSH-User-Abfrage).
+    if allowed.is_username() {
+        return git2::Cred::username(username);
+    }
+    // Letzter Versuch: SSH-Agent auch wenn Typ nicht exakt passt (libgit2 meldet
+    // Typen nicht immer präzise), dann Default.
+    if let Ok(cred) = git2::Cred::ssh_key_from_agent(username) {
+        return Ok(cred);
+    }
+    git2::Cred::default()
+}
+
+/// Kandidaten für Default-SSH-Keys (ohne Passphrase versucht).
+fn default_ssh_key_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from);
+    if let Some(mut ssh_dir) = home.map(|h| h.join(".ssh")) {
+        // Umgebungsvariable SSH_DIR als Override (Tests)?
+        if let Some(env_dir) = std::env::var_os("GITMANAGER_SSH_DIR") {
+            ssh_dir = PathBuf::from(env_dir);
+        }
+        for name in ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"] {
+            out.push(ssh_dir.join(name));
+        }
+    }
+    out
+}
+
+/// Fetch eines einzelnen Remotes via System-`git` (Fallback für Auth).
+///
+/// Nutzt Credential-Manager/SSH-Agent des Users — daher funktioniert das auch
+/// mit authentifizierten Repos, wo reines libgit2 ohne Callbacks scheitert.
+/// `Ok` nur bei Exit-Code 0, sonst `Err` mit stderr (English-neutral via git,
+/// aber nur fürs Log — strukturierter Fehler bleibt libgit2).
+pub fn fetch_with_git_cli(repo_path: &Path, remote_name: &str) -> anyhow::Result<()> {
+    let repo_str = repo_path.display().to_string();
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["-C", &repo_str, "fetch", remote_name, "--prune"]);
+    // Windows-GUI: kein Konsolen-Flash.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| anyhow::anyhow!("git fetch spawn failed: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let detail = if stderr.is_empty() {
+        if stdout.is_empty() {
+            format!("exit {}", out.status)
+        } else {
+            stdout
+        }
+    } else if stdout.is_empty() {
+        stderr
+    } else {
+        format!("{stderr} / {stdout}")
+    };
+    Err(anyhow::anyhow!(
+        "git fetch '{remote_name}' failed: {detail}"
+    ))
 }
 
 /// Strukturierter Fetch-Fehler (alle Remotes failed UND partielle Fehlschläge).
@@ -2064,6 +2230,56 @@ mod tests {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path(), "main");
         assert!(fetch_all(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn fetch_all_https_must_not_fail_with_missing_tls_or_protocol() {
+        // RED für "unsupported URL protocol / no TLS stream": mit https-Feature
+        // muss ein https-Remote einen echten Netzwerkfehler liefern, nicht
+        // "unsupported URL protocol (class-Net 12)" oder "no TLS stream (class-Ssl 16)".
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.remote("origin", "https://invalid.example.com/doesnotexist.git")
+            .unwrap();
+        drop(repo);
+        let res = fetch_all(dir.path());
+        assert!(res.is_err(), "invalid https remote must still be Err");
+        let err = res.unwrap_err();
+        let msg = format!("{err:#}");
+        for needle in [
+            "unsupported URL protocol",
+            "no TLS stream",
+            "there is no TLS stream",
+            "class=Ssl (16)",
+            "class-Net (12)",
+        ] {
+            assert!(
+                !msg.to_lowercase().contains(&needle.to_lowercase()),
+                "https fetch must have TLS/protocol support, got missing-feature error: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_all_cli_fallback_succeeds_for_file_remote() {
+        // CLI-Fallback-Pfad: lokaler file-Remote muss auch via `git fetch` gehen.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        let bare_dir = tempdir().unwrap();
+        let _bare = Repository::init_bare(bare_dir.path()).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.remote("good", bare_dir.path().to_str().unwrap())
+            .unwrap();
+        drop(repo);
+        assert!(
+            fetch_with_git_cli(dir.path(), "good").is_ok(),
+            "git CLI fetch for file remote must succeed"
+        );
+        assert!(
+            fetch_with_git_cli(dir.path(), "does-not-exist-remote").is_err(),
+            "git CLI fetch for unknown remote must fail"
+        );
     }
 
     // --- Task 5 TDD RED: ahead_behind mit 2 Clones (1 Commit voraus) ---

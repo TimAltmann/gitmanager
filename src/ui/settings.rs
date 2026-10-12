@@ -1,5 +1,6 @@
 use crate::config::{
     AgentProfile, AppConfig, IdeConfig, LanguageProfile, RepoSortMode, TerminalPreference,
+    TrayIconTheme,
 };
 use crate::i18n::{tr, tr_fmt, Language};
 use egui::{Color32, RichText, Vec2};
@@ -2827,6 +2828,35 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     );
     ui.add_space(12.0);
 
+    // Tray-Icon Stil (Dark/Light) — konfigurierbar ob Dark- oder Light-Icon.
+    ui.label(
+        RichText::new(tr(lang, "tray_icon_theme_title"))
+            .size(12.0)
+            .strong(),
+    );
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(tr(lang, "tray_icon_theme_desc"))
+            .size(11.0)
+            .color(Color32::from_rgb(100, 100, 100)),
+    );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.radio_value(
+            &mut state.draft.tray_icons.icon_theme,
+            TrayIconTheme::Dark,
+            tr(lang, "tray_icon_theme_dark"),
+        );
+        ui.radio_value(
+            &mut state.draft.tray_icons.icon_theme,
+            TrayIconTheme::Light,
+            tr(lang, "tray_icon_theme_light"),
+        );
+    });
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(8.0);
+
     // Max display slider
     ui.label(
         RichText::new(tr(lang, "tray_max_display"))
@@ -3081,6 +3111,7 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         state.draft.tray_icons.hidden_icon_ids.clear();
         state.draft.tray_icons.icon_order.clear();
         state.draft.tray_icons.max_display = 10;
+        state.draft.tray_icons.icon_theme = TrayIconTheme::Dark;
     }
     if state.draft.tray_icons.hidden_icon_ids.len() == DEFAULT_TRAY_ICON_IDS.len() {
         ui.colored_label(

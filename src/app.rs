@@ -299,8 +299,12 @@ impl MyApp {
         };
         #[cfg(target_os = "windows")]
         {
-            // Setup tray icon - custom popup on left/right click, no native menu
-            if let Some(channels) = crate::tray::create_tray_channels(cc.egui_ctx.clone()) {
+            // Setup tray icon - custom popup on left/right click, no native menu.
+            // Theme aus Config (Dark = Weiß-Icon, Light = dunkles Icon).
+            let tray_theme = app.config.tray_icons.icon_theme;
+            if let Some(channels) =
+                crate::tray::create_tray_channels_with_theme(cc.egui_ctx.clone(), tray_theme)
+            {
                 app.tray_icon = Some(channels.tray_icon);
                 // Create shared state and channels for tray service (efficient Arc sharing)
                 let (action_tx, action_rx) = mpsc::channel();
@@ -2389,6 +2393,23 @@ impl eframe::App for MyApp {
                     crate::ui::theme::apply_theme(&ctx, &new_cfg.theme);
                     let lang = new_cfg.language;
                     let autostart = new_cfg.autostart;
+                    // Tray-Icon-Stil sofort wechseln (Dark/Light konfigurierbar).
+                    #[cfg(target_os = "windows")]
+                    {
+                        if new_cfg.tray_icons.icon_theme != self.config.tray_icons.icon_theme {
+                            if let Some(tray) = &self.tray_icon {
+                                if !crate::tray::set_tray_icon_theme(
+                                    tray,
+                                    new_cfg.tray_icons.icon_theme,
+                                ) {
+                                    eprintln!(
+                                        "Tray-Icon Theme-Wechsel fehlgeschlagen ({:?})",
+                                        new_cfg.tray_icons.icon_theme
+                                    );
+                                }
+                            }
+                        }
+                    }
                     self.config = new_cfg;
                     // Autostart nach Save anwenden (Registry Run-Key schreiben/entfernen)
                     let autostart_failed = match crate::autostart::apply_autostart(autostart) {

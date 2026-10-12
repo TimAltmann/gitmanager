@@ -488,6 +488,16 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::En, "auto_fetch_running") => "Auto-fetch running, try again shortly".to_string(),
         (Language::De, "auto_fetch_running") => "Auto-Fetch läuft, bitte kurz warten".to_string(),
 
+        // ── Tray icon theme (Dark/Light) ─────────────────────────────
+        (Language::En, "tray_icon_theme_title") => "Tray icon style".to_string(),
+        (Language::De, "tray_icon_theme_title") => "Tray-Icon Stil".to_string(),
+        (Language::En, "tray_icon_theme_desc") => "White icon for dark taskbar (Dark) or dark icon for light taskbar (Light).".to_string(),
+        (Language::De, "tray_icon_theme_desc") => "Weißes Icon für dunkle Taskleiste (Dark) oder dunkles Icon für helle Taskleiste (Light).".to_string(),
+        (Language::En, "tray_icon_theme_dark") => "Dark (white icon)".to_string(),
+        (Language::De, "tray_icon_theme_dark") => "Dark (weißes Icon)".to_string(),
+        (Language::En, "tray_icon_theme_light") => "Light (dark icon)".to_string(),
+        (Language::De, "tray_icon_theme_light") => "Light (dunkles Icon)".to_string(),
+
         // fallback for any missing key -> return key itself
         (Language::En, _) => key.to_string(),
         (Language::De, _) => key.to_string(),
@@ -610,6 +620,10 @@ mod tests {
             "update_available_title",
             "update_available_msg",
             "open_link",
+            "tray_icon_theme_title",
+            "tray_icon_theme_desc",
+            "tray_icon_theme_dark",
+            "tray_icon_theme_light",
         ] {
             assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
             assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
