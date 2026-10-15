@@ -76,6 +76,10 @@ pub struct RepoInfo {
     pub selected_solution: Option<PathBuf>,
     pub custom_values: HashMap<String, String>,
     pub custom_errors: HashMap<String, String>,
+    /// Commits voraus (lokal vor Upstream). Scan-only, Default 0.
+    pub ahead: usize,
+    /// Commits hinterher (Upstream vor lokal). Scan-only, Default 0.
+    pub behind: usize,
 }
 
 impl RepoInfo {
@@ -95,6 +99,8 @@ impl RepoInfo {
             selected_solution: None,
             custom_values: HashMap::new(),
             custom_errors: HashMap::new(),
+            ahead: 0,
+            behind: 0,
         }
     }
 
@@ -154,10 +160,13 @@ fn parse_head_file(git_dir: &Path) -> Option<String> {
 }
 
 /// Prüft ob uncommitted changes vorhanden sind (modified, staged, untracked)
+/// P1: ohne `recurse_untracked_dirs` — ein untracked Verzeichnis meldet
+/// libgit2 als einen Eintrag (z.B. `target/`), das reicht für Bool.
+/// Mit Rekursion würden tausende Dateien einzeln gestat'ed (pro Repo pro Scan).
 pub fn is_dirty(repo: &Repository) -> bool {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
+        .recurse_untracked_dirs(false)
         .include_ignored(false)
         .include_unmodified(false);
     match repo.statuses(Some(&mut opts)) {
@@ -175,14 +184,24 @@ pub fn is_merge_in_progress(repo: &Repository) -> bool {
     repo.state() != git2::RepositoryState::Clean
 }
 
-pub fn get_detailed_status(repo: &Repository) -> Vec<String> {
+/// Maximale Dateianzahl für den Branch-Dialog (M2: Liste ist gecappt —
+/// UI kennzeichnet das ehrlich mit "+", siehe `capped_file_count_label`).
+pub const DETAILED_STATUS_CAP: usize = 100;
+
+/// Detaillierter Status für den Branch-Dialog: (Dateiliste auf CAP
+/// trunkiert, `truncated` sagt ob gekappt wurde — F1#F3: bei exakt CAP
+/// Einträgen ist nichts abgeschnitten, Label ohne "+").
+pub fn get_detailed_status(repo: &Repository) -> (Vec<String>, bool) {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
+        // P4: kein recurse in untracked Dirs auf dem UI-Thread — bei großen
+        // Repos (node_modules/target) sonst hunderte ms Freeze. Top-Level
+        // reicht für den Dialog; Details sieht man in der IDE.
+        .recurse_untracked_dirs(false)
         .include_ignored(false);
     let mut files = Vec::new();
     if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
-        for entry in statuses.iter() {
+        for entry in statuses.iter().take(DETAILED_STATUS_CAP + 1) {
             if let Ok(path) = entry.path() {
                 let status = entry.status();
                 let flag = if status.is_wt_new() {
@@ -200,15 +219,29 @@ pub fn get_detailed_status(repo: &Repository) -> Vec<String> {
             }
         }
     }
-    files
+    if files.len() > DETAILED_STATUS_CAP {
+        files.truncate(DETAILED_STATUS_CAP);
+        (files, true)
+    } else {
+        (files, false)
+    }
 }
 
 /// Listet lokale und remote Branches auf (für Dropdown). Remote als "origin/branch".
+/// Pfad-Wrapper um [`list_branches_in`] (nur Tests nutzen ihn direkt;
+/// produktiv läuft alles über das geöffnete Handle).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn list_branches(path: &Path) -> Vec<String> {
     let repo = match Repository::open(path) {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
+    list_branches_in(&repo)
+}
+
+/// Finding C: Variante mit bereits geöffnetem Handle — kein zweites
+/// `Repository::open` pro Scan (siehe `get_repo_info`).
+pub fn list_branches_in(repo: &Repository) -> Vec<String> {
     if repo.is_bare() {
         return Vec::new();
     }
@@ -245,52 +278,429 @@ pub fn list_branches(path: &Path) -> Vec<String> {
     branches
 }
 
-/// Holt alle Remotes (git fetch --all) – für Refresh-Button
+/// Holt alle Remotes (git fetch --all) – für Refresh-Button.
+///
+/// Ehrliche Semantik: `Ok` nur wenn alle Remotes erfolgreich waren (oder keine
+/// Remotes konfiguriert sind). Jeder Remote-Fehler wird pro Remote gesammelt und
+/// als strukturiertes [`PartialFetch`] (`succeeded` + `failed`, auch bei komplettem
+/// Fehlschlag mit leerem `succeeded`) zurückgegeben, siehe
+/// [`is_partial_fetch_error`] / [`is_fetch_error`], damit die UI `fetch_partial`
+/// statt `fetch_failed` wählen und Wrapper/Hinweis via i18n lokalisieren kann.
+/// `eprintln!` bleibt als Log erhalten.
+///
+/// Auth: libgit2 mit Credential-Callbacks (SSH-Agent, Default-Keys,
+/// git-credential-helper) zuerst; bei Fehlschlag Fallback auf System-`git fetch`
+/// (nutzt Credential-Manager/SSH-Agent des Users — nötig für authentifizierte
+/// Repos). Branch-Wechsel ist lokal und braucht kein Netzwerk, Fetch schon.
+/// Signatur bleibt `fetch_all(path: &Path) -> anyhow::Result<()>` (Task 5 baut darauf).
 pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
     let repo =
-        Repository::open(path).map_err(|e| anyhow::anyhow!("Repo öffnen fehlgeschlagen: {e}"))?;
+        Repository::open(path).map_err(|e| anyhow::anyhow!("Failed to open repository: {e}"))?;
     let remotes = repo
         .remotes()
-        .map_err(|e| anyhow::anyhow!("Remotes lesen fehlgeschlagen: {e}"))?;
-    let mut last_err = None;
+        .map_err(|e| anyhow::anyhow!("Failed to read remotes: {e}"))?;
+    if remotes.is_empty() {
+        return Ok(());
+    }
+    let mut succeeded: Vec<String> = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
     for remote_res in remotes.iter() {
         let remote_name = match remote_res {
-            Ok(Some(name)) => name,
+            Ok(Some(name)) => name.to_string(),
             Ok(None) => continue,
             Err(e) => {
                 eprintln!("Remote name invalid: {e}");
+                failed.push(("<invalid>".to_string(), e.to_string()));
                 continue;
             }
         };
-        match repo.find_remote(remote_name) {
-            Ok(mut remote) => {
-                let mut opts = git2::FetchOptions::new();
-                opts.prune(git2::FetchPrune::On);
-                if let Err(e) = remote.fetch(&[] as &[&str], Some(&mut opts), None) {
-                    eprintln!("Fetch für Remote '{}' fehlgeschlagen: {e}", remote_name);
-                    last_err = Some(e);
+        match fetch_one_remote(&repo, path, &remote_name) {
+            Ok(()) => succeeded.push(remote_name),
+            Err(e) => {
+                eprintln!("Fetch für Remote '{remote_name}' fehlgeschlagen: {e}");
+                failed.push((remote_name, e.to_string()));
+            }
+        }
+    }
+    if failed.is_empty() {
+        return Ok(());
+    }
+    // I1: alle Remote-Fehler (komplett + partiell) als strukturiertes PartialFetch.
+    // UI baut Wrapper/Hinweis lokalisiert via tr_fmt(fetch_failed/fetch_partial) +
+    // tr(auth_hint); Detail bleibt English-neutral mit opakem libgit2-Text.
+    Err(anyhow::Error::new(PartialFetch { succeeded, failed }))
+}
+
+/// Ein Remote fetchen: libgit2 mit Auth-Callbacks, Fallback auf System-`git`.
+fn fetch_one_remote(repo: &Repository, repo_path: &Path, remote_name: &str) -> anyhow::Result<()> {
+    match repo.find_remote(remote_name) {
+        Ok(mut remote) => {
+            let remote_url = remote.url().unwrap_or("").to_string();
+            // Repo-Config für credential.helper (https) — Snapshot vor Callbacks.
+            let repo_config = repo.config().ok();
+            let mut callbacks = git2::RemoteCallbacks::new();
+            callbacks.credentials(move |url, username_from_url, allowed| {
+                fetch_credentials(&repo_config, url, username_from_url, allowed, &remote_url)
+            });
+            // Zertifikatsprüfung NICHT deaktivieren (TLS bleibt verifiziert).
+            let mut opts = git2::FetchOptions::new();
+            opts.prune(git2::FetchPrune::On);
+            opts.remote_callbacks(callbacks);
+            match remote.fetch(&[] as &[&str], Some(&mut opts), None) {
+                Ok(()) => Ok(()),
+                Err(lib_err) => {
+                    eprintln!(
+                        "libgit2 fetch für Remote '{remote_name}' fehlgeschlagen ({lib_err}), versuche System-git..."
+                    );
+                    // Fallback: System-git nutzt Credential-Manager/SSH-Agent des Users.
+                    match fetch_with_git_cli(repo_path, remote_name) {
+                        Ok(()) => {
+                            eprintln!(
+                                "System-git fetch für Remote '{remote_name}' erfolgreich (Fallback)"
+                            );
+                            Ok(())
+                        }
+                        Err(cli_err) => {
+                            eprintln!(
+                                "System-git fetch für Remote '{remote_name}' ebenfalls fehlgeschlagen: {cli_err:#}"
+                            );
+                            // Strukturierter Fehler bleibt libgit2-basiert (English-neutral,
+                            // keine lokalisierten git-CLI-Texte) — CLI nur im Log.
+                            Err(anyhow::anyhow!("{lib_err}"))
+                        }
+                    }
                 }
             }
-            Err(e) => {
-                eprintln!("Remote '{}' nicht gefunden: {e}", remote_name);
-                last_err = Some(e);
+        }
+        Err(e) => {
+            eprintln!("Remote '{remote_name}' nicht gefunden: {e}");
+            Err(anyhow::anyhow!("{e}"))
+        }
+    }
+}
+
+/// Credential-Callback für libgit2: SSH-Agent → Default-Keys → credential.helper → default.
+///
+/// `repo_config` ist der Snapshot der Repo-Config (für `credential.helper` bei https).
+/// `callback_url` ist die URL aus dem Callback, `remote_url` der konfigurierte
+/// Remote (Fallback wenn Callback-URL leer).
+fn fetch_credentials(
+    repo_config: &Option<git2::Config>,
+    callback_url: &str,
+    username_from_url: Option<&str>,
+    allowed: git2::CredentialType,
+    remote_url: &str,
+) -> Result<git2::Cred, git2::Error> {
+    let url = if callback_url.is_empty() {
+        remote_url
+    } else {
+        callback_url
+    };
+    let username = username_from_url.unwrap_or("git");
+    // 1) SSH-Key via Agent (typisch für git@github.com:... mit laufendem Agent).
+    if allowed.is_ssh_key() {
+        if let Ok(cred) = git2::Cred::ssh_key_from_agent(username) {
+            return Ok(cred);
+        }
+        // 2) Default-Keys aus ~/.ssh (ohne Passphrase; mit Passphrase schlägt
+        // libgit2 hier fehl → dann greift der System-git-Fallback mit Prompt/Agent).
+        for key_path in default_ssh_key_paths() {
+            if key_path.exists() {
+                let pub_path = key_path.with_extension("pub");
+                let pub_opt = if pub_path.exists() {
+                    Some(pub_path.as_path())
+                } else {
+                    None
+                };
+                if let Ok(cred) = git2::Cred::ssh_key(username, pub_opt, &key_path, None) {
+                    return Ok(cred);
+                }
             }
         }
     }
-    if let Some(e) = last_err {
-        // Wenn mindestens ein Remote fehlgeschlagen, aber andere erfolgreich, trotzdem als Warnung
-        // Für UI: zeige Fehler nur wenn alle fehlgeschlagen
-        // Hier geben wir den letzten Fehler zurück, UI kann entscheiden
-        // Wenn gar keine Remotes, ist das ok
-        if remotes.is_empty() {
-            return Ok(());
-        }
-        // Wenn nur ein Remote und der fehlgeschlagen, Fehler zurück
-        if remotes.len() == 1 {
-            anyhow::bail!("Fetch fehlgeschlagen: {e}");
+    // 3) https via git-credential-helper (Windows Credential Manager etc.).
+    if allowed.is_user_pass_plaintext() {
+        if let Some(cfg) = repo_config {
+            if let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url) {
+                return Ok(cred);
+            }
         }
     }
-    Ok(())
+    // 4) Default (NTLM/Kerberos u.ä.).
+    if allowed.is_default() {
+        if let Ok(cred) = git2::Cred::default() {
+            return Ok(cred);
+        }
+    }
+    // 5) Username-only (z.B. SSH-User-Abfrage).
+    if allowed.is_username() {
+        return git2::Cred::username(username);
+    }
+    // Letzter Versuch: SSH-Agent auch wenn Typ nicht exakt passt (libgit2 meldet
+    // Typen nicht immer präzise), dann Default.
+    if let Ok(cred) = git2::Cred::ssh_key_from_agent(username) {
+        return Ok(cred);
+    }
+    git2::Cred::default()
+}
+
+/// Kandidaten für Default-SSH-Keys (ohne Passphrase versucht).
+fn default_ssh_key_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from);
+    if let Some(mut ssh_dir) = home.map(|h| h.join(".ssh")) {
+        // Umgebungsvariable SSH_DIR als Override (Tests)?
+        if let Some(env_dir) = std::env::var_os("GITMANAGER_SSH_DIR") {
+            ssh_dir = PathBuf::from(env_dir);
+        }
+        for name in ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"] {
+            out.push(ssh_dir.join(name));
+        }
+    }
+    out
+}
+
+/// Fetch eines einzelnen Remotes via System-`git` (Fallback für Auth).
+///
+/// Nutzt Credential-Manager/SSH-Agent des Users — daher funktioniert das auch
+/// mit authentifizierten Repos, wo reines libgit2 ohne Callbacks scheitert.
+/// `Ok` nur bei Exit-Code 0, sonst `Err` mit stderr (English-neutral via git,
+/// aber nur fürs Log — strukturierter Fehler bleibt libgit2).
+pub fn fetch_with_git_cli(repo_path: &Path, remote_name: &str) -> anyhow::Result<()> {
+    let repo_str = repo_path.display().to_string();
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["-C", &repo_str, "fetch", remote_name, "--prune"]);
+    // Windows-GUI: kein Konsolen-Flash.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| anyhow::anyhow!("git fetch spawn failed: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let detail = if stderr.is_empty() {
+        if stdout.is_empty() {
+            format!("exit {}", out.status)
+        } else {
+            stdout
+        }
+    } else if stdout.is_empty() {
+        stderr
+    } else {
+        format!("{stderr} / {stdout}")
+    };
+    Err(anyhow::anyhow!(
+        "git fetch '{remote_name}' failed: {detail}"
+    ))
+}
+
+/// Strukturierter Fetch-Fehler (alle Remotes failed UND partielle Fehlschläge).
+/// Als anyhow-Error transportiert, damit die UI per [`is_partial_fetch_error`]
+/// ohne String-Parsing `fetch_partial` statt `fetch_failed` wählen kann und das
+/// Detail via [`PartialFetch::detail_en`] English-neutral (opake libgit2-Texte)
+/// einbettet. Display ist English-neutral für Logs/Tests; die UI lokalisiert
+/// Wrapper + Hinweis via i18n (`fetch_failed`/`fetch_partial`, `auth_hint`).
+#[derive(Debug)]
+pub struct PartialFetch {
+    pub succeeded: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
+impl PartialFetch {
+    /// English-neutrales Detail ohne Wrapper/Hinweis: `'<remote>': <libgit2-msg>; ...`
+    /// plus `; succeeded: '<ok>', ...` bei Teil-Erfolg. libgit2-Texte bleiben opak.
+    pub fn detail_en(&self) -> String {
+        let details = self
+            .failed
+            .iter()
+            .map(|(n, e)| format!("'{n}': {e}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if self.succeeded.is_empty() {
+            return details;
+        }
+        let ok_names = self
+            .succeeded
+            .iter()
+            .map(|n| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if details.is_empty() {
+            format!("succeeded: {ok_names}")
+        } else {
+            format!("{details}; succeeded: {ok_names}")
+        }
+    }
+}
+
+impl std::fmt::Display for PartialFetch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // English-neutral für EN-UI + Logs; DE-UI nutzt detail_en() + i18n-Wrapper.
+        const EN_HINT: &str = "Note: check Credentials/SSH (auth may be required)";
+        if self.succeeded.is_empty() {
+            let names = self
+                .failed
+                .iter()
+                .map(|(n, _)| format!("'{n}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(
+                f,
+                "Fetch failed for remote(s) {names}: {}. {EN_HINT}",
+                self.detail_en()
+            )
+        } else {
+            let failed_names = self
+                .failed
+                .iter()
+                .map(|(n, _)| format!("'{n}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(
+                f,
+                "Fetch partially failed for remote(s) {failed_names}: {}. {EN_HINT}",
+                self.detail_en()
+            )
+        }
+    }
+}
+
+impl std::error::Error for PartialFetch {}
+
+/// True wenn `err` (aus [`fetch_all`]) einen teilweisen Fehlschlag beschreibt
+/// (mind. 1 Remote ok, mind. 1 failed). Komplette Remote-Fehler sind ebenfalls
+/// [`PartialFetch`] (mit leerem `succeeded`), zählen aber NICHT als partiell.
+pub fn is_partial_fetch_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<PartialFetch>()
+        .is_some_and(|p| !p.succeeded.is_empty())
+}
+
+/// True wenn `err` ein strukturierter Fetch-Remote-Fehler ist (komplett oder
+/// partiell, d.h. [`PartialFetch`] mit beliebigem `succeeded`). Sonstige Fehler
+/// (z.B. Repo öffnen) sind keine Remote-Fehler.
+pub fn is_fetch_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<PartialFetch>().is_some()
+}
+
+/// Ermittelt (ahead, behind) des aktuellen Branches gegenüber Upstream.
+///
+/// Upstream-Auflösung: `branch_upstream` (lokaler Tracking-Branch) oder
+/// `origin/<branch>` als Fallback. Detached HEAD, fehlender Upstream oder
+/// kein Remote → `(0, 0)`. Scan-only, nie Err — Fehler bedeuten "unbekannt".
+/// Pfad-Wrapper um [`ahead_behind_in`] (nur Tests nutzen ihn direkt;
+/// produktiv läuft alles über das geöffnete Handle).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn ahead_behind(path: &Path) -> (usize, usize) {
+    let repo = match Repository::open(path) {
+        Ok(r) => r,
+        Err(_) => return (0, 0),
+    };
+    ahead_behind_in(&repo)
+}
+
+/// Finding C: Variante mit bereits geöffnetem Handle — kein drittes
+/// `Repository::open` pro Scan (siehe `get_repo_info`).
+pub fn ahead_behind_in(repo: &Repository) -> (usize, usize) {
+    if repo.is_bare() {
+        return (0, 0);
+    }
+    let (branch, detached) = get_branch(repo);
+    if detached {
+        return (0, 0);
+    }
+    if branch.is_empty() || branch == "no commits" || branch == "detached" {
+        return (0, 0);
+    }
+    // Lokale OID: refs/heads/<branch>, Fallback HEAD target.
+    let local_oid = match repo.refname_to_id(&format!("refs/heads/{branch}")) {
+        Ok(o) => o,
+        Err(_) => match repo.head().ok().and_then(|h| h.target()) {
+            Some(o) => o,
+            None => return (0, 0),
+        },
+    };
+    // 1) Tracking-Upstream via branch_upstream
+    if let Ok(local_branch) = repo.find_branch(&branch, BranchType::Local) {
+        if let Ok(upstream) = local_branch.upstream() {
+            // upstream.get().target() ist die OID des Upstream-Commits
+            if let Some(up_oid) = upstream.get().target() {
+                if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
+                    return (a, b);
+                }
+            } else if let Ok(up_ref) = upstream.get().peel_to_commit() {
+                if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_ref.id()) {
+                    return (a, b);
+                }
+            }
+            // Upstream bekannt aber graph failed → (0,0) statt Fallback-Raten
+            // (verhindert falsche origin/<branch>-Werte bei divergenten Refs).
+            // Falls upstream-OID fehlt, falle unten auf origin/<branch> zurück.
+            if upstream.get().target().is_some() {
+                return (0, 0);
+            }
+        }
+    }
+    // 2) Fallback: alle Remotes statt nur origin (I4) — sonst liefert
+    // ein upstream-Remote oder Firmen-Remote ≠ origin immer (0,0).
+    // Zuerst branch.<name>.remote lesen (explizites Tracking ohne upstream-Ref),
+    // dann alle Remotes iterieren.
+    if let Ok(cfg_branch_remote) = repo
+        .config()
+        .and_then(|c| c.get_string(&format!("branch.{branch}.remote")))
+    {
+        for candidate in [
+            format!("refs/remotes/{cfg_branch_remote}/{branch}"),
+            format!("{cfg_branch_remote}/{branch}"),
+        ] {
+            if let Ok(obj) = repo.revparse_single(&candidate) {
+                let up_oid = obj
+                    .peel_to_commit()
+                    .map(|c| c.id())
+                    .unwrap_or_else(|_| obj.id());
+                if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
+                    return (a, b);
+                }
+                // F2#2: Graph-Fehler → nicht (0,0), sondern unten andere
+                // Remotes versuchen (Upstream-bekannt-Regel oben bleibt).
+            }
+        }
+    }
+    if let Ok(remotes) = repo.remotes() {
+        // L5: `origin` zuerst prüfen — bei Forks (origin+upstream) würde
+        // alphabetisch sonst der falsche Remote den Zähler liefern.
+        let mut names: Vec<String> = remotes
+            .iter()
+            .filter_map(|r| r.ok().flatten().map(|n| n.to_string()))
+            .collect();
+        names.sort_by_key(|n| (n != "origin", n.clone()));
+        for remote_name in &names {
+            for candidate in [
+                format!("refs/remotes/{remote_name}/{branch}"),
+                format!("{remote_name}/{branch}"),
+            ] {
+                if let Ok(obj) = repo.revparse_single(&candidate) {
+                    let up_oid = obj
+                        .peel_to_commit()
+                        .map(|c| c.id())
+                        .unwrap_or_else(|_| obj.id());
+                    if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
+                        return (a, b);
+                    }
+                    // F2#2: Graph-Fehler → nächsten Remote versuchen.
+                }
+            }
+        }
+    }
+    (0, 0)
 }
 
 /// Öffnet den Explorer / Dateimanager im Repo-Verzeichnis
@@ -367,6 +777,25 @@ fn set_head_from_reference(
     Ok(())
 }
 
+/// K2: Kurzname eines Remote-Branch — nur das `refs/remotes/<remote>/`-Präfix
+/// strippen, nicht das letzte `/`-Segment (sonst wird `feature/foo` zu `foo`).
+pub fn remote_short_name(full_ref: &str, branch_name: &str) -> String {
+    if let Some(rest) = full_ref.strip_prefix("refs/remotes/") {
+        if let Some((_, short)) = rest.split_once('/') {
+            return short.to_string();
+        }
+    }
+    if let Some(rest) = branch_name.strip_prefix("origin/") {
+        return rest.to_string();
+    }
+    // F1#7: generisch erstes Segment strippen (z.B. `upstream/foo` → `foo`),
+    // statt nur `origin/` zu kennen.
+    if let Some((_, short)) = branch_name.split_once('/') {
+        return short.to_string();
+    }
+    branch_name.to_string()
+}
+
 /// Führt sicheren Branch-Wechsel durch (nur wenn keine Konflikte, sonst Fehler)
 pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
     let repo = preflight_checkout(path)?;
@@ -399,15 +828,18 @@ pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
             .name()
             .map_err(|e| anyhow::anyhow!("Ungültige Referenz: {e}"))?;
         if name.starts_with("refs/remotes/") {
-            let short = branch_name.split('/').next_back().unwrap_or(branch_name);
+            // K2: nur Remote-Präfix strippen (siehe remote_short_name).
+            let short = remote_short_name(name, branch_name);
             let commit = object
                 .peel_to_commit()
                 .map_err(|e| anyhow::anyhow!("Commit nicht gefunden: {e}"))?;
-            if repo.find_branch(short, BranchType::Local).is_err() {
+            if repo.find_branch(&short, BranchType::Local).is_err() {
                 let mut local_branch = repo
-                    .branch(short, &commit, false)
+                    .branch(&short, &commit, false)
                     .map_err(|e| anyhow::anyhow!("Lokalen Branch erstellen fehlgeschlagen: {e}"))?;
-                let _ = local_branch.set_upstream(Some(name));
+                // Upstream als Kurzname (origin/feature/foo), nicht Full-Ref.
+                let upstream = name.strip_prefix("refs/remotes/").unwrap_or(name);
+                let _ = local_branch.set_upstream(Some(upstream));
             }
             repo.set_head(&format!("refs/heads/{short}"))
                 .map_err(|e| anyhow::anyhow!("HEAD setzen fehlgeschlagen: {e}"))?;
@@ -432,6 +864,32 @@ pub fn checkout_branch_force(path: &Path, branch_name: &str) -> anyhow::Result<(
     set_head_from_reference(&repo, reference.as_ref(), &object)
 }
 
+/// M4: typisierter Stash-Pop-Konflikt — statt String-Match
+/// (`contains("Stash pop fehlgeschlagen")`, fragil bei Text/i18n) prüft die
+/// UI via `is_stash_pop_failed()` per Downcast. Display-Text bleibt kompatibel.
+#[derive(Debug)]
+pub struct StashPopFailed {
+    pub detail: String,
+}
+
+impl std::fmt::Display for StashPopFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Branch gewechselt, aber Stash pop fehlgeschlagen (Konflikte) – Stash bleibt unter stash@{{0}} erhalten: {}",
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for StashPopFailed {}
+
+/// True wenn `err` ein Stash-Pop-Konflikt nach erfolgreichem Checkout ist
+/// (Checkout ok, Pop gescheitert — Rescan trotzdem sinnvoll).
+pub fn is_stash_pop_failed(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<StashPopFailed>().is_some()
+}
+
 /// Stash + Checkout (für Dirty-Dialog Option)
 pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<()> {
     let mut repo =
@@ -453,8 +911,14 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<()> 
         }
     }
     // Jetzt checkout
+    let stashed = stash_result.is_ok();
     match checkout_branch(path, branch_name) {
         Ok(()) => {
+            // Nur poppen wenn tatsächlich gestasht wurde — sonst würde
+            // stash_pop(0) einen alten, bewusst aufgehobenen Stash poppen (K1).
+            if !stashed {
+                return Ok(());
+            }
             // Versuche stash pop, aber ignoriere Konflikte (lasse stash bestehen)
             let mut repo2 = Repository::open(path)
                 .map_err(|e| anyhow::anyhow!("Repo erneut öffnen fehlgeschlagen: {e}"))?;
@@ -462,8 +926,10 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<()> 
                 eprintln!(
                     "Stash pop nach Checkout fehlgeschlagen (Konflikt), Stash bleibt erhalten: {e}"
                 );
-                // Lasse stash bestehen, informiere Nutzer
-                anyhow::bail!("Branch gewechselt, aber Stash pop fehlgeschlagen (Konflikte) – Stash bleibt unter stash@{{0}} erhalten: {e}");
+                // Lasse stash bestehen, informiere Nutzer (M4: typisiert).
+                return Err(anyhow::Error::new(StashPopFailed {
+                    detail: format!("{e}"),
+                }));
             }
             Ok(())
         }
@@ -512,8 +978,13 @@ pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
     }
     let (branch, is_detached) = get_branch(&repo);
     let dirty = is_dirty(&repo);
-    let branches = list_branches(&path);
-    Some(RepoInfo::new(path, branch, dirty, is_detached).with_branches(branches))
+    // Finding C: geöffnetes Handle wiederverwenden statt 2× erneut öffnen.
+    let branches = list_branches_in(&repo);
+    let (ahead, behind) = ahead_behind_in(&repo);
+    let mut info = RepoInfo::new(path, branch, dirty, is_detached).with_branches(branches);
+    info.ahead = ahead;
+    info.behind = behind;
+    Some(info)
 }
 
 // --- IDE & Agent Launch Helpers ---
@@ -1465,7 +1936,8 @@ mod tests {
             "ignored.txt should be ignored via .gitignore"
         );
         // also verify that ignored file is not in detailed status when ignored, but untracked non-ignored would be
-        let status = get_detailed_status(&repo3);
+        let (status, truncated) = get_detailed_status(&repo3);
+        assert!(!truncated, "small status must not be truncated");
         assert!(
             !status.iter().any(|s| s.contains("ignored.txt")),
             "ignored file should not appear in status"
@@ -1518,7 +1990,8 @@ mod tests {
     fn get_detailed_status_classifies() {
         let dir = tempdir().unwrap();
         let repo = init_repo_with_commit(dir.path(), "main");
-        let status = get_detailed_status(&repo);
+        let (status, truncated) = get_detailed_status(&repo);
+        assert!(!truncated);
         assert!(status.is_empty());
         fs::write(dir.path().join("untracked.txt"), "hi").unwrap();
         fs::write(dir.path().join("README.md"), "modified").unwrap();
@@ -1527,7 +2000,8 @@ mod tests {
         idx.add_path(Path::new("untracked.txt")).unwrap();
         idx.write().unwrap();
         // need to stage untracked? Actually add makes it staged
-        let status2 = get_detailed_status(&repo2);
+        let (status2, truncated2) = get_detailed_status(&repo2);
+        assert!(!truncated2);
         // should contain untracked or staged and modified
         assert!(!status2.is_empty());
         // check prefixes
@@ -1541,7 +2015,8 @@ mod tests {
         let mut idx3 = repo3.index().unwrap();
         idx3.add_path(Path::new("staged2.txt")).unwrap();
         idx3.write().unwrap();
-        let status3 = get_detailed_status(&repo3);
+        let (status3, truncated3) = get_detailed_status(&repo3);
+        assert!(!truncated3);
         let has_staged = status3
             .iter()
             .any(|s| s.contains("staged") || s.contains("untracked"));
@@ -1598,6 +2073,17 @@ mod tests {
     }
 
     #[test]
+    fn repo_handle_variants_match_path_variants() {
+        // Finding C: `_in`-Varianten mit geöffnetem Handle liefern dasselbe
+        // wie die Pfad-Varianten (die nur öffnen + delegieren).
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        let repo = Repository::open(dir.path()).unwrap();
+        assert_eq!(list_branches(dir.path()), list_branches_in(&repo));
+        assert_eq!(ahead_behind(dir.path()), ahead_behind_in(&repo));
+    }
+
+    #[test]
     fn fetch_all_no_remotes_ok() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path(), "main");
@@ -1612,20 +2098,302 @@ mod tests {
         // add failing remote
         repo.remote("origin", "https://invalid.example.com/doesnotexist.git")
             .unwrap();
+        drop(repo);
         let res = fetch_all(dir.path());
-        // single remote fail should error
+        // single remote fail should error (structured complete, not partial)
         assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            is_fetch_error(&err),
+            "single fail must be fetch error: {err:#}"
+        );
+        assert!(
+            !is_partial_fetch_error(&err),
+            "single fail must not be partial: {err:#}"
+        );
     }
 
     #[test]
-    fn fetch_all_partial_fail_warns_but_ok() {
-        // With no remotes, Ok; with single fail Err; mixed would need two remotes where one fails and one succeeds
-        // We test no remotes case already; for mixed we would need a real remote - skip as warn but Ok case is when len>1 and last_err Some -> Ok
-        // So we verify that with zero remotes it's Ok (already) and with one failing it's Err (above)
-        // This test ensures logic for multiple remotes doesn't panic
+    fn fetch_all_multi_remote_partial_fails_honestly() {
+        // TDD RED: >1 Remote, einer fails → aktuell Ok (Masking), soll Err sein.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        // Working remote: local bare repo (offline-capable file transport)
+        let bare_dir = tempdir().unwrap();
+        let _bare = Repository::init_bare(bare_dir.path()).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.remote("good", bare_dir.path().to_str().unwrap())
+            .unwrap();
+        repo.remote("bad", "https://invalid.example.com/doesnotexist.git")
+            .unwrap();
+        drop(repo);
+        let res = fetch_all(dir.path());
+        assert!(
+            res.is_err(),
+            "partial fetch (1 ok, 1 fail) must be Err, got Ok (multi-remote masking)"
+        );
+        let err = res.unwrap_err();
+        assert!(
+            is_partial_fetch_error(&err),
+            "partial failure must be marked as partial, got: {err:#}"
+        );
+        assert!(is_fetch_error(&err), "partial must be fetch error: {err:#}");
+        let p = err
+            .downcast_ref::<PartialFetch>()
+            .expect("partial must expose parts");
+        assert_eq!(p.succeeded, vec!["good".to_string()]);
+        assert_eq!(p.failed.len(), 1);
+        assert_eq!(p.failed[0].0, "bad");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("bad"),
+            "error must name failing remote, got: {msg}"
+        );
+        assert!(
+            msg.contains("good"),
+            "error must name successful remote, got: {msg}"
+        );
+        assert!(
+            msg.contains("Credentials/SSH"),
+            "error must hint at auth, got: {msg}"
+        );
+        // I1: Display English-neutral (EN-UI darf kein Deutsch einbetten).
+        for german in [
+            "Hinweis",
+            "prüfen",
+            "fehlgeschlagen",
+            "teilweise",
+            "Erfolgreich",
+        ] {
+            assert!(
+                !msg.contains(german),
+                "partial Display must not embed German '{german}': {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_all_multi_remote_all_fail_is_complete_error() {
+        // Alle Remotes fail → Err, strukturiert (PartialFetch mit leerem succeeded),
+        // aber kein Partial-Marker.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.remote("bad1", "https://invalid.example.com/a.git")
+            .unwrap();
+        repo.remote("bad2", "https://invalid.example.com/b.git")
+            .unwrap();
+        drop(repo);
+        let res = fetch_all(dir.path());
+        assert!(res.is_err(), "all remotes failing must be Err");
+        let err = res.unwrap_err();
+        assert!(
+            !is_partial_fetch_error(&err),
+            "complete failure must not be marked partial: {err:#}"
+        );
+        // I1: kompletter Fehlschlag bleibt strukturiert für lokalisierten Wrapper.
+        assert!(
+            is_fetch_error(&err),
+            "complete failure must be structured fetch error: {err:#}"
+        );
+        let p = err
+            .downcast_ref::<PartialFetch>()
+            .expect("complete must expose parts");
+        assert!(p.succeeded.is_empty(), "complete must have empty succeeded");
+        assert_eq!(p.failed.len(), 2);
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("bad1") && msg.contains("bad2"),
+            "must name all failing remotes, got: {msg}"
+        );
+        assert!(
+            msg.contains("Credentials/SSH"),
+            "error must hint at auth, got: {msg}"
+        );
+        for german in [
+            "Hinweis",
+            "prüfen",
+            "fehlgeschlagen",
+            "teilweise",
+            "Erfolgreich",
+        ] {
+            assert!(
+                !msg.contains(german),
+                "complete Display must not embed German '{german}': {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_all_zero_remotes_ok_and_no_partial_marker() {
+        // Keine Remotes → Ok (kein Fehler möglich)
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path(), "main");
         assert!(fetch_all(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn fetch_all_https_must_not_fail_with_missing_tls_or_protocol() {
+        // RED für "unsupported URL protocol / no TLS stream": mit https-Feature
+        // muss ein https-Remote einen echten Netzwerkfehler liefern, nicht
+        // "unsupported URL protocol (class-Net 12)" oder "no TLS stream (class-Ssl 16)".
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.remote("origin", "https://invalid.example.com/doesnotexist.git")
+            .unwrap();
+        drop(repo);
+        let res = fetch_all(dir.path());
+        assert!(res.is_err(), "invalid https remote must still be Err");
+        let err = res.unwrap_err();
+        let msg = format!("{err:#}");
+        for needle in [
+            "unsupported URL protocol",
+            "no TLS stream",
+            "there is no TLS stream",
+            "class=Ssl (16)",
+            "class-Net (12)",
+        ] {
+            assert!(
+                !msg.to_lowercase().contains(&needle.to_lowercase()),
+                "https fetch must have TLS/protocol support, got missing-feature error: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_all_cli_fallback_succeeds_for_file_remote() {
+        // CLI-Fallback-Pfad: lokaler file-Remote muss auch via `git fetch` gehen.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        let bare_dir = tempdir().unwrap();
+        let _bare = Repository::init_bare(bare_dir.path()).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.remote("good", bare_dir.path().to_str().unwrap())
+            .unwrap();
+        drop(repo);
+        assert!(
+            fetch_with_git_cli(dir.path(), "good").is_ok(),
+            "git CLI fetch for file remote must succeed"
+        );
+        assert!(
+            fetch_with_git_cli(dir.path(), "does-not-exist-remote").is_err(),
+            "git CLI fetch for unknown remote must fail"
+        );
+    }
+
+    // --- Task 5 TDD RED: ahead_behind mit 2 Clones (1 Commit voraus) ---
+    fn git_cmd(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} spawn failed: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} in {} failed: stdout={} stderr={}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn ahead_behind_two_clones_one_commit_behind() {
+        // Bare-Origin + 2 Clones: clone1 pusht 1 Commit voraus, clone2 fetcht → behind=1.
+        let base = tempdir().unwrap();
+        let origin = base.path().join("origin.git");
+        let c1 = base.path().join("c1");
+        let c2 = base.path().join("c2");
+        git_cmd(base.path(), &["init", "--bare", "origin.git"]);
+        git_cmd(base.path(), &["clone", "origin.git", "c1"]);
+        git_cmd(&c1, &["config", "user.name", "Test"]);
+        git_cmd(&c1, &["config", "user.email", "test@test.com"]);
+        git_cmd(&c1, &["checkout", "-b", "main"]);
+        fs::write(c1.join("a.txt"), "one\n").unwrap();
+        git_cmd(&c1, &["add", "a.txt"]);
+        git_cmd(&c1, &["commit", "-m", "initial"]);
+        git_cmd(&c1, &["push", "-u", "origin", "main"]);
+        // Origin-HEAD auf main zeigen, damit Folge-Clones direkt main auschecken
+        let _ = std::process::Command::new("git")
+            .args([
+                "--git-dir",
+                "origin.git",
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/main",
+            ])
+            .current_dir(base.path())
+            .output();
+        // Zweiter Clone kennt main bereits (explizit -b main für Robustheit)
+        git_cmd(base.path(), &["clone", "-b", "main", "origin.git", "c2"]);
+        git_cmd(&c2, &["config", "user.name", "Test"]);
+        git_cmd(&c2, &["config", "user.email", "test@test.com"]);
+        // c1 ein Commit voraus + push
+        fs::write(c1.join("b.txt"), "two\n").unwrap();
+        git_cmd(&c1, &["add", "b.txt"]);
+        git_cmd(&c1, &["commit", "-m", "second"]);
+        git_cmd(&c1, &["push", "origin", "main"]);
+        // c2 fetcht → kennt neuen origin/main, ist 1 behind
+        git_cmd(&c2, &["fetch", "origin"]);
+        let _ = &origin;
+        let (ahead_c2, behind_c2) = ahead_behind(&c2);
+        assert_eq!(ahead_c2, 0, "c2 should not be ahead");
+        assert_eq!(behind_c2, 1, "c2 should be 1 behind after fetch");
+        let (ahead_c1, behind_c1) = ahead_behind(&c1);
+        assert_eq!(
+            (ahead_c1, behind_c1),
+            (0, 0),
+            "up-to-date clone must be (0,0)"
+        );
+    }
+
+    #[test]
+    fn ahead_behind_detached_and_no_remote_is_zero() {
+        // Detached HEAD und Repo ohne Remote → (0,0), kein Panic.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        assert_eq!(ahead_behind(dir.path()), (0, 0));
+        // Detached
+        let repo = Repository::open(dir.path()).unwrap();
+        let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.set_head_detached(oid).unwrap();
+        drop(repo);
+        assert_eq!(ahead_behind(dir.path()), (0, 0));
+        // Ungültiger Pfad → (0,0)
+        assert_eq!(ahead_behind(Path::new("/nonexistent/xyz-123")), (0, 0));
+    }
+
+    #[test]
+    fn ahead_behind_ahead_one_when_local_commit_not_pushed() {
+        // Lokaler Commit ohne Push → ahead=1, behind=0.
+        let base = tempdir().unwrap();
+        git_cmd(base.path(), &["init", "--bare", "origin.git"]);
+        git_cmd(base.path(), &["clone", "origin.git", "c1"]);
+        let c1 = base.path().join("c1");
+        git_cmd(&c1, &["config", "user.name", "Test"]);
+        git_cmd(&c1, &["config", "user.email", "test@test.com"]);
+        git_cmd(&c1, &["checkout", "-b", "main"]);
+        fs::write(c1.join("a.txt"), "one\n").unwrap();
+        git_cmd(&c1, &["add", "a.txt"]);
+        git_cmd(&c1, &["commit", "-m", "initial"]);
+        git_cmd(&c1, &["push", "-u", "origin", "main"]);
+        // Lokaler Commit ohne Push
+        fs::write(c1.join("local.txt"), "local\n").unwrap();
+        git_cmd(&c1, &["add", "local.txt"]);
+        git_cmd(&c1, &["commit", "-m", "local-only"]);
+        let (ahead, behind) = ahead_behind(&c1);
+        assert_eq!(ahead, 1, "local-only commit must be ahead 1");
+        assert_eq!(behind, 0);
+    }
+
+    #[test]
+    fn get_repo_info_fills_ahead_behind_defaults() {
+        // Ohne Remote → (0,0); mit Remote nach Fetch → behind=1.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        let info = get_repo_info(dir.path().to_path_buf()).unwrap();
+        assert_eq!((info.ahead, info.behind), (0, 0));
     }
 
     #[test]
@@ -1764,19 +2532,77 @@ mod tests {
         let repo = Repository::open(dir.path()).unwrap();
         let head = repo.head().unwrap().peel_to_commit().unwrap();
         repo.branch("feature", &head, false).unwrap();
-        // clean repo: nothing to stash, but stash_and_checkout should still checkout and then stash_pop fail with no stash? Actually code does stash_save and then checkout and stash_pop
-        // On clean, stash_save returns NotFound, but checkout should succeed, then stash_pop(0) will fail because no stash
-        // The code will then bail with "Branch gewechselt, aber Stash pop fehlgeschlagen"
-        // So result is Err containing that message
+        // K1: clean repo ohne Änderungen → kein Stash, kein Pop → Ok.
+        // Früher wurde trotzdem stash_pop(0) versucht (fremder Stash-Risk).
         let res = stash_and_checkout(dir.path(), "feature");
-        // Could be Ok if stash_pop succeeds? On clean there's no stash to pop, so pop fails
-        // Accept either Ok (if no stash) or Err with stash pop message, but not panic
-        assert!(res.is_ok() || res.is_err());
-        if let Err(e) = res {
-            // if err, should mention branch or stash
-            let msg = e.to_string();
-            assert!(msg.contains("Branch") || msg.contains("Stash") || msg.contains("stash"));
+        assert!(
+            res.is_ok(),
+            "clean checkout must succeed without pop: {res:?}"
+        );
+    }
+
+    #[test]
+    fn stash_and_checkout_clean_preserves_preexisting_stash() {
+        // K1-Regression: clean Repo + alter stash@{0} → Switch darf den alten
+        // Stash weder poppen noch löschen.
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        {
+            let mut repo = Repository::open(dir.path()).unwrap();
+            let head_id = repo.head().unwrap().peel_to_commit().unwrap().id();
+            let head = repo.find_commit(head_id).unwrap();
+            repo.branch("feature", &head, false).unwrap();
+            drop(head);
+            // Alten Stash anlegen (dirty → stash, dann liegt stash@{0}).
+            fs::write(dir.path().join("old.txt"), "old").unwrap();
+            let sig = repo.signature().unwrap();
+            repo.stash_save(&sig, "old stash", Some(git2::StashFlags::INCLUDE_UNTRACKED))
+                .unwrap();
+            assert!(
+                repo.revparse_single("stash@{0}").is_ok(),
+                "precondition: stash must exist"
+            );
         }
+        let res = stash_and_checkout(dir.path(), "feature");
+        assert!(res.is_ok(), "clean switch must not pop old stash: {res:?}");
+        let repo = Repository::open(dir.path()).unwrap();
+        assert!(
+            repo.revparse_single("stash@{0}").is_ok(),
+            "preexisting stash must be preserved"
+        );
+    }
+
+    #[test]
+    fn remote_short_name_keeps_slashes() {
+        // K2: origin/feature/foo → feature/foo (nicht foo).
+        assert_eq!(
+            remote_short_name("refs/remotes/origin/feature/foo", "origin/feature/foo"),
+            "feature/foo"
+        );
+        assert_eq!(
+            remote_short_name("refs/remotes/upstream/bugfix/bar", "upstream/bugfix/bar"),
+            "bugfix/bar"
+        );
+        assert_eq!(
+            remote_short_name("refs/remotes/origin/main", "origin/main"),
+            "main"
+        );
+        // F1#7: Fallback ohne refs/remotes/-Prefix strippt generisch das
+        // erste Segment (nicht nur `origin/`).
+        assert_eq!(remote_short_name("", "upstream/foo"), "foo");
+        assert_eq!(remote_short_name("", "origin/foo"), "foo");
+        assert_eq!(remote_short_name("", "main"), "main");
+    }
+
+    #[test]
+    fn stash_pop_failed_typed_detection() {
+        // M4: typisiert statt String-Match.
+        let err = anyhow::Error::new(StashPopFailed {
+            detail: "conflict".to_string(),
+        });
+        assert!(is_stash_pop_failed(&err));
+        let other = anyhow::anyhow!("plain");
+        assert!(!is_stash_pop_failed(&other));
     }
 
     #[test]

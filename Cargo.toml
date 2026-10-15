@@ -13,7 +13,7 @@ categories = ["development-tools"]
 eframe = { version = "0.36", features = ["default_fonts", "glow"] }
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["svg"] }
-git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https", "ssh"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 directories = "6.0"
@@ -27,6 +27,7 @@ ureq = { version = "2.9", features = ["json", "tls"] }
 semver = "1.0"
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-icon = "0.24"
+winreg = "0.52"
 
 [dev-dependencies]
 tempfile = "3.27"

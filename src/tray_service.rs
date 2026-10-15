@@ -8,6 +8,7 @@ mod imp {
     use crate::git::RepoInfo;
     use crate::ui::tray_popup::{self, TrayPopupActions};
     use egui::{Context, Rect, Vec2, ViewportBuilder, ViewportClass, ViewportId};
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::Instant;
@@ -48,6 +49,9 @@ mod imp {
         /// #3: Badge-Text fürs Popup (wartender Branch-Dialog/Fehler im
         /// Hauptfenster). Wird vom Main-Thread bei jedem Sync gesetzt.
         pub notice: Option<String>,
+        /// Task 6: pro-Repo Branch-Filter für die Tray-Dropdown-Suche
+        /// (KEIN globales Suchfeld). Wird bei Close geleert.
+        pub branch_filters: HashMap<PathBuf, String>,
     }
 
     impl TrayShared {
@@ -62,7 +66,16 @@ mod imp {
                 last_toggle_at: None,
                 action_tx,
                 notice: None,
+                branch_filters: HashMap::new(),
             }
+        }
+
+        /// Schließt das Popup und leert den Task-6-Filter-State.
+        pub fn close_popup(&mut self) {
+            self.popup_open = false;
+            self.popup_rect = None;
+            self.popup_opened_at = None;
+            self.branch_filters.clear();
         }
 
         pub fn update_data(&mut self, repos: Vec<RepoInfo>, config: AppConfig) {
@@ -148,9 +161,7 @@ mod imp {
             egui::vec2(rect.size.width as f32 / ppp, rect.size.height as f32 / ppp),
         );
         if guard.popup_open {
-            guard.popup_open = false;
-            guard.popup_rect = None;
-            guard.popup_opened_at = None;
+            guard.close_popup();
         } else {
             guard.popup_open = true;
             guard.popup_rect = Some(tray_rect);
@@ -256,9 +267,7 @@ mod imp {
                     // Doppelklick-Sequenz das Popup hinter dem Hauptfenster wieder.
                     let mut guard = lock_shared(shared);
                     if guard.popup_open {
-                        guard.popup_open = false;
-                        guard.popup_rect = None;
-                        guard.popup_opened_at = None;
+                        guard.close_popup();
                     }
                     guard.last_toggle_at = Some(Instant::now());
                     let _ = guard.action_tx.send(TrayAction::ShowMainWindow);
@@ -298,11 +307,18 @@ mod imp {
             let guard = lock_shared(shared);
             guard.notice.clone()
         };
+        // Task 6: Filter-State aus TrayShared laden (kein Lock während des
+        // Renders halten) — nach dem Frame zurückschreiben bzw. bei Close leeren.
+        let mut branch_filters: HashMap<PathBuf, String> = {
+            let guard = lock_shared(shared);
+            guard.branch_filters.clone()
+        };
 
-        // M1+N1: erst MRU-sortieren + truncaten (nur sichtbare Top-N klonen),
-        // dann Höhe pro sichtbarem Repo summieren (exakt bei gemischten Dropdowns).
+        // P1+P2: keine Full-Clones pro Frame — nur Refs auf Arc-Daten,
+        // sortiert via O(n) Timestamps + Sort (n<=50, vernachlässigbar).
+        // Kein Cache nötig: teuer waren die Deep-Clones, nicht der Sort.
         let tray_limit = config_arc.tray_icons.max_display.clamp(5, 50);
-        let repos_visible = tray_popup::sorted_visible_repos(&repos_arc, &config_arc, tray_limit);
+        let repos_visible = tray_popup::sorted_visible_refs(&repos_arc, &config_arc, tray_limit);
         let popup_width: f32 = 360.0;
         let popup_height: f32 =
             tray_popup::popup_height_for_visible(&repos_visible, notice.as_deref());
@@ -376,6 +392,7 @@ mod imp {
                         &config_arc,
                         &mut tray_actions,
                         notice.as_deref(),
+                        &mut branch_filters,
                     );
                 });
                 if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -408,19 +425,18 @@ mod imp {
 
         if viewport_result.is_err() {
             eprintln!("Tray popup viewport panicked, closing popup");
-            let mut guard = lock_shared(shared);
-            guard.popup_open = false;
-            guard.popup_rect = None;
-            guard.popup_opened_at = None;
+            lock_shared(shared).close_popup();
             return;
         }
 
-        // Handle close
+        // Handle close (Task 6: leert auch die Branch-Filter)
         if close_popup {
-            let mut guard = lock_shared(shared);
-            guard.popup_open = false;
-            guard.popup_rect = None;
-            guard.popup_opened_at = None;
+            lock_shared(shared).close_popup();
+        } else {
+            // Nur nicht-leere Filter sichtbarer Repos behalten (Map bleibt klein).
+            branch_filters
+                .retain(|k, v| !v.is_empty() && repos_visible.iter().any(|r| &r.path == k));
+            lock_shared(shared).branch_filters = branch_filters;
         }
 
         // Send actions to main app and wake main viewport (service is throttled, main needs instant)

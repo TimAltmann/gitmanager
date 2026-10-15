@@ -111,6 +111,8 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "search_label") => "Suche:".to_string(),
         (Language::En, "filter_hint") => "filter...".to_string(),
         (Language::De, "filter_hint") => "filtern...".to_string(),
+        (Language::En, "branch_search") => "Search branches...".to_string(),
+        (Language::De, "branch_search") => "Branches suchen...".to_string(),
         (Language::En, "branch_refresh_tooltip") => "Reload branches (git fetch --all)".to_string(),
         (Language::De, "branch_refresh_tooltip") => "Branches neu laden (git fetch --all)".to_string(),
         (Language::En, "current") => "Current:".to_string(),
@@ -329,6 +331,10 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "tray_update_hint_on") => "✓ Beim Start wird einmalig api.github.com abgefragt (5 s Timeout). Deaktivieren für Offline-/Firmennetze. Änderung wirkt ab Neustart.".to_string(),
         (Language::En, "tray_update_hint_off") => "Update check disabled — no network request on startup. Takes effect after restart.".to_string(),
         (Language::De, "tray_update_hint_off") => "Update-Check deaktiviert — keine Netzwerkabfrage beim Start. Änderung wirkt ab Neustart.".to_string(),
+        (Language::En, "autostart_label") => "Start automatically with Windows".to_string(),
+        (Language::De, "autostart_label") => "Automatisch mit Windows starten".to_string(),
+        (Language::En, "autostart_hint") => "Adds/removes GitManager in Windows Autostart (Registry Run key). Takes effect on next login.".to_string(),
+        (Language::De, "autostart_hint") => "Trägt GitManager in den Windows-Autostart ein (Registry Run-Key). Wirkt ab der nächsten Anmeldung.".to_string(),
         (Language::En, "tray_update_error") => "Last update check failed: {}".to_string(),
         (Language::De, "tray_update_error") => "Letzter Update-Check fehlgeschlagen: {}".to_string(),
         (Language::En, "tray_branch_limit_title") => "Tray Branch Limit".to_string(),
@@ -345,6 +351,10 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "tray_limit_label") => "Limit:".to_string(),
         (Language::En, "tray_direct_label") => "Or direct:".to_string(),
         (Language::De, "tray_direct_label") => "Oder direkt:".to_string(),
+        (Language::En, "tray_branch_more_filtered") => "+ {} more (filter)".to_string(),
+        (Language::De, "tray_branch_more_filtered") => "+ {} weitere (filtere)".to_string(),
+        (Language::En, "tray_branch_more_main") => "+ {} more (in main window)".to_string(),
+        (Language::De, "tray_branch_more_main") => "+ {} weitere (in Hauptfenster)".to_string(),
         (Language::En, "tray_notice_branch_dialog") => "Branch switch for '{}' waits for a decision – click to open".to_string(),
         (Language::De, "tray_notice_branch_dialog") => "Branch-Wechsel für '{}' wartet auf Entscheidung – klicken zum Öffnen".to_string(),
         (Language::En, "tray_notice_error") => "Note in main window – click to open".to_string(),
@@ -415,6 +425,14 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "shell_opened") => "Shell geöffnet: {}".to_string(),
         (Language::En, "fetching_branches") => "Fetching branches for {}...".to_string(),
         (Language::De, "fetching_branches") => "Fetche Branches für {}...".to_string(),
+        (Language::En, "fetch_failed") => "Fetch failed: {}".to_string(),
+        (Language::De, "fetch_failed") => "Fetch fehlgeschlagen: {}".to_string(),
+        (Language::En, "fetch_partial") => "Fetch partially failed: {}".to_string(),
+        (Language::De, "fetch_partial") => "Fetch teilweise fehlgeschlagen: {}".to_string(),
+        (Language::En, "auth_hint") => "Note: check Credentials/SSH (auth may be required)".to_string(),
+        (Language::De, "auth_hint") => "Hinweis: Credentials/SSH prüfen (ggf. Auth erforderlich)".to_string(),
+        (Language::En, "fetch_aborted") => "Background fetch aborted (internal error)".to_string(),
+        (Language::De, "fetch_aborted") => "Hintergrund-Fetch abgebrochen (interner Fehler)".to_string(),
         (Language::En, "branch_switched_to") => "Branch switched to '{}': {}".to_string(),
         (Language::De, "branch_switched_to") => "Branch zu '{}' gewechselt: {}".to_string(),
         (Language::En, "ide_not_found") => "IDE '{}' not found".to_string(),
@@ -447,6 +465,38 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "key_attr") => "Key-Attribut:".to_string(),
         (Language::En, "value_attr") => "Value attribute:".to_string(),
         (Language::De, "value_attr") => "Value-Attribut:".to_string(),
+
+        // ── Main list sort (Task 4) ──────────────────────────────────
+        (Language::En, "sort_by_name") => "Sort by name".to_string(),
+        (Language::De, "sort_by_name") => "Nach Name sortieren".to_string(),
+        (Language::En, "sort_by_last_used") => "Sort by last used".to_string(),
+        (Language::De, "sort_by_last_used") => "Nach letzter Nutzung sortieren".to_string(),
+        (Language::En, "sort_tooltip") => "Sort repositories".to_string(),
+        (Language::De, "sort_tooltip") => "Repositories sortieren".to_string(),
+        (Language::En, "sort_title") => "Sorting".to_string(),
+        (Language::De, "sort_title") => "Sortierung".to_string(),
+
+        // ── Behind indicator + auto-fetch (Task 5) ───────────────────
+        (Language::En, "branch_behind") => "Behind by {} commit(s)".to_string(),
+        (Language::De, "branch_behind") => "{} Commit(s) hinterher".to_string(),
+        (Language::En, "auto_fetch_label") => "Auto-fetch interval (minutes, 0 = off)".to_string(),
+        (Language::De, "auto_fetch_label") => "Auto-Fetch Intervall (Minuten, 0 = aus)".to_string(),
+        (Language::En, "auto_fetch_hint") => "Periodically runs git fetch --all for all scanned repos in background. 0 disables.".to_string(),
+        (Language::De, "auto_fetch_hint") => "Führt periodisch git fetch --all für alle gescannten Repos im Hintergrund aus. 0 deaktiviert.".to_string(),
+        (Language::En, "auto_fetch_off") => "Disabled".to_string(),
+        (Language::De, "auto_fetch_off") => "Deaktiviert".to_string(),
+        (Language::En, "auto_fetch_running") => "Auto-fetch running, try again shortly".to_string(),
+        (Language::De, "auto_fetch_running") => "Auto-Fetch läuft, bitte kurz warten".to_string(),
+
+        // ── Tray icon theme (Dark/Light) ─────────────────────────────
+        (Language::En, "tray_icon_theme_title") => "Tray icon style".to_string(),
+        (Language::De, "tray_icon_theme_title") => "Tray-Icon Stil".to_string(),
+        (Language::En, "tray_icon_theme_desc") => "White icon for dark taskbar (Dark) or dark icon for light taskbar (Light).".to_string(),
+        (Language::De, "tray_icon_theme_desc") => "Weißes Icon für dunkle Taskleiste (Dark) oder dunkles Icon für helle Taskleiste (Light).".to_string(),
+        (Language::En, "tray_icon_theme_dark") => "Dark (white icon)".to_string(),
+        (Language::De, "tray_icon_theme_dark") => "Dark (weißes Icon)".to_string(),
+        (Language::En, "tray_icon_theme_light") => "Light (dark icon)".to_string(),
+        (Language::De, "tray_icon_theme_light") => "Light (dunkles Icon)".to_string(),
 
         // fallback for any missing key -> return key itself
         (Language::En, _) => key.to_string(),
@@ -570,6 +620,10 @@ mod tests {
             "update_available_title",
             "update_available_msg",
             "open_link",
+            "tray_icon_theme_title",
+            "tray_icon_theme_desc",
+            "tray_icon_theme_dark",
+            "tray_icon_theme_light",
         ] {
             assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
             assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
@@ -583,6 +637,169 @@ mod tests {
         assert!(
             sde.contains("Tray-Popup"),
             "DE summary should mention Tray-Popup: {sde}"
+        );
+    }
+
+    #[test]
+    fn tr_autostart_keys_exist() {
+        for key in ["autostart_label", "autostart_hint"] {
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+        }
+    }
+
+    #[test]
+    fn tr_sort_keys_exist() {
+        for key in [
+            "sort_by_name",
+            "sort_by_last_used",
+            "sort_tooltip",
+            "sort_title",
+        ] {
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+        }
+    }
+
+    #[test]
+    fn tr_fetch_keys_exist() {
+        for key in [
+            "fetch_failed",
+            "fetch_partial",
+            "auth_hint",
+            "fetch_aborted",
+        ] {
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+        }
+        // DE wrapper texts stay byte-identical (review I1).
+        assert_eq!(tr(Language::De, "fetch_failed"), "Fetch fehlgeschlagen: {}");
+        assert_eq!(
+            tr(Language::De, "fetch_partial"),
+            "Fetch teilweise fehlgeschlagen: {}"
+        );
+        assert_eq!(
+            tr(Language::De, "auth_hint"),
+            "Hinweis: Credentials/SSH prüfen (ggf. Auth erforderlich)"
+        );
+        let en = tr_fmt(Language::En, "fetch_failed", &["boom"]);
+        assert!(
+            en.contains("boom"),
+            "fetch_failed EN must embed detail: {en}"
+        );
+        let de = tr_fmt(Language::De, "fetch_failed", &["boom"]);
+        assert!(
+            de.contains("boom"),
+            "fetch_failed DE must embed detail: {de}"
+        );
+        let en_p = tr_fmt(Language::En, "fetch_partial", &["boom"]);
+        assert!(
+            en_p.contains("boom"),
+            "fetch_partial EN must embed detail: {en_p}"
+        );
+        let de_p = tr_fmt(Language::De, "fetch_partial", &["boom"]);
+        assert!(
+            de_p.contains("boom"),
+            "fetch_partial DE must embed detail: {de_p}"
+        );
+        // I1: EN wrapper + EN hint must be pure EN (no German embeds).
+        for s in [
+            tr(Language::En, "fetch_failed"),
+            tr(Language::En, "fetch_partial"),
+            tr(Language::En, "auth_hint"),
+        ] {
+            for german in [
+                "Hinweis",
+                "prüfen",
+                "fehlgeschlagen",
+                "teilweise",
+                "Erfolgreich",
+            ] {
+                assert!(
+                    !s.contains(german),
+                    "EN fetch text must not embed German '{german}': {s}"
+                );
+            }
+        }
+        // Full EN message (wrapper + opaque detail + hint) stays pure EN.
+        let hint_en = tr(Language::En, "auth_hint");
+        let full_en = tr_fmt(
+            Language::En,
+            "fetch_failed",
+            &[&format!("'bad': timeout. {hint_en}")],
+        );
+        assert!(full_en.contains("timeout"));
+        for german in ["Hinweis", "prüfen", "fehlgeschlagen", "teilweise"] {
+            assert!(
+                !full_en.contains(german),
+                "EN full fetch message must not embed German '{german}': {full_en}"
+            );
+        }
+    }
+
+    #[test]
+    fn tr_behind_auto_fetch_keys_exist() {
+        for key in [
+            "branch_behind",
+            "auto_fetch_label",
+            "auto_fetch_hint",
+            "auto_fetch_off",
+            "auto_fetch_running",
+        ] {
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+        }
+        let en = tr_fmt(Language::En, "branch_behind", &["3"]);
+        assert!(en.contains('3'), "branch_behind EN must embed count: {en}");
+        let de = tr_fmt(Language::De, "branch_behind", &["3"]);
+        assert!(de.contains('3'), "branch_behind DE must embed count: {de}");
+    }
+
+    #[test]
+    fn tr_branch_search_keys_exist() {
+        // Task 6: Tray-Branch-Suche braucht einen eigenen Placeholder.
+        assert_ne!(tr(Language::En, "branch_search"), "branch_search");
+        assert_ne!(tr(Language::De, "branch_search"), "branch_search");
+        assert!(
+            !tr(Language::En, "branch_search").is_empty(),
+            "EN branch_search must not be empty"
+        );
+        assert!(
+            !tr(Language::De, "branch_search").is_empty(),
+            "DE branch_search must not be empty"
+        );
+    }
+
+    #[test]
+    fn tr_tray_branch_more_keys_exist() {
+        // Task 6 fix (Finding 2): Overflow-Hinweis sprachabhängig.
+        for key in ["tray_branch_more_filtered", "tray_branch_more_main"] {
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+        }
+        // De-Texte identisch zum bisherigen Hardcode.
+        let de_f = tr_fmt(Language::De, "tray_branch_more_filtered", &["5"]);
+        assert_eq!(
+            de_f, "+ 5 weitere (filtere)",
+            "DE filtered must stay: {de_f}"
+        );
+        let de_m = tr_fmt(Language::De, "tray_branch_more_main", &["5"]);
+        assert_eq!(
+            de_m, "+ 5 weitere (in Hauptfenster)",
+            "DE main must stay: {de_m}"
+        );
+        // En darf kein Deutsch enthalten.
+        let en_f = tr_fmt(Language::En, "tray_branch_more_filtered", &["5"]);
+        assert!(en_f.contains('5'), "EN filtered must embed count: {en_f}");
+        assert!(
+            !en_f.contains("weitere"),
+            "EN filtered must not be German: {en_f}"
+        );
+        let en_m = tr_fmt(Language::En, "tray_branch_more_main", &["5"]);
+        assert!(en_m.contains('5'), "EN main must embed count: {en_m}");
+        assert!(
+            !en_m.contains("weitere"),
+            "EN main must not be German: {en_m}"
         );
     }
 

@@ -7,10 +7,48 @@ use std::path::{Path, PathBuf};
 
 // --- Default helpers ---
 fn default_config_version() -> u32 {
+    14
+}
+fn default_sort_mode() -> RepoSortMode {
+    RepoSortMode::LastUsed
+}
+fn default_auto_fetch_interval() -> u64 {
     10
+}
+
+/// Sortierung der Haupt-Repo-Liste (Task 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoSortMode {
+    Name,
+    #[default]
+    LastUsed,
+}
+
+impl RepoSortMode {
+    pub fn all() -> Vec<RepoSortMode> {
+        vec![RepoSortMode::LastUsed, RepoSortMode::Name]
+    }
 }
 fn default_tray_max_display() -> usize {
     10
+}
+
+/// Tray-Icon-Stil: Dark = weißes Icon für dunkle Taskleiste (bisheriges
+/// `icon_tray.png`), Light = dunkles Icon für helle Taskleiste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayIconTheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl TrayIconTheme {
+    #[allow(dead_code)]
+    pub fn all() -> Vec<TrayIconTheme> {
+        vec![TrayIconTheme::Dark, TrayIconTheme::Light]
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +62,9 @@ pub struct TrayIconConfig {
     /// Maximale Anzahl angezeigter Repos im Popup (für MRU)
     #[serde(default = "default_tray_max_display")]
     pub max_display: usize,
+    /// Tray-Icon-Stil (Dark/Light), Default Dark = bisheriges Verhalten.
+    #[serde(default)]
+    pub icon_theme: TrayIconTheme,
 }
 
 impl Default for TrayIconConfig {
@@ -32,6 +73,7 @@ impl Default for TrayIconConfig {
             icon_order: Vec::new(),
             hidden_icon_ids: Vec::new(),
             max_display: default_tray_max_display(),
+            icon_theme: TrayIconTheme::Dark,
         }
     }
 }
@@ -624,6 +666,16 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub repo_usage: HashMap<String, RepoUsage>,
+
+    #[serde(default)]
+    pub autostart: bool,
+
+    #[serde(default = "default_sort_mode")]
+    pub main_sort_mode: RepoSortMode,
+
+    /// Auto-Fetch Intervall in Minuten (Task 5). 0 = aus. Default 10.
+    #[serde(default = "default_auto_fetch_interval")]
+    pub auto_fetch_interval_min: u64,
 }
 
 impl Default for AppConfig {
@@ -653,6 +705,9 @@ impl Default for AppConfig {
             tray_branch_limit: default_tray_branch_limit(),
             tray_icons: TrayIconConfig::default(),
             repo_usage: HashMap::new(),
+            autostart: false,
+            main_sort_mode: default_sort_mode(),
+            auto_fetch_interval_min: default_auto_fetch_interval(),
         }
     }
 }
@@ -1024,18 +1079,61 @@ impl AppConfig {
             cfg.config_version = 10;
             let _ = cfg.save();
         }
-        if cfg.branch_display_limit == 0 {
-            cfg.branch_display_limit = default_branch_limit();
+        // K1: Versionen ab hier ohne Zwischen-Save — einmalig am Ende.
+        let loaded_version = cfg.config_version;
+        if cfg.config_version < 11 {
+            // v11: Autostart via Registry Run-Key (Windows), Default false via serde.
+            // Kein Pfad-Schreiben hier — Registry-Sync erfolgt in app.rs (Save + Startup).
+            // K1: kein Zwischen-Save — einmalig am Ende von try_load().
+            cfg.config_version = 11;
         }
-        cfg.branch_display_limit = cfg.branch_display_limit.clamp(50, 500);
-        if cfg.tray_branch_limit == 0 {
-            cfg.tray_branch_limit = default_tray_branch_limit();
+        if cfg.config_version < 12 {
+            // v12: main_sort_mode eingeführt (Default LastUsed via serde).
+            // Alte Configs ohne Feld erhalten automatisch LastUsed — hier nur Version bump.
+            cfg.config_version = 12;
         }
-        cfg.tray_branch_limit = cfg.tray_branch_limit.clamp(5, 50);
-        if cfg.tray_icons.max_display == 0 {
-            cfg.tray_icons.max_display = default_tray_max_display();
+        if cfg.config_version < 13 {
+            // v13: auto_fetch_interval_min eingeführt (Default 10 via serde, 0=aus).
+            // Alte Configs ohne Feld erhalten automatisch 10 — hier nur Version bump.
+            // M5: auf 0..=120 clampen (UI-Slider-Range) — 0 bleibt "aus".
+            cfg.auto_fetch_interval_min = cfg.auto_fetch_interval_min.min(120);
+            cfg.config_version = 13;
         }
-        cfg.tray_icons.max_display = cfg.tray_icons.max_display.clamp(5, 50);
+        if cfg.config_version < 14 {
+            // v14: tray_icons.icon_theme eingeführt (Default Dark via serde).
+            // Alte Configs ohne Feld erhalten automatisch Dark = bisheriges Weiß-Icon.
+            cfg.config_version = 14;
+        }
+        // M5: auch laufende Configs clampen (JSON-Handedit mit 1000 o.ä.).
+        // K1/K2/N2: alle numerischen Clamps gleich behandeln — bei tatsächlicher
+        // Änderung einmalig speichern (statt drei Zwischen-Saves / stiller Clamps).
+        let clamped_fetch = cfg.auto_fetch_interval_min.min(120);
+        let clamped_branch = if cfg.branch_display_limit == 0 {
+            default_branch_limit()
+        } else {
+            cfg.branch_display_limit.clamp(50, 500)
+        };
+        let clamped_tray = if cfg.tray_branch_limit == 0 {
+            default_tray_branch_limit()
+        } else {
+            cfg.tray_branch_limit.clamp(5, 50)
+        };
+        let clamped_max = if cfg.tray_icons.max_display == 0 {
+            default_tray_max_display()
+        } else {
+            cfg.tray_icons.max_display.clamp(5, 50)
+        };
+        let clamp_changed = clamped_fetch != cfg.auto_fetch_interval_min
+            || clamped_branch != cfg.branch_display_limit
+            || clamped_tray != cfg.tray_branch_limit
+            || clamped_max != cfg.tray_icons.max_display;
+        cfg.auto_fetch_interval_min = clamped_fetch;
+        cfg.branch_display_limit = clamped_branch;
+        cfg.tray_branch_limit = clamped_tray;
+        cfg.tray_icons.max_display = clamped_max;
+        if cfg.config_version != loaded_version || clamp_changed {
+            let _ = cfg.save();
+        }
         cfg.tray_icons.hidden_icon_ids.sort();
         cfg.tray_icons.hidden_icon_ids.dedup();
         {
@@ -2014,7 +2112,7 @@ mod tests {
     fn config_default_has_valid_state() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.max_depth, 2);
-        assert_eq!(cfg.config_version, 10);
+        assert_eq!(cfg.config_version, 14);
         assert_eq!(cfg.active_profile_id, "dotnet");
         assert!(!cfg.profiles.is_empty());
         assert_eq!(cfg.agents.len(), 6);
@@ -2022,6 +2120,7 @@ mod tests {
         assert_eq!(cfg.terminal.preference, TerminalPreference::Auto);
         assert_eq!(cfg.terminal.fallback, TerminalPreference::Cmd);
         assert!(cfg.repo_state.is_empty());
+        assert_eq!(cfg.auto_fetch_interval_min, 10);
     }
 
     #[test]
@@ -2290,7 +2389,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded.roots.len(), 2);
         assert_eq!(loaded.max_depth, 3);
-        assert_eq!(loaded.config_version, 10);
+        assert_eq!(loaded.config_version, 14);
     }
 
     #[test]
@@ -2905,5 +3004,96 @@ mod tests {
     fn profile_has_config_selectors_empty_by_default() {
         let cfg = AppConfig::default();
         assert!(cfg.get_active_profile().config_selectors.is_empty());
+    }
+
+    #[test]
+    fn autostart_serde_roundtrip() {
+        let mut cfg = AppConfig::default();
+        assert!(!cfg.autostart);
+        cfg.autostart = true;
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("autostart"));
+        let de: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(de.autostart);
+        let mut cfg2 = AppConfig::default();
+        cfg2.autostart = false;
+        let json2 = serde_json::to_string(&cfg2).unwrap();
+        let de2: AppConfig = serde_json::from_str(&json2).unwrap();
+        assert!(!de2.autostart);
+    }
+
+    #[test]
+    fn autostart_migration_v10_defaults_false() {
+        // v10 config ohne autostart-Feld -> serde default false
+        let json = r#"{"roots":[],"max_depth":2,"config_version":10}"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.autostart);
+        assert_eq!(cfg.config_version, 10);
+    }
+
+    #[test]
+    fn sort_mode_default_is_last_used() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.main_sort_mode, RepoSortMode::LastUsed);
+        assert_eq!(cfg.config_version, 14);
+    }
+
+    #[test]
+    fn sort_mode_serde_roundtrip_snake_case() {
+        for mode in [RepoSortMode::Name, RepoSortMode::LastUsed] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let de: RepoSortMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, de);
+        }
+        assert!(serde_json::to_string(&RepoSortMode::LastUsed)
+            .unwrap()
+            .contains("last_used"));
+        assert!(serde_json::to_string(&RepoSortMode::Name)
+            .unwrap()
+            .contains("name"));
+    }
+
+    #[test]
+    fn sort_mode_migration_v11_defaults_last_used() {
+        // v11 config ohne main_sort_mode-Feld -> serde default LastUsed
+        let json = r#"{"roots":[],"max_depth":2,"config_version":11}"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.main_sort_mode, RepoSortMode::LastUsed);
+        assert_eq!(cfg.config_version, 11);
+    }
+
+    #[test]
+    fn auto_fetch_default_is_10_and_zero_means_off() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.auto_fetch_interval_min, 10);
+        // serde default bei fehlendem Feld (v12-Config)
+        let json = r#"{"roots":[],"max_depth":2,"config_version":12}"#;
+        let old: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(old.auto_fetch_interval_min, 10);
+        // 0 bleibt 0 (aus), kein Clamp auf Default
+        let json_off =
+            r#"{"roots":[],"max_depth":2,"config_version":13,"auto_fetch_interval_min":0}"#;
+        let off: AppConfig = serde_json::from_str(json_off).unwrap();
+        assert_eq!(off.auto_fetch_interval_min, 0);
+        // Roundtrip
+        let json_rt = serde_json::to_string(&cfg).unwrap();
+        let rt: AppConfig = serde_json::from_str(&json_rt).unwrap();
+        assert_eq!(rt.auto_fetch_interval_min, 10);
+    }
+
+    #[test]
+    fn tray_icon_theme_default_is_dark_and_roundtrips() {
+        // RED: Tray-Icon soll konfigurierbar Dark/Light sein, Default Dark (bisheriges Weiß-Icon).
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.tray_icons.icon_theme, TrayIconTheme::Dark);
+        for theme in [TrayIconTheme::Dark, TrayIconTheme::Light] {
+            let json = serde_json::to_string(&theme).unwrap();
+            let de: TrayIconTheme = serde_json::from_str(&json).unwrap();
+            assert_eq!(theme, de);
+        }
+        // Alte Config ohne Feld (v13) muss auf Dark fallen (kein Breaking Change).
+        let json_old = r#"{"roots":[],"max_depth":2,"config_version":13}"#;
+        let old: AppConfig = serde_json::from_str(json_old).unwrap();
+        assert_eq!(old.tray_icons.icon_theme, TrayIconTheme::Dark);
     }
 }

@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::git::RepoInfo;
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_fmt};
 use egui::{Color32, RichText, Ui, Vec2};
 
 // Icons via egui include_image! (Simple Icons CC0 + Phosphor for folder)
@@ -25,6 +25,27 @@ const ICON_GIT_COMMIT: egui::ImageSource =
     egui::include_image!("../../assets/icons/git-commit.svg");
 const ICON_SEARCH: egui::ImageSource = egui::include_image!("../../assets/icons/search.svg");
 const ICON_REFRESH: egui::ImageSource = egui::include_image!("../../assets/icons/refresh.svg");
+const ICON_WARNING: egui::ImageSource = egui::include_image!("../../assets/icons/warning.svg");
+
+/// Tooltip-Text für den Branch-Button: Basis + optional `branch_behind`-Hinweis.
+pub fn branch_button_tooltip(
+    lang: crate::i18n::Language,
+    branch: &str,
+    detached: bool,
+    behind: usize,
+) -> String {
+    let base = if detached {
+        format!("{}: {}", branch, tr(lang, "detached_tooltip"))
+    } else {
+        format!("{} – {}", branch, tr(lang, "branch_switch_tooltip"))
+    };
+    if behind > 0 {
+        let behind_txt = tr_fmt(lang, "branch_behind", &[&behind.to_string()]);
+        format!("{base} • {behind_txt}")
+    } else {
+        base
+    }
+}
 
 fn ide_icon_for(ide_id: &str) -> egui::ImageSource<'static> {
     match ide_id {
@@ -98,6 +119,9 @@ fn dropdown_button(
 }
 
 pub fn filter_branches(branches: &[String], filter: &str, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let filter_lower = filter.to_lowercase();
     let mut out = Vec::new();
     for b in branches {
@@ -109,6 +133,42 @@ pub fn filter_branches(branches: &[String], filter: &str, limit: usize) -> Vec<S
             break;
         }
     }
+    out
+}
+
+/// Task 4: Sortierung der Hauptliste im View (nicht im Scanner).
+/// `LastUsed` = MRU desc via `tray_popup::mru_timestamp`, Gleichstand sowie
+/// nie-genutzte Repos alphabetisch (case-insensitiv) am Ende.
+/// `Name` = alphabetisch wie bisher im Scanner.
+///
+/// Finding A: `sort_by_cached_key` wertet Schlüssel nur O(n)-mal aus statt
+/// O(n log n) (keine Allocs im Comparator). Zusammen mit `repo_sort_dirty`
+/// in `app.rs` läuft der Sort nur noch bei tatsächlicher Änderung, nicht
+/// pro Frame.
+pub fn sort_main_repos(repos: &mut [RepoInfo], config: &AppConfig) {
+    match config.main_sort_mode {
+        crate::config::RepoSortMode::Name => {
+            repos.sort_by_cached_key(|a| a.name.to_lowercase());
+        }
+        crate::config::RepoSortMode::LastUsed => {
+            repos.sort_by_cached_key(|a| {
+                (
+                    std::cmp::Reverse(crate::ui::tray_popup::mru_timestamp(config, &a.path)),
+                    a.name.to_lowercase(),
+                )
+            });
+        }
+    }
+}
+
+/// Geklonte, sortierte Kopie (Test-/Reuse-freundlich). Render-Pfad nutzt
+/// `sort_main_repos` in-place, um Klone pro Frame zu vermeiden.
+/// Nur in Tests genutzt (Prod-Pfad sortiert in-place) — analog zu den
+/// Pfad-Wrappern in `git.rs`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn sorted_main_repos(repos: &[RepoInfo], config: &AppConfig) -> Vec<RepoInfo> {
+    let mut out = repos.to_vec();
+    sort_main_repos(&mut out, config);
     out
 }
 
@@ -131,6 +191,7 @@ pub fn show_repo_list(
     repos: &mut [RepoInfo],
     config: &AppConfig,
     actions: &mut RepoListActions,
+    fetching: bool,
 ) {
     if repos.is_empty() {
         ui.vertical_centered(|ui| {
@@ -155,7 +216,7 @@ pub fn show_repo_list(
         .show(ui, |ui| {
             ui.add_space(4.0);
             for repo in repos.iter_mut() {
-                show_repo_row(ui, repo, config, actions);
+                show_repo_row(ui, repo, config, actions, fetching);
                 ui.add_space(6.0);
             }
             ui.add_space(12.0);
@@ -167,6 +228,7 @@ fn show_repo_row(
     repo: &mut RepoInfo,
     config: &AppConfig,
     actions: &mut RepoListActions,
+    fetching: bool,
 ) {
     let visuals = ui.visuals();
     let frame = egui::Frame::new()
@@ -228,21 +290,16 @@ fn show_repo_row(
                 } else {
                     ICON_GIT_BRANCH
                 };
-                let branch_tooltip = if repo.is_detached {
-                    format!(
-                        "{}: {}",
-                        repo.branch,
-                        tr(config.language, "detached_tooltip")
-                    )
-                } else {
-                    format!(
-                        "{} – {}",
-                        repo.branch,
-                        tr(config.language, "branch_switch_tooltip")
-                    )
-                };
+                let branch_tooltip = branch_button_tooltip(
+                    config.language,
+                    &repo.branch,
+                    repo.is_detached,
+                    repo.behind,
+                );
                 // Branch Dropdown: adaptive Breite für lange Branchenamen (140..280)
-                let branch_width = (branch_text.len() as f32 * 7.0 + 46.0).clamp(140.0, 280.0);
+                // F1#10: Zeichen statt Bytes zählen (Umlaute/Emoji).
+                let branch_width =
+                    (branch_text.chars().count() as f32 * 7.0 + 46.0).clamp(140.0, 280.0);
                 // Branch Dropdown: Chevron jetzt innerhalb des Buttons (rechtsbündig)
                 let btn_resp = ui
                     .horizontal(|ui| {
@@ -274,6 +331,20 @@ fn show_repo_row(
                         .on_hover_text(branch_tooltip.clone())
                     })
                     .inner;
+                // Task 5: Veraltet-Icon wenn behind>0 (Pattern app.rs: WARNING tint orange/rot)
+                if repo.behind > 0 {
+                    let behind_txt = tr_fmt(
+                        config.language,
+                        "branch_behind",
+                        &[&repo.behind.to_string()],
+                    );
+                    ui.add(
+                        egui::Image::new(ICON_WARNING)
+                            .fit_to_exact_size(Vec2::splat(14.0))
+                            .tint(Color32::from_rgb(200, 120, 40)),
+                    )
+                    .on_hover_text(behind_txt);
+                }
                 let should_toggle = btn_resp.clicked();
                 if should_toggle {
                     popup_open = !popup_open;
@@ -339,11 +410,18 @@ fn show_repo_row(
                                     if edit_resp.changed() {
                                         branch_filter_changed = true;
                                     }
+                                    if fetching {
+                                        ui.spinner();
+                                    }
                                     if ui
-                                        .add(egui::Button::image(
-                                            egui::Image::new(ICON_REFRESH)
-                                                .fit_to_exact_size(Vec2::splat(12.0)),
-                                        ))
+                                        .add_enabled(
+                                            !fetching,
+                                            egui::Button::image(
+                                                egui::Image::new(ICON_REFRESH)
+                                                    .fit_to_exact_size(Vec2::splat(12.0))
+                                                    .tint(ui.visuals().text_color()),
+                                            ),
+                                        )
                                         .on_hover_text(tr(
                                             config.language,
                                             "branch_refresh_tooltip",
@@ -423,7 +501,14 @@ fn show_repo_row(
                                                     .size(11.0),
                                             );
                                             if ui
-                                                .small_button(tr(config.language, "fetch_now"))
+                                                .add_enabled(
+                                                    !fetching,
+                                                    egui::Button::new(tr(
+                                                        config.language,
+                                                        "fetch_now",
+                                                    ))
+                                                    .small(),
+                                                )
                                                 .clicked()
                                             {
                                                 do_fetch = true;
@@ -1003,7 +1088,9 @@ fn show_repo_row(
                     // Shell Button (per Profil show_shell)
                     if effective_profile.show_shell {
                         let shell_btn = egui::Button::image(
-                            egui::Image::new(ICON_TERMINAL).fit_to_exact_size(Vec2::splat(18.0)),
+                            egui::Image::new(ICON_TERMINAL)
+                                .fit_to_exact_size(Vec2::splat(18.0))
+                                .tint(ui.visuals().text_color()),
                         );
                         let resp = ui
                             .add(shell_btn)
@@ -1026,7 +1113,9 @@ fn show_repo_row(
                     // Explorer Button (per Profil show_explorer)
                     if effective_profile.show_explorer {
                         let explorer_btn = egui::Button::image(
-                            egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(18.0)),
+                            egui::Image::new(ICON_FOLDER)
+                                .fit_to_exact_size(Vec2::splat(18.0))
+                                .tint(ui.visuals().text_color()),
                         );
                         let resp = ui
                             .add(explorer_btn)
@@ -1292,6 +1381,9 @@ mod tests {
         assert_eq!(limited[0], "main");
         let empty_filter = filter_branches(&branches, "xyz", 10);
         assert!(empty_filter.is_empty());
+        // Finding H: limit==0 liefert 0 statt 1 (Push-vor-Check-Falle).
+        assert!(filter_branches(&branches, "", 0).is_empty());
+        assert!(filter_branches(&branches, "feat", 0).is_empty());
     }
 
     #[test]
@@ -1384,5 +1476,118 @@ mod tests {
             a.custom_select,
             Some((PathBuf::from("/tmp/repo"), "db".into(), "prod".into()))
         );
+    }
+
+    #[test]
+    fn sorted_main_repos_last_used_desc() {
+        use crate::config::RepoSortMode;
+        use crate::git::RepoInfo;
+        let mut cfg = AppConfig {
+            main_sort_mode: RepoSortMode::LastUsed,
+            ..Default::default()
+        };
+        let mk = |name: &str| {
+            RepoInfo::new(
+                PathBuf::from(format!("/tmp/{name}")),
+                "main".into(),
+                false,
+                false,
+            )
+        };
+        let repos = vec![mk("aaa"), mk("bbb"), mk("ccc")];
+        // bbb zuletzt benutzt -> zuerst; ccc danach; aaa ungenutzt -> Ende
+        let key_b = AppConfig::repo_state_key(&PathBuf::from("/tmp/bbb"));
+        cfg.repo_usage.entry(key_b).or_default().last_opened = Some(9999);
+        let key_c = AppConfig::repo_state_key(&PathBuf::from("/tmp/ccc"));
+        cfg.repo_usage.entry(key_c).or_default().last_opened = Some(100);
+        let sorted = sorted_main_repos(&repos, &cfg);
+        assert_eq!(sorted[0].name, "bbb");
+        assert_eq!(sorted[1].name, "ccc");
+        assert_eq!(sorted[2].name, "aaa");
+    }
+
+    #[test]
+    fn sorted_main_repos_unused_alphabetical_at_end_and_tie_by_name() {
+        use crate::config::RepoSortMode;
+        use crate::git::RepoInfo;
+        let mut cfg = AppConfig {
+            main_sort_mode: RepoSortMode::LastUsed,
+            ..Default::default()
+        };
+        let mk = |name: &str| {
+            RepoInfo::new(
+                PathBuf::from(format!("/tmp/{name}")),
+                "main".into(),
+                false,
+                false,
+            )
+        };
+        // Gleicher Timestamp -> alphabetisch (tie=name)
+        let repos = vec![mk("zeta"), mk("alpha"), mk("beta")];
+        for n in ["zeta", "alpha", "beta"] {
+            let key = AppConfig::repo_state_key(&PathBuf::from(format!("/tmp/{n}")));
+            cfg.repo_usage.entry(key).or_default().last_opened = Some(500);
+        }
+        let sorted = sorted_main_repos(&repos, &cfg);
+        assert_eq!(sorted[0].name, "alpha");
+        assert_eq!(sorted[1].name, "beta");
+        assert_eq!(sorted[2].name, "zeta");
+        // Ungenutzte alphabetisch am Ende hinter genutzten
+        let repos2 = vec![mk("zeta"), mk("mango"), mk("apple")];
+        let mut cfg2 = AppConfig {
+            main_sort_mode: RepoSortMode::LastUsed,
+            ..Default::default()
+        };
+        let key = AppConfig::repo_state_key(&PathBuf::from("/tmp/mango"));
+        cfg2.repo_usage.entry(key).or_default().last_opened = Some(42);
+        let sorted2 = sorted_main_repos(&repos2, &cfg2);
+        assert_eq!(sorted2[0].name, "mango");
+        assert_eq!(sorted2[1].name, "apple");
+        assert_eq!(sorted2[2].name, "zeta");
+    }
+
+    #[test]
+    fn sorted_main_repos_name_mode_alphabetical() {
+        use crate::config::RepoSortMode;
+        use crate::git::RepoInfo;
+        let mut cfg = AppConfig {
+            main_sort_mode: RepoSortMode::Name,
+            ..Default::default()
+        };
+        let mk = |name: &str| {
+            RepoInfo::new(
+                PathBuf::from(format!("/tmp/{name}")),
+                "main".into(),
+                false,
+                false,
+            )
+        };
+        let repos = vec![mk("zeta"), mk("Alpha"), mk("beta")];
+        // MRU ignorieren: selbst mit Timestamp auf zeta bleibt alpha zuerst
+        let key = AppConfig::repo_state_key(&PathBuf::from("/tmp/zeta"));
+        cfg.repo_usage.entry(key).or_default().last_opened = Some(99999);
+        let sorted = sorted_main_repos(&repos, &cfg);
+        assert_eq!(sorted[0].name, "Alpha");
+        assert_eq!(sorted[1].name, "beta");
+        assert_eq!(sorted[2].name, "zeta");
+    }
+
+    #[test]
+    fn branch_button_tooltip_embeds_behind() {
+        use crate::i18n::Language;
+        let clean_en = branch_button_tooltip(Language::En, "main", false, 0);
+        assert!(clean_en.contains("main"));
+        assert!(!clean_en.contains("Behind"));
+        let behind_en = branch_button_tooltip(Language::En, "main", false, 3);
+        assert!(behind_en.contains("main"));
+        assert!(behind_en.contains('3'));
+        assert!(behind_en.contains("Behind"));
+        let behind_de = branch_button_tooltip(Language::De, "main", false, 2);
+        assert!(behind_de.contains('2'));
+        assert!(behind_de.contains("hinterher"));
+        let detached = branch_button_tooltip(Language::En, "abc1234", true, 0);
+        assert!(detached.contains("Detached"));
+        let detached_behind = branch_button_tooltip(Language::En, "abc1234", true, 1);
+        assert!(detached_behind.contains('1'));
     }
 }

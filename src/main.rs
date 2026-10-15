@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod autostart;
 mod config;
 mod config_parser;
 mod git;
@@ -33,6 +34,32 @@ fn load_icon() -> Option<std::sync::Arc<egui::IconData>> {
     None
 }
 
+/// F3#6: max. Crash-Logs im Verzeichnis — älteste (Namen enthalten
+/// ms-Timestamp, lexikografisch ≈ chronologisch) löschen.
+const MAX_CRASH_LOGS: usize = 20;
+
+fn prune_crash_logs(dir: &std::path::Path) {
+    let mut logs: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with("gitmanager_crash-"))
+                        && p.extension().is_some_and(|x| x == "log")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    logs.sort();
+    // Auf < MAX kürzen (neue Datei danach → max. MAX gesamt).
+    // len >= MAX impliziert nicht-leer — Index 0 existiert.
+    while logs.len() >= MAX_CRASH_LOGS {
+        let _ = std::fs::remove_file(&logs[0]);
+        logs.remove(0);
+    }
+}
+
 fn crash_log_filename() -> String {
     // Prozessweiter Zähler: Doppel-Panic innerhalb derselben Millisekunde
     // (Panic-während-Panic, Destruktor-Panic bei Unwind) darf nie kollidieren.
@@ -45,7 +72,21 @@ fn crash_log_filename() -> String {
     format!("gitmanager_crash-{}-{}-{}.log", ms, std::process::id(), n)
 }
 
+/// N6: `--minimized` an genau einer Stelle entschieden (Single Source) —
+/// `main()` (Viewport) und `MyApp::new` (window_visible) nutzen beide das.
+/// Nur auf Windows (ohne Tray kein Rückweg ins unsichtbare Fenster).
+pub fn start_minimized_flag() -> bool {
+    cfg!(target_os = "windows") && std::env::args().any(|a| a == "--minimized")
+}
+
 fn main() -> eframe::Result<()> {
+    // P2a: globaler Connect-Timeout für libgit2 (Default: OS-TCP, bei
+    // Blackhole-Remotes minutenlang). Gilt prozessweit für alle Fetches;
+    // betrifft nur die Connect-Phase, nicht langsame Transfers.
+    // P2a: globaler Connect-Timeout für libgit2 (Default: OS-TCP, bei
+    // Blackhole-Remotes minutenlang). Gilt prozessweit für alle Fetches;
+    // betrifft nur die Connect-Phase, nicht langsame Transfers.
+    let _ = unsafe { git2::opts::set_server_connect_timeout_in_milliseconds(30_000) };
     // Panic hook für Tray-Crashes (F-17): vorherigen Hook chainen, Crash-Log mit
     // Millisekunden-Timestamp + PID (keine Kollision pro Sekunde) nach
     // ProjectDirs::from("com","gitmanager","gitmanager").data_local_dir()
@@ -71,6 +112,9 @@ fn main() -> eframe::Result<()> {
             directories::ProjectDirs::from("com", "gitmanager", "gitmanager").map(|dirs| {
                 let dir = dirs.data_local_dir().to_path_buf();
                 let _ = std::fs::create_dir_all(&dir);
+                // F3#6: Rotation — max. N Logs behalten (abgefangene Panics
+                // aus catch_unwind würden sonst unbegrenzt ansammeln).
+                prune_crash_logs(&dir);
                 let path = dir.join(&filename);
                 std::fs::write(&path, &msg).map(|_| path.display().to_string())
             });
@@ -89,10 +133,15 @@ fn main() -> eframe::Result<()> {
     }));
 
     let icon = load_icon();
+    // M1: --minimized für Autostart (Tray-Start ohne volles Fenster).
+    let start_minimized = start_minimized_flag();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1080.0, 680.0])
         .with_min_inner_size([920.0, 560.0])
         .with_title("GitManager - Git Repository Manager");
+    if start_minimized {
+        viewport = viewport.with_visible(false);
+    }
 
     if let Some(icon_data) = icon {
         viewport = viewport.with_icon(icon_data);
@@ -123,6 +172,65 @@ mod tests {
             names.insert(crash_log_filename());
         }
         assert_eq!(names.len(), 100);
+    }
+
+    #[test]
+    fn start_minimized_flag_off_without_arg() {
+        // N6: Test-Runner läuft ohne --minimized → Flag aus.
+        // (Mit Flag ließe sich env nicht setzen — Verhalten via Codepfad klar.)
+        assert!(!start_minimized_flag());
+    }
+
+    #[test]
+    fn prune_crash_logs_keeps_newest_twenty() {
+        // F3#6: Rotation deckelt die Dateien (abgefangene Panics sonst endlos).
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..25 {
+            std::fs::write(
+                dir.path().join(format!("gitmanager_crash-{i:03}-1-0.log")),
+                "x",
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.path().join("other.txt"), "x").unwrap();
+        prune_crash_logs(dir.path());
+        let logs: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("gitmanager_crash-"))
+            .collect();
+        // Prune kürzt auf MAX-1 (neue Datei danach → max. MAX gesamt).
+        assert_eq!(
+            logs.len(),
+            MAX_CRASH_LOGS - 1,
+            "must prune to MAX-1, got {logs:?}"
+        );
+        assert!(
+            !logs.iter().any(|n| n.contains("-000-")),
+            "oldest must be gone: {logs:?}"
+        );
+        assert!(
+            logs.iter().any(|n| n.contains("-024-")),
+            "newest must be kept: {logs:?}"
+        );
+        assert!(
+            dir.path().join("other.txt").exists(),
+            "foreign files untouched"
+        );
+    }
+
+    #[test]
+    fn libgit2_connect_timeout_roundtrips() {
+        // P2a: Timeout-Optik existiert und ist setzbar (schützt vor
+        // Blackhole-Hängern); main() setzt 30 s, hier Roundtrip prüfen.
+        unsafe {
+            git2::opts::set_server_connect_timeout_in_milliseconds(30_000).unwrap();
+            assert_eq!(
+                git2::opts::get_server_connect_timeout_in_milliseconds().unwrap(),
+                30_000
+            );
+        }
     }
 
     #[test]

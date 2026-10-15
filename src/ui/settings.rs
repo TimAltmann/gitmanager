@@ -1,4 +1,7 @@
-use crate::config::{AgentProfile, AppConfig, IdeConfig, LanguageProfile, TerminalPreference};
+use crate::config::{
+    AgentProfile, AppConfig, IdeConfig, LanguageProfile, RepoSortMode, TerminalPreference,
+    TrayIconTheme,
+};
 use crate::i18n::{tr, tr_fmt, Language};
 use egui::{Color32, RichText, Vec2};
 use std::path::PathBuf;
@@ -404,7 +407,9 @@ pub fn show_settings_window(
                         );
                         if ui
                             .add(egui::Button::image(
-                                egui::Image::new(ICON_CROSS).fit_to_exact_size(Vec2::splat(12.0)),
+                                egui::Image::new(ICON_CROSS)
+                                    .tint(ui.visuals().text_color())
+                                    .fit_to_exact_size(Vec2::splat(12.0)),
                             ))
                             .clicked()
                         {
@@ -436,7 +441,9 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add(egui::Button::image_and_text(
-                    egui::Image::new(ICON_PLUS).fit_to_exact_size(Vec2::splat(14.0)),
+                    egui::Image::new(ICON_PLUS)
+                        .tint(ui.visuals().text_color())
+                        .fit_to_exact_size(Vec2::splat(14.0)),
                     "Hinzufügen",
                 ))
                 .clicked()
@@ -478,7 +485,9 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
             }
             if ui
                 .add(egui::Button::image(
-                    egui::Image::new(ICON_TRASH).fit_to_exact_size(Vec2::splat(14.0)),
+                    egui::Image::new(ICON_TRASH)
+                        .tint(ui.visuals().text_color())
+                        .fit_to_exact_size(Vec2::splat(14.0)),
                 ))
                 .on_hover_text("Entfernen")
                 .clicked()
@@ -487,7 +496,9 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
             }
             if ui
                 .add(egui::Button::image(
-                    egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(14.0)),
+                    egui::Image::new(ICON_FOLDER)
+                        .tint(ui.visuals().text_color())
+                        .fit_to_exact_size(Vec2::splat(14.0)),
                 ))
                 .on_hover_text("Durchsuchen")
                 .clicked()
@@ -668,6 +679,98 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
             );
         }
     }
+    // Autostart via Registry Run-Key (neben Update-Check im General-Tab)
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    {
+        let lang = state.draft.language;
+        let mut autostart = state.draft.autostart;
+        if ui
+            .checkbox(&mut autostart, tr(lang, "autostart_label"))
+            .changed()
+        {
+            state.draft.autostart = autostart;
+        }
+        ui.label(
+            RichText::new(tr(lang, "autostart_hint"))
+                .size(10.0)
+                .color(Color32::from_rgb(120, 120, 120))
+                .italics(),
+        );
+    }
+    // Task 4: Sortierung Hauptliste (Spiegel zum Top-Bar-Umschalter)
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    {
+        let lang = state.draft.language;
+        ui.label(RichText::new(tr(lang, "sort_title")).size(13.0).strong());
+        ui.add_space(4.0);
+        let selected = match state.draft.main_sort_mode {
+            RepoSortMode::LastUsed => tr(lang, "sort_by_last_used"),
+            RepoSortMode::Name => tr(lang, "sort_by_name"),
+        };
+        egui::ComboBox::from_id_salt("sort_mode_general")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for mode in RepoSortMode::all() {
+                    let label = match mode {
+                        RepoSortMode::LastUsed => tr(lang, "sort_by_last_used"),
+                        RepoSortMode::Name => tr(lang, "sort_by_name"),
+                    };
+                    if ui
+                        .selectable_label(state.draft.main_sort_mode == mode, label)
+                        .clicked()
+                    {
+                        state.draft.main_sort_mode = mode;
+                    }
+                }
+            })
+            .response
+            .on_hover_text(tr(lang, "sort_tooltip"));
+    }
+    // Task 5: Auto-Fetch Intervall (0 = aus, Default 10)
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    {
+        let lang = state.draft.language;
+        ui.label(
+            RichText::new(tr(lang, "auto_fetch_label"))
+                .size(13.0)
+                .strong(),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(tr(lang, "auto_fetch_hint"))
+                .size(11.0)
+                .color(Color32::from_rgb(100, 100, 100)),
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let mut mins = state.draft.auto_fetch_interval_min;
+            let off_txt = tr(lang, "auto_fetch_off");
+            let unit = if mins == 0 {
+                off_txt
+            } else {
+                "min".to_string()
+            };
+            let slider = egui::Slider::new(&mut mins, 0..=120).text(unit);
+            if ui.add(slider).changed() {
+                state.draft.auto_fetch_interval_min = mins;
+            }
+        });
+        ui.horizontal(|ui| {
+            let mut mins = state.draft.auto_fetch_interval_min;
+            if ui
+                .add(egui::DragValue::new(&mut mins).range(0..=120).speed(1.0))
+                .changed()
+            {
+                state.draft.auto_fetch_interval_min = mins.min(120);
+            }
+        });
+    }
 }
 
 fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
@@ -694,7 +797,9 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add(egui::Button::image_and_text(
-                    egui::Image::new(ICON_PLUS).fit_to_exact_size(Vec2::splat(14.0)),
+                    egui::Image::new(ICON_PLUS)
+                        .tint(ui.visuals().text_color())
+                        .fit_to_exact_size(Vec2::splat(14.0)),
                     "Neues Profil",
                 ))
                 .clicked()
@@ -791,7 +896,9 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     }
                     if ui
                         .add(egui::Button::image_and_text(
-                            egui::Image::new(ICON_TRASH).fit_to_exact_size(Vec2::splat(12.0)),
+                            egui::Image::new(ICON_TRASH)
+                                .tint(ui.visuals().text_color())
+                                .fit_to_exact_size(Vec2::splat(12.0)),
                             "Löschen",
                         ))
                         .clicked()
@@ -1019,6 +1126,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         .add(
                                             egui::Button::image(
                                                 egui::Image::new(ICON_TRASH)
+                                                    .tint(ui.visuals().text_color())
                                                     .fit_to_exact_size(Vec2::splat(14.0)),
                                             )
                                         )
@@ -1201,6 +1309,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         .add(
                                             egui::Button::image(
                                                 egui::Image::new(ICON_FOLDER)
+                                                    .tint(ui.visuals().text_color())
                                                     .fit_to_exact_size(Vec2::splat(14.0)),
                                             )
                                         )
@@ -1230,7 +1339,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         && ui
                                             .add(
                                                 egui::Button::image(
-                                                    egui::Image::new(ICON_TRASH)
+                                                    egui::Image::new(ICON_TRASH).tint(ui.visuals().text_color())
                                                         .fit_to_exact_size(Vec2::splat(14.0)),
                                                 )
                                             )
@@ -1301,7 +1410,9 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
 
             if ui
                 .add(egui::Button::image_and_text(
-                    egui::Image::new(ICON_PLUS).fit_to_exact_size(Vec2::splat(14.0)),
+                    egui::Image::new(ICON_PLUS)
+                        .tint(ui.visuals().text_color())
+                        .fit_to_exact_size(Vec2::splat(14.0)),
                     "IDE hinzufügen",
                 ))
                 .clicked()
@@ -1379,7 +1490,9 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .add(egui::Button::image_and_text(
-                            egui::Image::new(ICON_PLUS).fit_to_exact_size(Vec2::splat(14.0)),
+                            egui::Image::new(ICON_PLUS)
+                                .tint(ui.visuals().text_color())
+                                .fit_to_exact_size(Vec2::splat(14.0)),
                             "Selector hinzufügen",
                         ))
                         .clicked()
@@ -1453,6 +1566,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                     if ui
                                         .add(egui::Button::image(
                                             egui::Image::new(ICON_TRASH)
+                                                .tint(ui.visuals().text_color())
                                                 .fit_to_exact_size(Vec2::splat(12.0)),
                                         ))
                                         .on_hover_text("Löschen")
@@ -1463,6 +1577,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                     if ui
                                         .add(egui::Button::image(
                                             egui::Image::new(ICON_CHEVRON_DOWN)
+                                                .tint(ui.visuals().text_color())
                                                 .fit_to_exact_size(Vec2::splat(14.0)),
                                         ))
                                         .clicked()
@@ -1473,6 +1588,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                     if ui
                                         .add(egui::Button::image(
                                             egui::Image::new(ICON_CHEVRON_UP)
+                                                .tint(ui.visuals().text_color())
                                                 .fit_to_exact_size(Vec2::splat(14.0)),
                                         ))
                                         .clicked()
@@ -1550,6 +1666,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                 if ui
                                     .add(egui::Button::image(
                                         egui::Image::new(ICON_TRASH)
+                                            .tint(ui.visuals().text_color())
                                             .fit_to_exact_size(Vec2::splat(12.0)),
                                     ))
                                     .on_hover_text("Option löschen")
@@ -1567,6 +1684,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                             if ui
                                 .add(egui::Button::image_and_text(
                                     egui::Image::new(ICON_PLUS)
+                                        .tint(ui.visuals().text_color())
                                         .fit_to_exact_size(Vec2::splat(12.0)),
                                     "Option",
                                 ))
@@ -1613,7 +1731,9 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             }
             if ui
                 .add(egui::Button::image_and_text(
-                    egui::Image::new(ICON_PLUS).fit_to_exact_size(Vec2::splat(14.0)),
+                    egui::Image::new(ICON_PLUS)
+                        .tint(ui.visuals().text_color())
+                        .fit_to_exact_size(Vec2::splat(14.0)),
                     "Selector hinzufügen",
                 ))
                 .clicked()
@@ -1675,7 +1795,9 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add(egui::Button::image_and_text(
-                    egui::Image::new(ICON_PLUS).fit_to_exact_size(Vec2::splat(14.0)),
+                    egui::Image::new(ICON_PLUS)
+                        .tint(ui.visuals().text_color())
+                        .fit_to_exact_size(Vec2::splat(14.0)),
                     "Neuer Agent",
                 ))
                 .clicked()
@@ -1749,7 +1871,9 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     }
                     if ui
                         .add(egui::Button::image_and_text(
-                            egui::Image::new(ICON_TRASH).fit_to_exact_size(Vec2::splat(12.0)),
+                            egui::Image::new(ICON_TRASH)
+                                .tint(ui.visuals().text_color())
+                                .fit_to_exact_size(Vec2::splat(12.0)),
                             "Löschen",
                         ))
                         .clicked()
@@ -1980,7 +2104,9 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         }
                         if ui
                             .add(egui::Button::image(
-                                egui::Image::new(ICON_FOLDER).fit_to_exact_size(Vec2::splat(14.0)),
+                                egui::Image::new(ICON_FOLDER)
+                                    .tint(ui.visuals().text_color())
+                                    .fit_to_exact_size(Vec2::splat(14.0)),
                             ))
                             .on_hover_text("Icon wählen (svg, png, ico, jpg - max 2 MB)")
                             .clicked()
@@ -2008,6 +2134,7 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                             && ui
                                 .add(egui::Button::image(
                                     egui::Image::new(ICON_TRASH)
+                                        .tint(ui.visuals().text_color())
                                         .fit_to_exact_size(Vec2::splat(14.0)),
                                 ))
                                 .on_hover_text("Custom Icon entfernen")
@@ -2418,9 +2545,16 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             let is_hidden = profile.hidden_ide_ids.contains(ide_id);
             ui.horizontal(|ui| {
                 let eye_icon = if is_hidden { ICON_EYE_OFF } else { ICON_EYE };
+                let eye_tint = if is_hidden {
+                    ui.visuals().weak_text_color()
+                } else {
+                    ui.visuals().text_color()
+                };
                 if ui
                     .add(egui::Button::image(
-                        egui::Image::new(eye_icon).fit_to_exact_size(Vec2::splat(14.0)),
+                        egui::Image::new(eye_icon)
+                            .fit_to_exact_size(Vec2::splat(14.0))
+                            .tint(eye_tint),
                     ))
                     .on_hover_text(tr(lang, "icons_toggle_visibility"))
                     .clicked()
@@ -2441,6 +2575,7 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     if ui
                         .add(egui::Button::image(
                             egui::Image::new(ICON_CHEVRON_DOWN)
+                                .tint(ui.visuals().text_color())
                                 .fit_to_exact_size(Vec2::splat(14.0)),
                         ))
                         .clicked()
@@ -2450,7 +2585,9 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     }
                     if ui
                         .add(egui::Button::image(
-                            egui::Image::new(ICON_CHEVRON_UP).fit_to_exact_size(Vec2::splat(14.0)),
+                            egui::Image::new(ICON_CHEVRON_UP)
+                                .tint(ui.visuals().text_color())
+                                .fit_to_exact_size(Vec2::splat(14.0)),
                         ))
                         .clicked()
                         && order_idx > 0
@@ -2525,9 +2662,16 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             let is_active = state.draft.active_agent_ids.contains(agent_id);
             ui.horizontal(|ui| {
                 let eye_icon = if is_hidden { ICON_EYE_OFF } else { ICON_EYE };
+                let eye_tint = if is_hidden {
+                    ui.visuals().weak_text_color()
+                } else {
+                    ui.visuals().text_color()
+                };
                 if ui
                     .add(egui::Button::image(
-                        egui::Image::new(eye_icon).fit_to_exact_size(Vec2::splat(14.0)),
+                        egui::Image::new(eye_icon)
+                            .fit_to_exact_size(Vec2::splat(14.0))
+                            .tint(eye_tint),
                     ))
                     .on_hover_text(tr(lang, "icons_toggle_visibility"))
                     .clicked()
@@ -2548,6 +2692,7 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     if ui
                         .add(egui::Button::image(
                             egui::Image::new(ICON_CHEVRON_DOWN)
+                                .tint(ui.visuals().text_color())
                                 .fit_to_exact_size(Vec2::splat(14.0)),
                         ))
                         .clicked()
@@ -2557,7 +2702,9 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     }
                     if ui
                         .add(egui::Button::image(
-                            egui::Image::new(ICON_CHEVRON_UP).fit_to_exact_size(Vec2::splat(14.0)),
+                            egui::Image::new(ICON_CHEVRON_UP)
+                                .tint(ui.visuals().text_color())
+                                .fit_to_exact_size(Vec2::splat(14.0)),
                         ))
                         .clicked()
                         && order_idx > 0
@@ -2681,6 +2828,35 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     );
     ui.add_space(12.0);
 
+    // Tray-Icon Stil (Dark/Light) — konfigurierbar ob Dark- oder Light-Icon.
+    ui.label(
+        RichText::new(tr(lang, "tray_icon_theme_title"))
+            .size(12.0)
+            .strong(),
+    );
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(tr(lang, "tray_icon_theme_desc"))
+            .size(11.0)
+            .color(Color32::from_rgb(100, 100, 100)),
+    );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.radio_value(
+            &mut state.draft.tray_icons.icon_theme,
+            TrayIconTheme::Dark,
+            tr(lang, "tray_icon_theme_dark"),
+        );
+        ui.radio_value(
+            &mut state.draft.tray_icons.icon_theme,
+            TrayIconTheme::Light,
+            tr(lang, "tray_icon_theme_light"),
+        );
+    });
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(8.0);
+
     // Max display slider
     ui.label(
         RichText::new(tr(lang, "tray_max_display"))
@@ -2759,9 +2935,16 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         let is_hidden = state.draft.tray_icons.hidden_icon_ids.contains(icon_id);
         ui.horizontal(|ui| {
             let eye_icon = if is_hidden { ICON_EYE_OFF } else { ICON_EYE };
+            let eye_tint = if is_hidden {
+                ui.visuals().weak_text_color()
+            } else {
+                ui.visuals().text_color()
+            };
             if ui
                 .add(egui::Button::image(
-                    egui::Image::new(eye_icon).fit_to_exact_size(Vec2::splat(14.0)),
+                    egui::Image::new(eye_icon)
+                        .fit_to_exact_size(Vec2::splat(14.0))
+                        .tint(eye_tint),
                 ))
                 .on_hover_text(tr(lang, "icons_toggle_visibility"))
                 .clicked()
@@ -2781,7 +2964,9 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add(egui::Button::image(
-                        egui::Image::new(ICON_CHEVRON_DOWN).fit_to_exact_size(Vec2::splat(14.0)),
+                        egui::Image::new(ICON_CHEVRON_DOWN)
+                            .tint(ui.visuals().text_color())
+                            .fit_to_exact_size(Vec2::splat(14.0)),
                     ))
                     .clicked()
                     && order_idx + 1 < effective.len()
@@ -2790,7 +2975,9 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                 }
                 if ui
                     .add(egui::Button::image(
-                        egui::Image::new(ICON_CHEVRON_UP).fit_to_exact_size(Vec2::splat(14.0)),
+                        egui::Image::new(ICON_CHEVRON_UP)
+                            .tint(ui.visuals().text_color())
+                            .fit_to_exact_size(Vec2::splat(14.0)),
                     ))
                     .clicked()
                     && order_idx > 0
@@ -2924,6 +3111,7 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         state.draft.tray_icons.hidden_icon_ids.clear();
         state.draft.tray_icons.icon_order.clear();
         state.draft.tray_icons.max_display = 10;
+        state.draft.tray_icons.icon_theme = TrayIconTheme::Dark;
     }
     if state.draft.tray_icons.hidden_icon_ids.len() == DEFAULT_TRAY_ICON_IDS.len() {
         ui.colored_label(
