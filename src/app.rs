@@ -1,19 +1,21 @@
 mod merge_requests;
+mod mr_checkout;
 
-use crate::config::{AppConfig, RepoSortMode};
-use crate::git::{launch_agent, launch_ide, RepoInfo};
+use crate::config::{AfterAction, AppConfig, RepoSortMode};
+use crate::git::{launch_agent, launch_ide, MrPrep, RepoInfo};
 use crate::gitlab::glab::{GatedRunner, GlabErrorKind, GlabRunner, SystemGlab};
 use crate::gitlab::model::MrSnapshot;
 use crate::gitlab::remote::{GlabHost, HostMap, LocalProject};
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::scanner::scan_repos;
 use crate::ui::{
-    merge_requests::MrViewState,
-    repo_list::{show_repo_list, sort_main_repos, RepoListActions},
+    merge_requests::{MrCheckoutChoice, MrViewState},
+    repo_list::{show_repo_list, sort_main_repos, RepoHighlight, RepoListActions},
     settings::SettingsState,
 };
 use egui::{Color32, RichText, Vec2};
 use merge_requests::{top_bar_button, MrResult, TOP_BAR_CAPTIONS_WIDTH, TOP_BAR_COMPACT_WIDTH};
+use mr_checkout::{MrCheckoutFailure, MrSwitch};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -37,6 +39,12 @@ enum ScanResult {
     /// Fehler zurück, rührt `repos` bewusst NICHT an (kein Listen-Wipe).
     FetchAborted {
         reason_key: &'static str,
+    },
+    /// K1: Auschecken eines MR fertig; `Ok(None)` nach dem Klonen, sonst
+    /// der vorbereitete lokale Branch (Worktree, bestehender Klon).
+    MrCheckoutReady {
+        choice: Box<MrCheckoutChoice>,
+        result: Result<Option<MrPrep>, MrCheckoutFailure>,
     },
 }
 
@@ -323,6 +331,16 @@ pub struct MyApp {
     /// (außer „Aktualisieren“); `mr_glab_error` trägt die Art für die Karte
     mr_glab_missing: bool,
     mr_glab_error: Option<GlabErrorKind>,
+    /// K1: Auschecken läuft für diesen MR (`iid`); hält `scanning` als Ref-Lock
+    mr_checkout_busy: Option<u64>,
+    /// K1: Wechsel eines bestehenden Klons wartet auf `execute_branch_switch`
+    mr_switch: Option<MrSwitch>,
+    /// K1: „Danach öffnen“ mit der IDE wartet auf den Rescan
+    pending_after_checkout: Option<(PathBuf, AfterAction)>,
+    /// K1: Hinweis in der MR-Ansicht (divergierter Branch); überlebt Rescans
+    mr_notice: Option<String>,
+    /// „In Repo-Liste zeigen“: hervorgehobene Karte und seit wann
+    repo_highlight: Option<(RepoHighlight, std::time::Instant)>,
 }
 
 impl MyApp {
@@ -415,6 +433,11 @@ impl MyApp {
             mr_view,
             mr_glab_missing: false,
             mr_glab_error: None,
+            mr_checkout_busy: None,
+            mr_switch: None,
+            pending_after_checkout: None,
+            mr_notice: None,
+            repo_highlight: None,
         };
         #[cfg(target_os = "windows")]
         {
@@ -525,6 +548,11 @@ impl MyApp {
 
     fn start_scan(&mut self) {
         if self.scanning {
+            // K1: das Auschecken hält `scanning` ohne abschließenden Scan –
+            // Wunsch merken, `poll_scan` holt ihn danach nach
+            if self.mr_checkout_busy.is_some() {
+                self.pending_scan = true;
+            }
             return;
         }
         // L2: kein paralleler Lauf zum Auto-Fetch — zwei libgit2-Fetches
@@ -577,6 +605,8 @@ impl MyApp {
                     self.pending_scan = false;
                     self.error = None;
                     self.mr_after_scan();
+                    // K1: IDE nach dem Auschecken, sobald der Ordner bekannt ist
+                    self.run_pending_after_checkout();
                     // Review-Fix: dirty VOR dem direkten Sync markieren — bei
                     // WouldBlock bleibt das Flag (Backstop in sync_tray_service).
                     self.mark_tray_dirty();
@@ -633,6 +663,7 @@ impl MyApp {
                     } else {
                         self.error = None;
                     }
+                    self.run_pending_after_checkout();
                     self.mark_tray_dirty();
                     self.sync_tray_service();
                     ctx.request_repaint();
@@ -643,6 +674,7 @@ impl MyApp {
                     // Wie Auto-FetchDone als Intervall-Ende werten (kein
                     // sofortiges Back-to-Back mit Panic-Loop).
                     self.scanning = false;
+                    self.mr_checkout_busy = None;
                     self.auto_fetching = false;
                     self.last_auto_fetch = Some(std::time::Instant::now());
                     // F1#F2: gemerkten Refresh auch nach Abort nachholen
@@ -660,6 +692,14 @@ impl MyApp {
                     self.error = Some(msg.clone());
                     self.status_message = Some(msg);
                     self.status_message_time = Some(std::time::Instant::now());
+                    self.mark_tray_dirty();
+                    ctx.request_repaint();
+                }
+                ScanResult::MrCheckoutReady { choice, result } => {
+                    // K1: Ref-Lock lösen; dann Rescan, Wechsel oder Fehler
+                    self.scanning = false;
+                    self.mr_checkout_busy = None;
+                    self.on_mr_checkout_ready(*choice, result);
                     self.mark_tray_dirty();
                     ctx.request_repaint();
                 }
@@ -755,9 +795,20 @@ impl MyApp {
                 }
                 self.handle_branch_switch(ctx, path, branch);
             }
+            // K1: MR-Wechsel ohne Ausführung und ohne eigenen Dialog verwerfen
+            self.drop_stale_mr_switch();
             // Dialog/Fehler landen in branch_dialog/error ohne direkten Sync
             // (#3 Badge) → dirty, damit der nächste Throttle-Sync übernimmt.
             self.mark_tray_dirty();
+        }
+        // K1: während des Auscheckens angefragten Scan nachholen – erst nach
+        // dem Wechsel oben, sonst liest er den alten Stand. Ein Fehler des
+        // Auscheckens bleibt bis zum Scan-Ergebnis stehen (wie nach Abort).
+        if self.pending_scan && !self.scanning && !self.auto_fetching {
+            self.pending_scan = false;
+            let error = self.error.take();
+            self.start_scan();
+            self.error = error;
         }
     }
 }
@@ -1449,6 +1500,150 @@ impl MyApp {
         }
     }
 
+    /// Öffnet `path` mit der IDE `ide_id` des wirksamen Profils (Repo-Karte
+    /// und MR-Ansicht); `file` = Solution/Projektdatei, bei `no_args` nur der
+    /// Ordner. Merkt die IDE-Wahl. `true`, wenn die IDE gestartet wurde.
+    fn open_ide(&mut self, path: &Path, ide_id: &str, file: &Path) -> bool {
+        self.open_ide_in(path, path, ide_id, file)
+    }
+
+    /// Wie [`Self::open_ide`], die IDE kommt aber aus dem wirksamen Profil
+    /// von `profile_path` (K1: Worktree außerhalb der Suchpfade mit der IDE
+    /// des Basis-Klons).
+    fn open_ide_in(&mut self, path: &Path, profile_path: &Path, ide_id: &str, file: &Path) -> bool {
+        let lang = self.config.language;
+        // Speichere letzte IDE Wahl
+        {
+            let state = self.config.get_repo_state_mut(path);
+            state.selected_ide = Some(ide_id.to_string());
+            // Review-Fix: Tray-Snapshot sonst stale.
+            self.mark_tray_dirty();
+            if let Err(e) = self.config.save() {
+                self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+            }
+        }
+        let mut started = false;
+        // Finde IdeConfig
+        let profile = self.config.get_effective_profile_for_repo(profile_path);
+        if let Some(ide) = profile.ides.iter().find(|i| i.id == ide_id) {
+            let file_opt = if ide.no_args { None } else { Some(file) };
+            let display_path = file_opt
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            match launch_ide(ide, path, file_opt) {
+                Ok(()) => {
+                    self.status_message = Some(tr_fmt(
+                        lang,
+                        "opening_with",
+                        &[&display_path, &ide.display_name],
+                    ));
+                    self.status_message_time = Some(std::time::Instant::now());
+                    started = true;
+                }
+                Err(e) => {
+                    self.error = Some(format!(
+                        "IDE '{}' konnte nicht gestartet werden: {e:#}",
+                        ide.display_name
+                    ));
+                }
+            }
+        } else {
+            self.error = Some(tr_fmt(
+                lang,
+                "ide_not_found",
+                &[ide_id, &profile.display_name],
+            ));
+        }
+        self.record_usage(path, UsageType::Open);
+        started
+    }
+
+    /// Agent mit dieser ID, sonst der aktive (wie die Repo-Karte).
+    fn agent_by_id(&self, agent_id: &str) -> Option<&crate::config::AgentProfile> {
+        self.config
+            .agents
+            .iter()
+            .find(|a| a.id == agent_id)
+            .or_else(|| self.config.get_active_agent())
+    }
+
+    /// Startet den Agenten `agent_id` (sonst den aktiven) im Terminal in
+    /// `path`. `true`, wenn ein Agent gestartet wurde.
+    fn open_agent(&mut self, path: &Path, agent_id: &str) -> bool {
+        let lang = self.config.language;
+        let started = if let Some(agent) = self.agent_by_id(agent_id).cloned() {
+            let term_pref = agent
+                .terminal_override
+                .clone()
+                .unwrap_or_else(|| self.config.terminal.preference.clone());
+            // Nicht blockierend starten (verhindert UI Freeze, besonders bei pwsh/wt)
+            let repo_clone = path.to_path_buf();
+            let display_name = agent.display_name.clone();
+            let err_tx = self.launch_err_tx.clone();
+            self.status_message = Some(tr_fmt(
+                lang,
+                "starting_agent_in",
+                &[&agent.display_name, &path.display().to_string()],
+            ));
+            self.status_message_time = Some(std::time::Instant::now());
+            std::thread::spawn(move || {
+                if let Err(e) = launch_agent(&agent, &repo_clone, &term_pref) {
+                    let _ = err_tx.send(format!(
+                        "Agent '{}' konnte nicht gestartet werden: {e:#}",
+                        display_name
+                    ));
+                }
+            });
+            true
+        } else {
+            self.error = Some(tr_fmt(lang, "agent_not_found", &[agent_id]));
+            false
+        };
+        self.record_usage(path, UsageType::Open);
+        started
+    }
+
+    /// Öffnet `path` im Explorer. `true` bei Erfolg.
+    fn open_explorer(&mut self, path: &Path) -> bool {
+        let opened = match crate::git::open_in_explorer(path) {
+            Ok(()) => {
+                self.status_message = Some(tr_fmt(
+                    self.config.language,
+                    "explorer_opened",
+                    &[&path.display().to_string()],
+                ));
+                self.status_message_time = Some(std::time::Instant::now());
+                true
+            }
+            Err(e) => {
+                self.error = Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"));
+                false
+            }
+        };
+        self.record_usage(path, UsageType::Open);
+        opened
+    }
+
+    /// Öffnet eine Shell in `path` (im Hintergrund; Fehler kommen über
+    /// `launch_err_rx`).
+    fn open_shell(&mut self, path: &Path) {
+        let pref = self.config.terminal.preference.clone();
+        let repo_clone = path.to_path_buf();
+        let err_tx = self.launch_err_tx.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = crate::git::open_shell(&repo_clone, &pref) {
+                let _ = err_tx.send(format!("Shell konnte nicht geöffnet werden: {e:#}"));
+            }
+        });
+        self.status_message = Some(tr_fmt(
+            self.config.language,
+            "shell_opened",
+            &[&path.display().to_string()],
+        ));
+        self.status_message_time = Some(std::time::Instant::now());
+        self.record_usage(path, UsageType::Open);
+    }
+
     fn handle_branch_switch(
         &mut self,
         ctx: &egui::Context,
@@ -1474,11 +1669,13 @@ impl MyApp {
             let has_conflicts = crate::git::has_merge_conflicts(&repo);
             let in_progress = crate::git::is_merge_in_progress(&repo);
             if has_conflicts || in_progress {
-                self.error = Some(format!(
-                    "Branch-Wechsel zu '{}' nicht möglich: Merge-Konflikte oder Merge/Rebase läuft ({:?})",
-                    target_branch,
-                    repo.state()
+                self.error = Some(tr_fmt(
+                    self.config.language,
+                    "branch_switch_blocked",
+                    &[&target_branch, &format!("{:?}", repo.state())],
                 ));
+                // K1: kein Wechsel, also auch kein „Danach öffnen“
+                self.cancel_mr_switch(&repo_path, &target_branch);
                 // I5: echte Fehler müssen bei hidden Window revealen — sonst
                 // klickt der Nutzer im Tray und sieht nichts.
                 self.mark_tray_dirty();
@@ -1522,10 +1719,10 @@ impl MyApp {
         let lang = self.config.language;
         match result {
             Ok(outcome) => {
-                self.status_message = Some(format!(
-                    "Branch zu '{}' gewechselt: {}",
-                    target_branch,
-                    repo_path.display()
+                self.status_message = Some(tr_fmt(
+                    lang,
+                    "branch_switched",
+                    &[&target_branch, &repo_path.display().to_string()],
                 ));
                 self.status_message_time = Some(std::time::Instant::now());
                 self.error = None;
@@ -1539,6 +1736,8 @@ impl MyApp {
                     self.status_message = Some(notice);
                     self.status_message_time = Some(std::time::Instant::now());
                 }
+                // K1: Wechsel aus der MR-Ansicht → MR-Meldung, „Danach öffnen“
+                self.mr_switch_succeeded(&repo_path, &target_branch);
             }
             Err(e) => {
                 // E15: Upstream-/Worktree-Abbruch lokalisiert.
@@ -1547,7 +1746,9 @@ impl MyApp {
                 if let Some(dlg) = &mut self.branch_dialog {
                     dlg.error = Some(detail);
                 } else {
-                    self.error = Some(format!("Branch-Wechsel fehlgeschlagen: {detail}"));
+                    self.error = Some(tr_fmt(lang, "branch_switch_failed", &[&detail]));
+                    // K1: ohne Dialog kein zweiter Versuch
+                    self.cancel_mr_switch(&repo_path, &target_branch);
                 }
                 // Bei stash_and_checkout kann es sein dass stash pop fehlgeschlagen ist, aber checkout ok – dann trotzdem neu scannen
                 // M4: typisiert statt String-Match.
@@ -1770,7 +1971,9 @@ impl MyApp {
                         // E19: in der MR-Ansicht lädt „Aktualisieren“ die MRs neu.
                         let mr_view = self.main_view == MainView::MergeRequests;
                         let busy = if mr_view {
-                            self.mr_loading || self.mr_discovering
+                            self.mr_loading
+                                || self.mr_discovering
+                                || self.mr_checkout_busy.is_some()
                         } else {
                             self.scanning
                         };
@@ -2053,10 +2256,18 @@ impl MyApp {
             });
         }
         if to_close {
-            self.branch_dialog = None;
+            self.close_branch_dialog();
         }
         if let Some((path, branch, force, stash)) = action {
             self.execute_branch_switch(path, branch, force, stash);
+        }
+    }
+
+    /// „Abbrechen“ im Branch-Dialog; ein wartender MR-Wechsel entfällt
+    /// samt „Danach öffnen“ (K1).
+    fn close_branch_dialog(&mut self) {
+        if let Some(dlg) = self.branch_dialog.take() {
+            self.cancel_mr_switch(&dlg.repo_path, &dlg.target_branch);
         }
     }
 
@@ -2295,7 +2506,16 @@ impl eframe::App for MyApp {
                     self.repo_sort_dirty = false;
                 }
                 let fetching = self.scanning;
-                show_repo_list(ui, &mut self.repos, &self.config, &mut actions, fetching);
+                // K1: „In Repo-Liste zeigen“ hebt eine Karte kurz hervor
+                let highlight = self.repo_highlight_frame(&ctx);
+                show_repo_list(
+                    ui,
+                    &mut self.repos,
+                    &self.config,
+                    &mut actions,
+                    fetching,
+                    highlight.as_ref(),
+                );
 
                 // Handle Actions
                 if let Some((repo_path, branch)) = actions.branch_switch {
@@ -2373,88 +2593,10 @@ impl eframe::App for MyApp {
                     }
                 }
                 if let Some((repo_path, ide_id, file_path)) = actions.ide_open {
-                    // Speichere letzte IDE Wahl
-                    {
-                        let state = self.config.get_repo_state_mut(&repo_path);
-                        state.selected_ide = Some(ide_id.clone());
-                        // Review-Fix: Tray-Snapshot sonst stale.
-                        self.mark_tray_dirty();
-                        if let Err(e) = self.config.save() {
-                            self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
-                        }
-                    }
-                    // Finde IdeConfig
-                    let profile = self.config.get_effective_profile_for_repo(&repo_path);
-                    if let Some(ide) = profile.ides.iter().find(|i| i.id == ide_id) {
-                        let file_opt = if ide.no_args {
-                            None
-                        } else {
-                            Some(file_path.as_path())
-                        };
-                        let display_path = file_opt
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| repo_path.display().to_string());
-                        match launch_ide(ide, &repo_path, file_opt) {
-                            Ok(()) => {
-                                self.status_message = Some(tr_fmt(
-                                    lang,
-                                    "opening_with",
-                                    &[&display_path, &ide.display_name],
-                                ));
-                                self.status_message_time = Some(std::time::Instant::now());
-                            }
-                            Err(e) => {
-                                self.error = Some(format!(
-                                    "IDE '{}' konnte nicht gestartet werden: {e:#}",
-                                    ide.display_name
-                                ));
-                            }
-                        }
-                    } else {
-                        self.error = Some(tr_fmt(
-                            lang,
-                            "ide_not_found",
-                            &[&ide_id, &profile.display_name],
-                        ));
-                    }
-                    self.record_usage(&repo_path, UsageType::Open);
+                    self.open_ide(&repo_path, &ide_id, &file_path);
                 }
                 if let Some((repo_path, agent_id)) = actions.agent_open {
-                    let agent = self
-                        .config
-                        .agents
-                        .iter()
-                        .find(|a| a.id == agent_id)
-                        .cloned()
-                        .or_else(|| self.config.get_active_agent().cloned());
-                    if let Some(agent) = agent {
-                        let term_pref = agent
-                            .terminal_override
-                            .clone()
-                            .unwrap_or_else(|| self.config.terminal.preference.clone());
-                        // Nicht blockierend starten (verhindert UI Freeze, besonders bei pwsh/wt)
-                        let repo_clone = repo_path.clone();
-                        let agent_clone = agent.clone();
-                        let display_name = agent.display_name.clone();
-                        let err_tx = self.launch_err_tx.clone();
-                        std::thread::spawn(move || {
-                            if let Err(e) = launch_agent(&agent_clone, &repo_clone, &term_pref) {
-                                let _ = err_tx.send(format!(
-                                    "Agent '{}' konnte nicht gestartet werden: {e:#}",
-                                    display_name
-                                ));
-                            }
-                        });
-                        self.status_message = Some(tr_fmt(
-                            lang,
-                            "starting_agent_in",
-                            &[&agent.display_name, &repo_path.display().to_string()],
-                        ));
-                        self.status_message_time = Some(std::time::Instant::now());
-                    } else {
-                        self.error = Some(tr_fmt(lang, "agent_not_found", &[&agent_id]));
-                    }
-                    self.record_usage(&repo_path, UsageType::Open);
+                    self.open_agent(&repo_path, &agent_id);
                 }
                 if let Some((repo_path, profile_opt)) = actions.profile_override {
                     self.config
@@ -2533,39 +2675,10 @@ impl eframe::App for MyApp {
                     });
                 }
                 if let Some(repo_path) = actions.explorer_open {
-                    match crate::git::open_in_explorer(&repo_path) {
-                        Ok(()) => {
-                            self.status_message = Some(tr_fmt(
-                                lang,
-                                "explorer_opened",
-                                &[&repo_path.display().to_string()],
-                            ));
-                            self.status_message_time = Some(std::time::Instant::now());
-                        }
-                        Err(e) => {
-                            self.error =
-                                Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"));
-                        }
-                    }
-                    self.record_usage(&repo_path, UsageType::Open);
+                    self.open_explorer(&repo_path);
                 }
                 if let Some(repo_path) = actions.shell_open {
-                    let pref = self.config.terminal.preference.clone();
-                    let repo_clone = repo_path.clone();
-                    let err_tx = self.launch_err_tx.clone();
-                    std::thread::spawn(move || {
-                        if let Err(e) = crate::git::open_shell(&repo_clone, &pref) {
-                            let _ =
-                                err_tx.send(format!("Shell konnte nicht geöffnet werden: {e:#}"));
-                        }
-                    });
-                    self.status_message = Some(tr_fmt(
-                        lang,
-                        "shell_opened",
-                        &[&repo_path.display().to_string()],
-                    ));
-                    self.status_message_time = Some(std::time::Instant::now());
-                    self.record_usage(&repo_path, UsageType::Open);
+                    self.open_shell(&repo_path);
                 }
             });
 
@@ -2802,6 +2915,11 @@ mod tests {
             mr_view,
             mr_glab_missing: false,
             mr_glab_error: None,
+            mr_checkout_busy: None,
+            mr_switch: None,
+            pending_after_checkout: None,
+            mr_notice: None,
+            repo_highlight: None,
         }
     }
 
@@ -2862,6 +2980,7 @@ mod tests {
             ScanResult::Repos(v) => assert!(v.is_empty()),
             ScanResult::FetchDone { .. } => panic!("expected Repos"),
             ScanResult::FetchAborted { .. } => panic!("expected Repos"),
+            ScanResult::MrCheckoutReady { .. } => panic!("expected Repos"),
         }
         let info =
             crate::git::RepoInfo::new(PathBuf::from("/tmp/repo"), "main".to_string(), false, false);
@@ -2870,6 +2989,29 @@ mod tests {
             ScanResult::Repos(v) => assert_eq!(v.len(), 1),
             ScanResult::FetchDone { .. } => panic!("expected Repos"),
             ScanResult::FetchAborted { .. } => panic!("expected Repos"),
+            ScanResult::MrCheckoutReady { .. } => panic!("expected Repos"),
+        }
+        // K1: Ergebnis des Checkout-Workers trägt Wahl und Ergebnis
+        let ready = ScanResult::MrCheckoutReady {
+            choice: Box::new(crate::ui::merge_requests::MrCheckoutChoice {
+                host_key: "gitlab.example.com".to_string(),
+                mr_id: "gid://gitlab/MergeRequest/5".to_string(),
+                iid: 5,
+                kind: crate::ui::merge_requests::MrCheckoutKind::Switch {
+                    clone: PathBuf::from("/tmp/repo"),
+                },
+                after: crate::config::AfterAction::Nothing,
+            }),
+            result: Ok(None),
+        };
+        match ready {
+            ScanResult::MrCheckoutReady { choice, result } => {
+                assert_eq!(choice.iid, 5);
+                assert!(matches!(result, Ok(None)));
+            }
+            ScanResult::Repos(_) => panic!("expected MrCheckoutReady"),
+            ScanResult::FetchDone { .. } => panic!("expected MrCheckoutReady"),
+            ScanResult::FetchAborted { .. } => panic!("expected MrCheckoutReady"),
         }
         let fetch_done = ScanResult::FetchDone {
             repos: vec![],
@@ -2892,6 +3034,7 @@ mod tests {
             }
             ScanResult::Repos(_) => panic!("expected FetchDone"),
             ScanResult::FetchAborted { .. } => panic!("expected FetchDone"),
+            ScanResult::MrCheckoutReady { .. } => panic!("expected FetchDone"),
         }
     }
 

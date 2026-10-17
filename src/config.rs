@@ -251,6 +251,17 @@ impl MrConfig {
             .map(str::to_string);
         *self != before
     }
+
+    /// Merkt die im Checkout-Menü gewählte „Danach öffnen“-Aktion als
+    /// Vorbelegung fürs nächste Menü (K1). `true`, wenn sie sich geändert
+    /// hat (dann speichern).
+    pub fn remember_after_checkout(&mut self, action: &AfterAction) -> bool {
+        if self.after_checkout_last == *action {
+            return false;
+        }
+        self.after_checkout_last = action.clone();
+        true
+    }
 }
 
 /// Trimmen, kleinschreiben, leere entfernen, sortieren, deduplizieren.
@@ -3319,6 +3330,24 @@ mod tests {
         let cfg = AppConfig::default();
         assert_eq!(cfg.merge_requests, mr);
         assert_eq!(cfg.config_version, 15);
+    }
+
+    #[test]
+    fn mr_config_remember_after_checkout() {
+        // K1: letzte Wahl „Danach öffnen“ merken; nur eine Änderung speichert.
+        let mut mr = MrConfig::default();
+        assert!(!mr.remember_after_checkout(&AfterAction::Agent("claude".to_string())));
+        assert!(mr.remember_after_checkout(&AfterAction::Shell));
+        assert_eq!(mr.after_checkout_last, AfterAction::Shell);
+        assert!(!mr.remember_after_checkout(&AfterAction::Shell));
+        // Feste Vorbelegung bleibt unberührt
+        mr.after_checkout_default = AfterCheckoutPref::Fixed(AfterAction::Ide);
+        assert!(mr.remember_after_checkout(&AfterAction::Nothing));
+        assert_eq!(
+            mr.after_checkout_default,
+            AfterCheckoutPref::Fixed(AfterAction::Ide)
+        );
+        assert_eq!(mr.after_checkout_last, AfterAction::Nothing);
     }
 
     #[test]

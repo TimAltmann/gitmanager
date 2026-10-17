@@ -373,7 +373,6 @@ pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
 /// Prune (`FetchPrune::Off` übersteuert `fetch.prune` des Users) und ohne
 /// Tags: andere Remote-Refs bleiben unberührt. Auth und CLI-Fallback wie
 /// [`fetch_all`].
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn fetch_refspecs(path: &Path, remote: &str, refspecs: &[&str]) -> anyhow::Result<()> {
     let repo =
         Repository::open(path).map_err(|e| anyhow::anyhow!("Failed to open repository: {e}"))?;
@@ -1336,7 +1335,6 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<Chec
 // --- Merge-Request-Checkout (K1) ---
 
 /// K1: Stand des lokalen MR-Branches nach [`prepare_mr_branch`].
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MrPrepOutcome {
     /// Lokaler Branch neu am MR-Stand angelegt, Upstream gesetzt
@@ -1362,7 +1360,6 @@ pub enum MrPrepOutcome {
 }
 
 /// K1: Ergebnis von [`prepare_mr_branch`].
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MrPrep {
     /// Tatsächlich genutzter lokaler Branch: `sourceBranch` oder bei
@@ -1373,7 +1370,6 @@ pub struct MrPrep {
 
 /// K1: typisierte Fehler beim Auschecken eines MR. Display bleibt Deutsch wie
 /// die übrigen git.rs-Fehler; die UI lokalisiert per Match bzw. Downcast.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckoutError {
     /// Branch ist HEAD in einem anderen Worktree (oder im Basis-Klon selbst)
@@ -1419,7 +1415,6 @@ impl std::error::Error for CheckoutError {}
 /// Upstream); ist er Vorfahr, wird er per Compare-and-Swap vorgespult;
 /// voraus/divergiert bleibt er unverändert. Vorher wie beim Branch-Wechsel
 /// (E15) die Worktree-Prüfung ([`branch_checked_out_elsewhere`]).
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn prepare_mr_branch(base_path: &Path, plan: &MrCheckoutPlan) -> Result<MrPrep, CheckoutError> {
     let repo = Repository::open(base_path)
         .map_err(|e| CheckoutError::Git(format!("Repo öffnen fehlgeschlagen: {e}")))?;
@@ -1546,7 +1541,6 @@ fn is_ref_dir_of(dir: &str, name: &str) -> bool {
 /// Zielordner darf fehlen oder leer sein; Elternordner (Review-Ordner)
 /// werden angelegt, ein verwaister Eintrag für denselben Ordner wird
 /// entfernt. libgit2 zuerst, Fallback `git -C base worktree add`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn add_worktree(
     base_path: &Path,
     target_path: &Path,
@@ -1672,7 +1666,6 @@ fn worktree_add_with_git_cli(
 /// ([`fetch_credentials`], globale Config für `credential.helper`), Fallback
 /// `git clone --branch <branch> <url> <target>`. Ein halber Klon wird
 /// wieder entfernt.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn clone_repo(url: &str, target_path: &Path, branch: &str) -> Result<(), CheckoutError> {
     prepare_target_dir(target_path)?;
     let config = git2::Config::open_default().ok();

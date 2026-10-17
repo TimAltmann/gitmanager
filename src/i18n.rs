@@ -113,6 +113,12 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "branch_upstream_mismatch") => "Lokaler Branch {} verfolgt {}".to_string(),
         (Language::En, "branch_checked_out_elsewhere") => "Branch {} is checked out in {}".to_string(),
         (Language::De, "branch_checked_out_elsewhere") => "Branch {} ist in {} ausgecheckt".to_string(),
+        (Language::En, "branch_switched") => "Switched to branch “{}”: {}".to_string(),
+        (Language::De, "branch_switched") => "Branch zu „{}“ gewechselt: {}".to_string(),
+        (Language::En, "branch_switch_failed") => "Branch switch failed: {}".to_string(),
+        (Language::De, "branch_switch_failed") => "Branch-Wechsel fehlgeschlagen: {}".to_string(),
+        (Language::En, "branch_switch_blocked") => "Cannot switch to branch “{}”: merge conflicts or a merge/rebase in progress ({})".to_string(),
+        (Language::De, "branch_switch_blocked") => "Branch-Wechsel zu „{}“ nicht möglich: Merge-Konflikte oder Merge/Rebase läuft ({})".to_string(),
 
         // ── Repo list ──────────────────────────────────────────────────
         (Language::En, "no_repos_found") => "No repositories found".to_string(),
@@ -740,6 +746,50 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::En, "mr_branch_deleted_tt") => "Source branch no longer exists".to_string(),
         (Language::De, "mr_branch_deleted_tt") => "Quell-Branch existiert nicht mehr".to_string(),
 
+        // ── Merge Requests: Auschecken in der App (K1) ───────────────
+        (Language::En, "mr_checkout_busy") => "Fetching {} for !{} …".to_string(),
+        (Language::De, "mr_checkout_busy") => "Hole {} für !{} …".to_string(),
+        (Language::En, "mr_cloning") => "Cloning {} to {} …".to_string(),
+        (Language::De, "mr_cloning") => "Klone {} nach {} …".to_string(),
+        (Language::En, "mr_checkout_blocked") => "Checkout not possible while a scan or fetch is running".to_string(),
+        (Language::De, "mr_checkout_blocked") => "Auschecken nicht möglich, solange ein Scan oder Fetch läuft".to_string(),
+        (Language::En, "mr_worktree_created") => "Worktree {} created for !{}".to_string(),
+        (Language::De, "mr_worktree_created") => "Worktree {} für !{} angelegt".to_string(),
+        (Language::En, "mr_clone_done") => "!{} cloned to {}".to_string(),
+        (Language::De, "mr_clone_done") => "!{} geklont nach {}".to_string(),
+        (Language::En, "mr_checkout_done") => "!{} checked out: {} in {}".to_string(),
+        (Language::De, "mr_checkout_done") => "!{} ausgecheckt: {} in {}".to_string(),
+        (Language::En, "mr_checkout_done_ff") => "!{} checked out: {} in {} (+{} commits)".to_string(),
+        (Language::De, "mr_checkout_done_ff") => "!{} ausgecheckt: {} in {} (+{} Commits)".to_string(),
+        (Language::En, "mr_checkout_done_ff_one") => "!{} checked out: {} in {} (+1 commit)".to_string(),
+        (Language::De, "mr_checkout_done_ff_one") => "!{} ausgecheckt: {} in {} (+1 Commit)".to_string(),
+        (Language::En, "mr_already_head") => "Already checked out in {}".to_string(),
+        (Language::De, "mr_already_head") => "Bereits ausgecheckt in {}".to_string(),
+        (Language::En, "mr_already_head_behind") => "Already checked out in {} ({} behind)".to_string(),
+        (Language::De, "mr_already_head_behind") => "Bereits ausgecheckt in {} ({} hinterher)".to_string(),
+        (Language::En, "mr_then_agent") => "– starting {}".to_string(),
+        (Language::De, "mr_then_agent") => "– {} startet".to_string(),
+        (Language::En, "mr_then_shell") => "– opening shell".to_string(),
+        (Language::De, "mr_then_shell") => "– Shell öffnet".to_string(),
+        (Language::En, "mr_then_explorer") => "– opening Explorer".to_string(),
+        (Language::De, "mr_then_explorer") => "– Explorer öffnet".to_string(),
+        (Language::En, "mr_then_ide") => "– opening {}".to_string(),
+        (Language::De, "mr_then_ide") => "– {} öffnet".to_string(),
+        (Language::En, "mr_diverged") => "Local branch {} differs from the MR ({} ahead, {} behind) – local state checked out".to_string(),
+        (Language::De, "mr_diverged") => "Lokaler Branch {} weicht vom MR-Stand ab ({} voraus, {} hinterher) – lokaler Stand ausgecheckt".to_string(),
+        (Language::En, "mr_checkout_failed") => "Checking out !{} failed: {}".to_string(),
+        (Language::De, "mr_checkout_failed") => "Auschecken von !{} fehlgeschlagen: {}".to_string(),
+        (Language::En, "mr_checkout_no_remote") => "No remote in {} points to {}".to_string(),
+        (Language::De, "mr_checkout_no_remote") => "Kein Remote in {} zeigt auf {}".to_string(),
+        (Language::En, "mr_repo_open_failed") => "Cannot open repository {}".to_string(),
+        (Language::De, "mr_repo_open_failed") => "Repository {} lässt sich nicht öffnen".to_string(),
+        (Language::En, "mr_folder_exists") => "The folder {} already exists and is not empty".to_string(),
+        (Language::De, "mr_folder_exists") => "Der Ordner {} existiert bereits und ist nicht leer".to_string(),
+        (Language::En, "mr_remote_branch_missing") => "Remote branch {} not found".to_string(),
+        (Language::De, "mr_remote_branch_missing") => "Remote-Branch {} nicht gefunden".to_string(),
+        (Language::En, "mr_branch_name_taken") => "Neither {} nor {} can be used as a local branch".to_string(),
+        (Language::De, "mr_branch_name_taken") => "Weder {} noch {} lassen sich als lokaler Branch nutzen".to_string(),
+
         // ── Merge Requests: Zustände der Ansicht ─────────────────────
         (Language::En, "mr_no_remotes") => "No git remote was found in the scanned repositories.".to_string(),
         (Language::De, "mr_no_remotes") => "In den gescannten Repositories wurde kein Git-Remote gefunden.".to_string(),
@@ -1302,6 +1352,31 @@ mod tests {
             "tray_mrs_tt_many",
             "tray_mrs_tt_none",
             "tray_quit",
+            // Task 11: Auschecken in der App, Branch-Wechsel
+            "mr_worktree_created",
+            "mr_clone_done",
+            "mr_cloning",
+            "mr_then_agent",
+            "mr_then_shell",
+            "mr_then_explorer",
+            "mr_then_ide",
+            "mr_folder_exists",
+            "mr_checkout_busy",
+            "mr_checkout_done",
+            "mr_checkout_done_ff",
+            "mr_checkout_done_ff_one",
+            "mr_already_head",
+            "mr_already_head_behind",
+            "mr_diverged",
+            "mr_checkout_blocked",
+            "mr_checkout_failed",
+            "mr_checkout_no_remote",
+            "mr_repo_open_failed",
+            "mr_remote_branch_missing",
+            "mr_branch_name_taken",
+            "branch_switched",
+            "branch_switch_failed",
+            "branch_switch_blocked",
         ];
         for key in keys {
             let en = tr(Language::En, key);
@@ -1444,6 +1519,34 @@ mod tests {
         assert_eq!(
             tr_fmt(Language::En, "mr_badge_tt_many", &["2"]),
             "Merge requests – 2 reviews waiting for you"
+        );
+        assert_eq!(
+            tr_fmt(
+                Language::De,
+                "mr_checkout_done_ff",
+                &["412", "feature/x", "C:\\Dev\\api", "3"]
+            ),
+            "!412 ausgecheckt: feature/x in C:\\Dev\\api (+3 Commits)"
+        );
+        assert_eq!(
+            tr_fmt(
+                Language::De,
+                "mr_worktree_created",
+                &["C:\\R\\api-mr-5", "5"]
+            ),
+            "Worktree C:\\R\\api-mr-5 für !5 angelegt"
+        );
+        assert_eq!(
+            tr_fmt(Language::En, "mr_then_agent", &["Claude Code"]),
+            "– starting Claude Code"
+        );
+        assert_eq!(
+            tr_fmt(Language::De, "branch_switched", &["main", "C:\\Dev\\api"]),
+            "Branch zu „main“ gewechselt: C:\\Dev\\api"
+        );
+        assert_eq!(
+            tr_fmt(Language::De, "branch_switch_blocked", &["main", "Merge"]),
+            "Branch-Wechsel zu „main“ nicht möglich: Merge-Konflikte oder Merge/Rebase läuft (Merge)"
         );
     }
 

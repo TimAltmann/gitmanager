@@ -557,6 +557,8 @@ impl MyApp {
     /// Zeichnet die MR-Ansicht und wertet ihre Klicks aus.
     pub(super) fn show_mr_view(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        // K1: Hinweis aus dem Auschecken (überlebt Rescans)
+        self.show_mr_notice(ui);
         let mut actions = MrViewActions::default();
         {
             let config = &self.config;
@@ -592,11 +594,18 @@ impl MyApp {
         self.handle_mr_actions(&ctx, actions);
     }
 
-    /// Klicks der MR-Ansicht. Auschecken und „Bereits ausgecheckt“ folgen in
-    /// Task 11, der Einstellungs-Tab „Merge Requests“ in Task 12.
+    /// Klicks der MR-Ansicht; Auschecken und „Bereits ausgecheckt“ siehe
+    /// `mr_checkout.rs`. Der Einstellungs-Tab „Merge Requests“ folgt in
+    /// Task 12.
     fn handle_mr_actions(&mut self, ctx: &egui::Context, actions: MrViewActions) {
         if let Some(url) = actions.open_url {
             ctx.open_url(egui::OpenUrl::new_tab(url));
+        }
+        if let Some(choice) = actions.checkout {
+            self.start_mr_checkout(choice);
+        }
+        if let Some((path, target)) = actions.open_existing {
+            self.open_existing(&path, &target);
         }
         if actions.refresh {
             self.mr_user_refresh();
@@ -1530,6 +1539,42 @@ mod tests {
         let calls = glab.inner().take_calls();
         assert!(!calls.is_empty());
         assert!(calls.iter().all(|c| c.request.args[0] == "api"));
+    }
+
+    /// K1: Auschecken und „Bereits ausgecheckt“ aus der Ansicht landen bei
+    /// `start_mr_checkout` bzw. `open_existing`.
+    #[test]
+    fn checkout_and_open_existing_actions_are_handled() {
+        use crate::config::AfterAction;
+        use crate::ui::merge_requests::{MrCheckoutChoice, MrCheckoutKind, OpenTarget};
+        let mut app = test_app();
+        app.main_view = MainView::MergeRequests;
+        // Läuft ein Scan, wird das Auschecken mit Hinweis abgelehnt
+        app.scanning = true;
+        let path = PathBuf::from("/tmp/gm-mr-test/app");
+        let actions = MrViewActions {
+            checkout: Some(MrCheckoutChoice {
+                host_key: HOST.to_string(),
+                mr_id: "gid://gitlab/MergeRequest/1".to_string(),
+                iid: 1,
+                kind: MrCheckoutKind::Switch {
+                    clone: path.clone(),
+                },
+                after: AfterAction::Shell,
+            }),
+            open_existing: Some((path, OpenTarget::ShowInRepoList)),
+            ..MrViewActions::default()
+        };
+        app.handle_mr_actions(&egui::Context::default(), actions);
+        assert_eq!(
+            app.status_message,
+            Some(tr(app.config.language, "mr_checkout_blocked"))
+        );
+        assert_eq!(
+            app.config.merge_requests.after_checkout_last,
+            AfterAction::Shell
+        );
+        assert_eq!(app.main_view, MainView::Repos);
     }
 
     #[test]
