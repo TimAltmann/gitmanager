@@ -171,7 +171,6 @@ const fn rgb(hex: u32) -> Color32 {
 
 /// Palette der MR-Ansicht für `theme`; Titel und Spalte kommen aus den
 /// aktiven `visuals`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn mr_palette(theme: &Theme, visuals: &Visuals) -> MrPalette {
     let c = match theme {
         // Werte aus dem Mockup B

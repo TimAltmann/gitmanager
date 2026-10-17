@@ -27,7 +27,8 @@ pub const MENTIONS_MAX_PAGES: usize = 3;
 /// Versuche je Abfrage beim Schema-Fallback; GitLab meldet höchstens 5
 /// Fehler je Antwort.
 pub const MAX_ATTEMPTS: usize = 4;
-/// GitLab-Grenze für den Abfragetext.
+/// GitLab-Grenze für den Abfragetext; nur in Tests geprüft.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const MAX_QUERY_CHARS: usize = 10_000;
 
 /// Typnamen je nach GitLab-Version; Schema-Fehler nennen den des Servers.
@@ -186,6 +187,8 @@ impl Query {
     }
 
     /// Kompakter Abfragetext; nur benutzte Variablen und Fragmente.
+    // Nur in Tests genutzt (Abfragetext prüfen).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn text(&self) -> String {
         self.render().0
     }
@@ -1230,6 +1233,8 @@ pub fn parse_access(data: &Value) -> Access {
 
 /// Angefragte Pfade ohne Knoten in der Antwort: GitLab liefert für fehlende
 /// und nicht sichtbare Projekte nichts (Vergleich ohne Groß-/Kleinschreibung).
+// Nur in Tests genutzt.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn missing_paths(requested: &[String], found: &[ProjectNode]) -> Vec<String> {
     let found: HashSet<String> = found
         .iter()

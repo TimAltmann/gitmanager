@@ -1,14 +1,22 @@
+mod merge_requests;
+
 use crate::config::{AppConfig, RepoSortMode};
 use crate::git::{launch_agent, launch_ide, RepoInfo};
+use crate::gitlab::glab::{GatedRunner, GlabErrorKind, GlabRunner, SystemGlab};
+use crate::gitlab::model::MrSnapshot;
+use crate::gitlab::remote::{GlabHost, HostMap, LocalProject};
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::scanner::scan_repos;
 use crate::ui::{
+    merge_requests::MrViewState,
     repo_list::{show_repo_list, sort_main_repos, RepoListActions},
     settings::SettingsState,
 };
 use egui::{Color32, RichText, Vec2};
+use merge_requests::{top_bar_button, MrResult, TOP_BAR_CAPTIONS_WIDTH, TOP_BAR_COMPACT_WIDTH};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 
 const ICON_GEAR: egui::ImageSource = egui::include_image!("../assets/icons/gear.svg");
 const ICON_REFRESH: egui::ImageSource = egui::include_image!("../assets/icons/refresh.svg");
@@ -212,6 +220,13 @@ enum UsageType {
     ConfigChange,
 }
 
+/// Hauptansicht im Fenster (nicht gespeichert).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainView {
+    Repos,
+    MergeRequests,
+}
+
 pub struct MyApp {
     config: AppConfig,
     repos: Vec<RepoInfo>,
@@ -278,6 +293,36 @@ pub struct MyApp {
     /// bei N Tray-Actions im selben Frame).
     config_save_pending: bool,
     last_config_save: Option<std::time::Instant>,
+    main_view: MainView,
+    /// glab-Aufrufe der Sitzung (immer `GatedRunner`, E16); Tests: `FakeGlab`
+    glab: Arc<dyn GlabRunner>,
+    /// Lokale glab-Erkennung je Kandidat (E16), Cache je Sitzung; nach jedem
+    /// Scan nur für neue Kandidaten ergänzt
+    glab_hosts: Vec<GlabHost>,
+    /// GitLab-Hosts und lokale Projekte aus Repos, Erkennung und Config
+    mr_hosts: HostMap,
+    mr_locals: Vec<LocalProject>,
+    /// Letzter Stand der MR-Ansicht; bleibt beim Neuladen sichtbar
+    mr_snapshot: Option<Box<MrSnapshot>>,
+    mr_loading: bool,
+    /// Refresh während eines laufenden Abrufs gemerkt
+    mr_pending_refresh: bool,
+    /// „Speichern“ während des Rescans: Abruf erst mit den neuen Repos
+    mr_refresh_after_scan: bool,
+    /// Ende des letzten Abrufs (wie `last_auto_fetch`)
+    mr_last_refresh: Option<std::time::Instant>,
+    /// Steigt bei Anmeldungsänderungen; ältere Ergebnisse werden verworfen
+    mr_auth_epoch: u64,
+    mr_discovering: bool,
+    /// Ausstehende Seiten „Nicht beteiligt“ (eine je Host)
+    mr_more_pending: usize,
+    mr_tx: Sender<MrResult>,
+    mr_rx: Receiver<MrResult>,
+    mr_view: MrViewState,
+    /// glab fehlt oder ist zu alt: keine weiteren glab-Aufrufe in der Sitzung
+    /// (außer „Aktualisieren“); `mr_glab_error` trägt die Art für die Karte
+    mr_glab_missing: bool,
+    mr_glab_error: Option<GlabErrorKind>,
 }
 
 impl MyApp {
@@ -302,6 +347,11 @@ impl MyApp {
         let (config_update_tx, config_update_rx) = mpsc::channel::<Result<AppConfig, String>>();
         let (update_tx, update_rx) =
             mpsc::channel::<Result<Option<crate::updater::UpdateInfo>, String>>();
+        let (mr_tx, mr_rx) = mpsc::channel();
+        let glab: Arc<dyn GlabRunner> = Arc::new(GatedRunner::new(SystemGlab::new(
+            config.merge_requests.glab_program.clone(),
+        )));
+        let mr_view = MrViewState::new(&config.merge_requests);
 
         let mut app = Self {
             config,
@@ -347,6 +397,24 @@ impl MyApp {
             repo_sort_dirty: true,
             config_save_pending: false,
             last_config_save: None,
+            main_view: MainView::Repos,
+            glab,
+            glab_hosts: Vec::new(),
+            mr_hosts: HostMap::default(),
+            mr_locals: Vec::new(),
+            mr_snapshot: None,
+            mr_loading: false,
+            mr_pending_refresh: false,
+            mr_refresh_after_scan: false,
+            mr_last_refresh: None,
+            mr_auth_epoch: 0,
+            mr_discovering: false,
+            mr_more_pending: 0,
+            mr_tx,
+            mr_rx,
+            mr_view,
+            mr_glab_missing: false,
+            mr_glab_error: None,
         };
         #[cfg(target_os = "windows")]
         {
@@ -508,6 +576,7 @@ impl MyApp {
                     // P2b: abgeschlossener Scan erfüllt gemerkten Refresh.
                     self.pending_scan = false;
                     self.error = None;
+                    self.mr_after_scan();
                     // Review-Fix: dirty VOR dem direkten Sync markieren — bei
                     // WouldBlock bleibt das Flag (Backstop in sync_tray_service).
                     self.mark_tray_dirty();
@@ -544,6 +613,7 @@ impl MyApp {
                     sort_main_repos(&mut repos, &self.config);
                     self.repos = repos;
                     self.repo_sort_dirty = false;
+                    self.mr_after_scan();
                     if let Some(raw) = fetch_error {
                         let key = fetch_error_i18n_key(fetch_partial);
                         // I2: auth_hint nur bei echten Remote-Fehlern — bei
@@ -1489,6 +1559,10 @@ impl MyApp {
         let lang = self.config.language;
         // Hysterese wird in `update()` gepflegt ( <400 collapsed, >=500 expanded )
         let effective_collapse = self.top_bar_collapsed;
+        // Schmales Fenster (Umschalter braucht Platz): Buttons nur als Icon;
+        // noch schmaler Feldbeschriftungen als Tooltip der Combos.
+        let compact = self.last_window_size[0] < TOP_BAR_COMPACT_WIDTH;
+        let no_captions = self.last_window_size[0] < TOP_BAR_CAPTIONS_WIDTH;
 
         egui::Panel::top("top_bar")
             .frame(
@@ -1504,21 +1578,19 @@ impl MyApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(tr(lang, "app_title")).size(17.0).strong());
                     ui.add_space(12.0);
-                    ui.label(
-                        RichText::new(format!("{} Repositories", self.repos.len()))
-                            .size(12.0)
-                            .color(Color32::from_rgb(100, 100, 100)),
-                    );
+                    self.view_switcher(ui);
 
                     // Profile Combo in TopBar
                     ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(tr(lang, "profile_label"))
-                            .size(11.0)
-                            .color(Color32::from_rgb(100, 100, 100)),
-                    );
+                    if !no_captions {
+                        ui.label(
+                            RichText::new(tr(lang, "profile_label"))
+                                .size(11.0)
+                                .color(Color32::from_rgb(100, 100, 100)),
+                        );
+                    }
                     let mut new_profile = self.config.active_profile_id.clone();
-                    egui::ComboBox::from_id_salt("active_profile_top")
+                    let profile_combo = egui::ComboBox::from_id_salt("active_profile_top")
                         .selected_text(self.config.get_active_profile().display_name.clone())
                         .width(110.0)
                         .show_ui(ui, |ui| {
@@ -1529,6 +1601,11 @@ impl MyApp {
                                 }
                             }
                         });
+                    if no_captions {
+                        profile_combo
+                            .response
+                            .on_hover_text(tr(lang, "profile_label").trim_end_matches(':'));
+                    }
                     if new_profile != self.config.active_profile_id {
                         self.config.active_profile_id = new_profile;
                         if let Err(e) = self.config.save() {
@@ -1552,11 +1629,13 @@ impl MyApp {
                     if show_agents {
                         if self.config.agents.len() > 1 {
                             ui.add_space(8.0);
-                            ui.label(
-                                RichText::new("AI:")
-                                    .size(11.0)
-                                    .color(Color32::from_rgb(100, 100, 100)),
-                            );
+                            if !no_captions {
+                                ui.label(
+                                    RichText::new("AI:")
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(100, 100, 100)),
+                                );
+                            }
                             let active_agents = self.config.get_active_agents();
                             let current_text = if active_agents.is_empty() {
                                 "Keine".to_string()
@@ -1568,7 +1647,7 @@ impl MyApp {
                             let mut save_err: Option<String> = None;
                             // Review-Fix: Agent-Liste betrifft Tray-Popup → dirty.
                             let mut agents_changed = false;
-                            egui::ComboBox::from_id_salt("active_agent_top")
+                            let agent_combo = egui::ComboBox::from_id_salt("active_agent_top")
                                 .selected_text(current_text)
                                 .width(120.0)
                                 .show_ui(ui, |ui| {
@@ -1619,6 +1698,11 @@ impl MyApp {
                                         }
                                     }
                                 });
+                            if no_captions {
+                                agent_combo
+                                    .response
+                                    .on_hover_text(tr(lang, "ai_label").trim_end_matches(':'));
+                            }
                             if agents_changed {
                                 self.mark_tray_dirty();
                             }
@@ -1637,13 +1721,15 @@ impl MyApp {
 
                     // Language selector
                     ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(tr(lang, "language"))
-                            .size(11.0)
-                            .color(Color32::from_rgb(100, 100, 100)),
-                    );
+                    if !no_captions {
+                        ui.label(
+                            RichText::new(tr(lang, "language"))
+                                .size(11.0)
+                                .color(Color32::from_rgb(100, 100, 100)),
+                        );
+                    }
                     let mut new_lang = lang;
-                    egui::ComboBox::from_id_salt("language_top")
+                    let lang_combo = egui::ComboBox::from_id_salt("language_top")
                         .selected_text(lang.display_name().to_string())
                         .width(90.0)
                         .show_ui(ui, |ui| {
@@ -1654,6 +1740,9 @@ impl MyApp {
                                 }
                             }
                         });
+                    if no_captions {
+                        lang_combo.response.on_hover_text(tr(lang, "language"));
+                    }
                     if new_lang != lang {
                         self.config.language = new_lang;
                         // Review-Fix: Sprache betrifft auch Tray-Texte.
@@ -1664,13 +1753,9 @@ impl MyApp {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::image_and_text(
-                                egui::Image::new(ICON_GEAR)
-                                    .fit_to_exact_size(Vec2::splat(14.0))
-                                    .tint(ui.visuals().text_color()),
-                                RichText::new(tr(lang, "settings")).size(12.0),
-                            ))
+                        let settings =
+                            top_bar_button(ui, ICON_GEAR, &tr(lang, "settings"), compact, true);
+                        if settings
                             .on_hover_text(tr(lang, "settings_tooltip"))
                             .clicked()
                         {
@@ -1678,23 +1763,48 @@ impl MyApp {
                             self.settings_state = Some(SettingsState::from_config(&self.config));
                         }
                         ui.add_space(8.0);
-                        let (refresh_icon, refresh_label) = if self.scanning {
-                            (ICON_REFRESH, tr(lang, "scanning"))
+                        // E19: in der MR-Ansicht lädt „Aktualisieren“ die MRs neu.
+                        let mr_view = self.main_view == MainView::MergeRequests;
+                        let busy = if mr_view {
+                            self.mr_loading || self.mr_discovering
                         } else {
-                            (ICON_REFRESH, tr(lang, "refresh"))
+                            self.scanning
                         };
-                        let btn = egui::Button::image_and_text(
-                            egui::Image::new(refresh_icon)
-                                .fit_to_exact_size(Vec2::splat(14.0))
-                                .tint(ui.visuals().text_color()),
-                            RichText::new(refresh_label).size(12.0),
-                        );
-                        if ui.add_enabled(!self.scanning, btn).clicked() {
-                            self.start_scan();
+                        let refresh_label = if busy && !mr_view {
+                            tr(lang, "scanning")
+                        } else {
+                            tr(lang, "refresh")
+                        };
+                        let refresh =
+                            top_bar_button(ui, ICON_REFRESH, &refresh_label, compact, !busy);
+                        // Tooltip auch deaktiviert (nur Icon: sonst ohne Text)
+                        let tooltip = if mr_view {
+                            Some(tr(lang, "mr_reload_tt"))
+                        } else if compact {
+                            Some(refresh_label)
+                        } else {
+                            None
+                        };
+                        let refresh = match tooltip {
+                            Some(tt) => {
+                                refresh.on_hover_text(tt.clone()).on_disabled_hover_text(tt)
+                            }
+                            None => refresh,
+                        };
+                        if refresh.clicked() {
+                            if mr_view {
+                                self.mr_user_refresh();
+                            } else {
+                                self.start_scan();
+                            }
                         }
-                        if self.scanning {
+                        if busy {
                             ui.add_space(8.0);
                             ui.spinner();
+                        }
+                        // E19: Sortierung wirkt nur auf die Repo-Liste.
+                        if mr_view {
+                            return;
                         }
                         // Task 4: Sort-Modus als Icon-Button mit Dropdown
                         // (kein Text-Label im Button → kein Truncation des DE-Labels;
@@ -1799,7 +1909,16 @@ impl MyApp {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if let Some(msg) = &self.status_message {
+                    if self.main_view == MainView::MergeRequests {
+                        // Statusmeldung (3 s) hat Vorrang, sonst Hosts und Stand.
+                        let (text, is_message) = self.mr_status_line();
+                        let color = if is_message {
+                            Color32::from_rgb(60, 120, 60)
+                        } else {
+                            crate::ui::theme::mr_palette(&self.config.theme, ui.visuals()).text2
+                        };
+                        ui.label(RichText::new(text).size(11.0).color(color));
+                    } else if let Some(msg) = &self.status_message {
                         ui.label(
                             RichText::new(msg)
                                 .size(11.0)
@@ -2003,6 +2122,58 @@ impl MyApp {
             self.show_update_dialog = false;
         }
     }
+
+    /// Gemeinsames Fehlerbanner (`self.error`) über der Repo-Liste bzw. der
+    /// MR-Ansicht; das Kreuz löscht den Fehler.
+    fn show_error_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(err_msg) = self.error.clone() else {
+            return;
+        };
+        let lang = self.config.language;
+        let mut do_clear = false;
+        let frame = egui::Frame::new()
+            .fill(Color32::from_rgb(255, 235, 235))
+            .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 100, 100)))
+            .corner_radius(6)
+            .inner_margin(egui::Margin::symmetric(10, 8));
+        frame.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Image::new(ICON_WARNING)
+                        .fit_to_exact_size(Vec2::splat(16.0))
+                        .tint(Color32::from_rgb(160, 40, 40)),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "{}: {}",
+                        if lang == Language::En {
+                            "Error"
+                        } else {
+                            "Fehler"
+                        },
+                        err_msg
+                    ))
+                    .size(12.0)
+                    .color(Color32::from_rgb(160, 40, 40)),
+                );
+                if ui
+                    .add(egui::Button::image(
+                        egui::Image::new(ICON_CROSS)
+                            .fit_to_exact_size(Vec2::splat(12.0))
+                            .tint(Color32::from_rgb(160, 40, 40)),
+                    ))
+                    .on_hover_text("Schließen")
+                    .clicked()
+                {
+                    do_clear = true;
+                }
+            });
+        });
+        ui.add_space(8.0);
+        if do_clear {
+            self.error = None;
+        }
+    }
 }
 
 impl eframe::App for MyApp {
@@ -2026,6 +2197,9 @@ impl eframe::App for MyApp {
         }
         // Task 5: periodischer Fetch (throttled, 0=aus) — auch bei hidden Window.
         self.maybe_auto_fetch(ctx);
+        // Merge Requests: Ergebnisse übernehmen, Intervall nur bei sichtbarem Fenster.
+        self.poll_mr(ctx);
+        self.maybe_refresh_mr(ctx);
         self.handle_close_request(ctx);
         // P5: gebatchte Usage-Saves hier flush (deckt auch ui()-Actions vom
         // Vorframe ab — max. 1 Save pro Frame).
@@ -2064,53 +2238,11 @@ impl eframe::App for MyApp {
                     .inner_margin(egui::Margin::same(12)),
             )
             .show(ui, |ui| {
-                let err_to_clear = if let Some(err_msg) = self.error.clone() {
-                    let mut do_clear = false;
-                    let frame = egui::Frame::new()
-                        .fill(Color32::from_rgb(255, 235, 235))
-                        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 100, 100)))
-                        .corner_radius(6)
-                        .inner_margin(egui::Margin::symmetric(10, 8));
-                    frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::Image::new(ICON_WARNING)
-                                    .fit_to_exact_size(Vec2::splat(16.0))
-                                    .tint(Color32::from_rgb(160, 40, 40)),
-                            );
-                            ui.label(
-                                RichText::new(format!(
-                                    "{}: {}",
-                                    if lang == Language::En {
-                                        "Error"
-                                    } else {
-                                        "Fehler"
-                                    },
-                                    err_msg
-                                ))
-                                .size(12.0)
-                                .color(Color32::from_rgb(160, 40, 40)),
-                            );
-                            if ui
-                                .add(egui::Button::image(
-                                    egui::Image::new(ICON_CROSS)
-                                        .fit_to_exact_size(Vec2::splat(12.0))
-                                        .tint(Color32::from_rgb(160, 40, 40)),
-                                ))
-                                .on_hover_text("Schließen")
-                                .clicked()
-                            {
-                                do_clear = true;
-                            }
-                        });
-                    });
-                    ui.add_space(8.0);
-                    do_clear
-                } else {
-                    false
-                };
-                if err_to_clear {
-                    self.error = None;
+                // E20: Fehler beim Auschecken/Branch-Wechsel in beiden Ansichten.
+                self.show_error_banner(ui);
+                if self.main_view == MainView::MergeRequests {
+                    self.show_mr_view(ui);
+                    return;
                 }
 
                 if self.config.roots.is_empty() && !self.scanning {
@@ -2508,6 +2640,8 @@ impl eframe::App for MyApp {
                     if should_scan {
                         self.start_scan();
                     }
+                    // Merge Requests: Hosts/Auswahl neu, sofort neu laden.
+                    self.mr_after_settings_save();
                 } else if self.show_settings {
                     self.settings_state = Some(state);
                 } else {
@@ -2588,13 +2722,24 @@ mod tests {
         assert!(should_auto_fetch(Some(old1), 1, now));
     }
 
-    fn test_app() -> MyApp {
+    /// Test-App ohne Fenster; glab ist ein `FakeGlab` ohne Antworten.
+    pub(super) fn test_app() -> MyApp {
+        test_app_with_glab(Arc::new(GatedRunner::new(
+            crate::gitlab::glab::FakeGlab::new(),
+        )))
+    }
+
+    /// Wie `test_app` mit eigenem Runner (Antworten vorbereiten, Aufrufe prüfen).
+    pub(super) fn test_app_with_glab(glab: Arc<dyn GlabRunner>) -> MyApp {
         let (scan_tx, scan_rx) = mpsc::channel();
         let (launch_err_tx, launch_err_rx) = mpsc::channel();
         let (_config_update_tx, config_update_rx) = mpsc::channel();
         let (_update_tx, update_rx) = mpsc::channel();
+        let (mr_tx, mr_rx) = mpsc::channel();
+        let config = AppConfig::default();
+        let mr_view = MrViewState::new(&config.merge_requests);
         MyApp {
-            config: AppConfig::default(),
+            config,
             repos: Vec::new(),
             scanning: false,
             error: None,
@@ -2635,6 +2780,24 @@ mod tests {
             config_save_pending: false,
             last_config_save: None,
             repo_sort_dirty: true,
+            main_view: MainView::Repos,
+            glab,
+            glab_hosts: Vec::new(),
+            mr_hosts: HostMap::default(),
+            mr_locals: Vec::new(),
+            mr_snapshot: None,
+            mr_loading: false,
+            mr_pending_refresh: false,
+            mr_refresh_after_scan: false,
+            mr_last_refresh: None,
+            mr_auth_epoch: 0,
+            mr_discovering: false,
+            mr_more_pending: 0,
+            mr_tx,
+            mr_rx,
+            mr_view,
+            mr_glab_missing: false,
+            mr_glab_error: None,
         }
     }
 

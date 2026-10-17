@@ -1,6 +1,3 @@
-// Vorübergehend bis zur Verdrahtung (Task 10/11): Das Crate ist ein reines
-// Binary, unverdrahteter Code bricht sonst `clippy -D warnings`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod merge_requests;
 pub mod repo_list;
 pub mod settings;

@@ -84,26 +84,21 @@ pub struct RepoInfo {
     pub behind: usize,
     /// Remotes (origin zuerst, dann alphabetisch), URLs ohne Zugangsdaten.
     /// Scan-only, Default leer.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub remotes: Vec<RemoteInfo>,
     /// Gemeinsames Git-Verzeichnis (`commondir`): bei verknüpften Worktrees
     /// das des Haupt-Repos. Kanonisch, damit Worktree-Geschwister per `==`
     /// gruppiert werden können. Scan-only, Default `<path>/.git`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub common_dir: PathBuf,
     /// Anzahl geänderter Einträge wie bei `is_dirty` (ein untracked Ordner
     /// zählt einmal), für „{n} Änderungen“ im Checkout-Menü. Scan-only,
     /// Default 1 bei `dirty`, sonst 0.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub dirty_files: usize,
     /// Die übrigen Worktrees desselben Repos (Haupt- und verknüpfte, ohne
     /// den eigenen) mit ihrem Branch, auch außerhalb der Suchpfade – für
     /// „Bereits ausgecheckt“ (K1). Scan-only, Default leer.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub worktrees: Vec<WorktreeHead>,
     /// Verknüpfter Worktree (`git worktree add`), kein eigener Klon: nie
     /// Basis-Klon für neue Worktrees (K1). Scan-only, Default `false`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub is_linked_worktree: bool,
 }
 

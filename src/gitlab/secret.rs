@@ -19,6 +19,8 @@ impl SecretString {
         &self.0
     }
 
+    // Vorübergehend bis zur Verdrahtung im Einstellungs-Tab (Task 12).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

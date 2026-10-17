@@ -72,6 +72,8 @@ pub fn parse_date(s: &str) -> Option<i64> {
 }
 
 /// Datum als `TT.MM.JJJJ` (UTC).
+// Vorübergehend bis zur Verdrahtung im Einstellungs-Tab (Task 12).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn format_date(ts: i64) -> String {
     let (y, m, d) = civil_from_days(ts.div_euclid(DAY));
     format!("{d:02}.{m:02}.{y:04}")

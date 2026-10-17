@@ -320,6 +320,17 @@ pub fn resolve_hosts<'a>(
 /// GitManager-eigene Zuordnung (nicht in glab): GitLab.com-SSH über Port 443.
 const BUILTIN_ALIASES: &[(&str, &str)] = &[("altssh.gitlab.com", "gitlab.com")];
 
+/// Ziel der eingebauten Zuordnung für einen Remote-Hostnamen (z. B.
+/// `altssh.gitlab.com` → `gitlab.com`); Kandidat der lokalen Erkennung (E16),
+/// denn `resolve_hosts` ordnet nur angemeldeten Zielen zu.
+pub fn builtin_alias_target(host: &str) -> Option<&'static str> {
+    let host = norm_host(host);
+    BUILTIN_ALIASES
+        .iter()
+        .find(|(from, _)| *from == host)
+        .map(|(_, to)| *to)
+}
+
 fn resolve_one(
     remote: &RemoteRef,
     key: &str,

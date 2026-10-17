@@ -187,6 +187,8 @@ impl GlabRequest {
         self
     }
 
+    // Nur in Tests genutzt.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self

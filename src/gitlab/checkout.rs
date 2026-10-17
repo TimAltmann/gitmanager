@@ -252,6 +252,8 @@ pub struct MrCheckoutPlan {
 impl MrCheckoutPlan {
     /// Plan für `repo`; `None`, wenn kein Remote des Klons auf das
     /// Quellprojekt zeigt.
+    // Vorübergehend bis zur Verdrahtung des Auscheckens (Task 11).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn for_repo(mr: &MrRefInfo, repo: &RepoInfo, hosts: &HostMap) -> Option<Self> {
         let project = ProjectRef {
             hosts,
@@ -268,6 +270,8 @@ impl MrCheckoutPlan {
 
     /// `+refs/heads/<src>:refs/remotes/<remote>/<src>`: aktualisiert genau
     /// den Ref, den Dropdown und `ahead_behind_in` lesen.
+    // Vorübergehend bis zur Verdrahtung des Auscheckens (Task 11).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn refspec(&self) -> String {
         format!("+refs/heads/{}:{}", self.source_branch, self.remote_ref())
     }
@@ -378,6 +382,8 @@ pub fn checkout_brief(mr: &MrRefInfo, repos: &[RepoInfo], hosts: &HostMap) -> Ch
 /// Ordner, in dem `branch` für `project` ausgecheckt ist: gescannte Klone
 /// mit Remote auf das Projekt und die übrigen Worktrees ihrer Repos (aus dem
 /// Scan, `RepoInfo.worktrees`), auch außerhalb der Suchpfade.
+// Vorübergehend bis zur Verdrahtung des Auscheckens (Task 11).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn find_checked_out(repos: &[RepoInfo], branch: &str, project: &ProjectRef) -> Option<PathBuf> {
     checked_out_in(&candidates(repos, project), &[branch]).map(|a| a.path)
 }

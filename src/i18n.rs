@@ -772,6 +772,28 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::En, "mr_details") => "Details".to_string(),
         (Language::De, "mr_details") => "Details".to_string(),
 
+        // ── Merge Requests: Umschalter, Top-Leiste, Statusleiste ──────
+        (Language::En, "view_repos") => "Repositories".to_string(),
+        (Language::De, "view_repos") => "Repositories".to_string(),
+        (Language::En, "view_repos_tt") => "Show repository list".to_string(),
+        (Language::De, "view_repos_tt") => "Repository-Liste anzeigen".to_string(),
+        (Language::En, "view_mrs") => "Merge Requests".to_string(),
+        (Language::De, "view_mrs") => "Merge Requests".to_string(),
+        (Language::En, "view_mrs_tt") => "Show merge requests".to_string(),
+        (Language::De, "view_mrs_tt") => "Merge Requests anzeigen".to_string(),
+        (Language::En, "mr_badge_tt_one") => "Merge requests – 1 review waiting for you".to_string(),
+        (Language::De, "mr_badge_tt_one") => "Merge Requests – 1 Review wartet auf dich".to_string(),
+        (Language::En, "mr_badge_tt_many") => "Merge requests – {} reviews waiting for you".to_string(),
+        (Language::De, "mr_badge_tt_many") => "Merge Requests – {} Reviews warten auf dich".to_string(),
+        (Language::En, "mr_reload_tt") => "Reload merge requests".to_string(),
+        (Language::De, "mr_reload_tt") => "Merge Requests neu laden".to_string(),
+        (Language::En, "mr_status_line") => "Merge requests · {} · updated {}".to_string(),
+        (Language::De, "mr_status_line") => "Merge Requests · {} · Stand: {}".to_string(),
+        (Language::En, "mr_refreshing") => "Refreshing … · updated {}".to_string(),
+        (Language::De, "mr_refreshing") => "Aktualisiere … · Stand: {}".to_string(),
+        (Language::En, "mr_fetch_aborted") => "Loading merge requests was aborted (internal error)".to_string(),
+        (Language::De, "mr_fetch_aborted") => "Abruf der Merge Requests abgebrochen (interner Fehler)".to_string(),
+
         // ── Relative Zeiten ──────────────────────────────────────────
         (Language::En, "rel_now") => "just now".to_string(),
         (Language::De, "rel_now") => "gerade eben".to_string(),
@@ -1248,6 +1270,17 @@ mod tests {
             "mr_host_failed",
             "mr_err_unknown",
             "mr_details",
+            // Task 10: Umschalter, Badge, Top-Leiste, Statusleiste
+            "view_repos",
+            "view_repos_tt",
+            "view_mrs",
+            "view_mrs_tt",
+            "mr_badge_tt_one",
+            "mr_badge_tt_many",
+            "mr_reload_tt",
+            "mr_status_line",
+            "mr_refreshing",
+            "mr_fetch_aborted",
         ];
         for key in keys {
             let en = tr(Language::En, key);
@@ -1379,6 +1412,18 @@ mod tests {
             "C:\\R\\a-mr-1 · teilt Git-Daten mit a"
         );
         assert_eq!(tr_fmt(Language::En, "mr_load_more", &["8"]), "Load 8 more");
+        assert_eq!(
+            tr_fmt(
+                Language::De,
+                "mr_status_line",
+                &["gitlab.example.com", "vor 1 Min."]
+            ),
+            "Merge Requests · gitlab.example.com · Stand: vor 1 Min."
+        );
+        assert_eq!(
+            tr_fmt(Language::En, "mr_badge_tt_many", &["2"]),
+            "Merge requests – 2 reviews waiting for you"
+        );
     }
 
     #[test]
