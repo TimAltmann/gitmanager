@@ -1,6 +1,6 @@
 use git2::{BranchType, Repository, StatusOptions};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -796,19 +796,315 @@ pub fn remote_short_name(full_ref: &str, branch_name: &str) -> String {
     branch_name.to_string()
 }
 
-/// Führt sicheren Branch-Wechsel durch (nur wenn keine Konflikte, sonst Fehler)
-pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
-    let repo = preflight_checkout(path)?;
+/// E15: Ergebnis eines Branch-Wechsels. Bei einem Remote-Ref (`origin/x`)
+/// mit vorhandenem lokalem `x` meldet es, ob `x` vorgespult wurde oder
+/// eigene Commits hat — die App zeigt dazu einen Hinweis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckoutOutcome {
+    /// Normaler Wechsel (lokaler Branch, neu angelegter Tracking-Branch,
+    /// lokaler Stand gleich Remote-Stand, Commit/Tag).
+    Switched,
+    /// Lokaler Branch war Vorfahr des Remote-Stands, um `by` Commits vorgespult.
+    FastForwarded { branch: String, by: usize },
+    /// Lokaler Branch hat `ahead` eigene Commits — lokaler Stand ausgecheckt.
+    LocalAhead { branch: String, ahead: usize },
+    /// Lokaler Branch und Remote-Stand divergieren — lokaler Stand
+    /// ausgecheckt, Ref unverändert.
+    Diverged {
+        branch: String,
+        ahead: usize,
+        behind: usize,
+    },
+}
+
+/// E15: typisierte Abbrüche vor dem Checkout (Arbeitsverzeichnis unberührt).
+/// Display bleibt Deutsch wie die übrigen git.rs-Fehler; die UI lokalisiert
+/// per Downcast (`branch_upstream_mismatch`, `branch_checked_out_elsewhere`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchSwitchBlocked {
+    /// Lokaler Branch verfolgt einen anderen Upstream als den gewählten Remote-Branch.
+    UpstreamMismatch { branch: String, upstream: String },
+    /// Branch ist HEAD in einem anderen Worktree desselben Repos.
+    CheckedOutElsewhere { branch: String, path: PathBuf },
+}
+
+impl std::fmt::Display for BranchSwitchBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UpstreamMismatch { branch, upstream } => {
+                write!(f, "Lokaler Branch {branch} verfolgt {upstream}")
+            }
+            Self::CheckedOutElsewhere { branch, path } => {
+                write!(f, "Branch {branch} ist in {} ausgecheckt", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for BranchSwitchBlocked {}
+
+/// E15: Ist `branch` (Kurzname) in einem anderen Worktree desselben Repos
+/// als HEAD ausgecheckt? Liefert dessen Pfad. Liest `<commondir>/HEAD`
+/// (Haupt-Worktree, nicht bei Bare) und `<commondir>/worktrees/*/HEAD`
+/// direkt; der eigene Worktree zählt nicht. Verwaiste Einträge (Ordner
+/// gelöscht, nicht gesperrt) zählen wie bei `git worktree prune` nicht.
+pub(crate) fn branch_checked_out_elsewhere(repo: &Repository, branch: &str) -> Option<PathBuf> {
+    let wanted = format!("refs/heads/{branch}");
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let own = canon(repo.path());
+    let common = repo.commondir();
+    if canon(common) != own && head_symref(common).as_deref() == Some(wanted.as_str()) {
+        let main = Repository::open(common).ok();
+        if let Some(workdir) = main.as_ref().and_then(|r| r.workdir()) {
+            // Ohne abschließenden Separator (`…/c1/` → `…/c1`) für die Meldung.
+            return Some(workdir.components().collect());
+        }
+    }
+    let entries = std::fs::read_dir(common.join("worktrees")).ok()?;
+    for admin in entries.flatten().map(|e| e.path()) {
+        if canon(&admin) == own || head_symref(&admin).as_deref() != Some(wanted.as_str()) {
+            continue;
+        }
+        if let Some(path) = linked_worktree_path(&admin) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Symbolischer HEAD eines Git-Verzeichnisses (`ref: refs/heads/x` →
+/// `refs/heads/x`); `None` bei Detached HEAD oder unlesbarer Datei. Anders
+/// als `parse_head_file` ohne SHA-Kurzform (kein Zufallstreffer).
+fn head_symref(git_dir: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    content
+        .trim()
+        .strip_prefix("ref: ")
+        .map(|r| r.trim().to_string())
+}
+
+/// Ordner eines verknüpften Worktrees aus `<admin>/gitdir` (zeigt auf
+/// `<wt>/.git`, relativ zum Admin-Ordner bei `worktree.useRelativePaths`).
+/// `None` bei verwaistem Eintrag: Ziel fehlt und kein `locked`.
+fn linked_worktree_path(admin: &Path) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(admin.join("gitdir")).ok()?;
+    let gitfile = admin.join(raw.trim());
+    if !gitfile.exists() && !admin.join("locked").exists() {
+        return None;
+    }
+    // Lexikalisch normalisieren (kein canonicalize → kein `\\?\` unter
+    // Windows): `..` relativer Einträge auflösen, Git-`/` unter Windows
+    // wird `\` wie beim Haupt-Worktree. `commondir` ist von libgit2 schon
+    // per realpath aufgelöst, `..` läuft also nicht über Symlinks.
+    let mut out = PathBuf::new();
+    for c in gitfile.parent()?.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// E15: Ref-Änderung, die zu einem Wechsel auf einen Remote-Ref gehört.
+enum RefUpdate {
+    None,
+    /// Lokaler Branch fehlt → am Remote-Stand anlegen, Upstream als
+    /// Kurzname (`origin/feature/foo`).
+    Create {
+        branch: String,
+        at: git2::Oid,
+        upstream: String,
+    },
+    /// Lokaler Branch ist Vorfahr → per Compare-and-Swap vorspulen.
+    FastForward {
+        branch: String,
+        from: git2::Oid,
+        to: git2::Oid,
+    },
+}
+
+/// E15: vor Dry-Run und `checkout_tree` aufgelöstes Ziel eines Wechsels.
+struct CheckoutTarget<'r> {
+    /// Baum, der ausgecheckt wird (bei voraus/divergiert der lokale Stand).
+    object: git2::Object<'r>,
+    /// Lokaler Branch, an den HEAD danach angehängt wird; `None` → Commit/Tag
+    /// über `set_head_from_reference`.
+    branch: Option<String>,
+    reference: Option<git2::Reference<'r>>,
+    update: RefUpdate,
+    outcome: CheckoutOutcome,
+}
+
+/// E15: löst `branch_name` auf, bevor irgendetwas am Arbeitsverzeichnis
+/// passiert. Remote-Ref mit vorhandenem lokalem Branch: Vorfahr → vorspulen,
+/// voraus/divergiert → lokaler Stand; anderer Upstream oder Branch in einem
+/// anderen Worktree → typisierter Abbruch (`BranchSwitchBlocked`).
+fn resolve_checkout_target<'r>(
+    repo: &'r Repository,
+    branch_name: &str,
+) -> anyhow::Result<CheckoutTarget<'r>> {
     let (object, reference) = repo
         .revparse_ext(branch_name)
         .map_err(|e| anyhow::anyhow!("Branch '{branch_name}' nicht gefunden: {e}"))?;
+    let full = reference
+        .as_ref()
+        .map(|r| r.name().map(str::to_string))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("Ungültige Referenz: {e}"))?
+        .unwrap_or_default();
+    let Some(upstream) = full.strip_prefix("refs/remotes/") else {
+        // Lokaler Branch, Tag oder Commit: Ziel unverändert, beim lokalen
+        // Branch nur die Worktree-Prüfung.
+        let branch = full.strip_prefix("refs/heads/").map(str::to_string);
+        if let Some(branch) = &branch {
+            ensure_not_checked_out_elsewhere(repo, branch)?;
+        }
+        return Ok(CheckoutTarget {
+            object,
+            branch,
+            reference,
+            update: RefUpdate::None,
+            outcome: CheckoutOutcome::Switched,
+        });
+    };
+    // K2: nur Remote-Präfix strippen (siehe remote_short_name).
+    let short = remote_short_name(&full, branch_name);
+    let remote = object
+        .peel_to_commit()
+        .map_err(|e| anyhow::anyhow!("Commit nicht gefunden: {e}"))?;
+    let Ok(local) = repo.find_branch(&short, BranchType::Local) else {
+        return Ok(CheckoutTarget {
+            object: remote.as_object().clone(),
+            update: RefUpdate::Create {
+                branch: short.clone(),
+                at: remote.id(),
+                upstream: upstream.to_string(),
+            },
+            branch: Some(short),
+            reference: None,
+            outcome: CheckoutOutcome::Switched,
+        });
+    };
+    // Kein Upstream konfiguriert → wie der gleichnamige Remote-Branch behandeln.
+    if let Ok(buf) = repo.branch_upstream_name(&format!("refs/heads/{short}")) {
+        let tracked = buf.as_str().unwrap_or_default();
+        if !tracked.is_empty() && tracked != full {
+            let upstream = tracked
+                .strip_prefix("refs/remotes/")
+                .or_else(|| tracked.strip_prefix("refs/heads/"))
+                .unwrap_or(tracked);
+            return Err(anyhow::Error::new(BranchSwitchBlocked::UpstreamMismatch {
+                branch: short,
+                upstream: upstream.to_string(),
+            }));
+        }
+    }
+    ensure_not_checked_out_elsewhere(repo, &short)?;
+    let local = local
+        .get()
+        .peel_to_commit()
+        .map_err(|e| anyhow::anyhow!("Commit von {short} nicht gefunden: {e}"))?;
+    let (ahead, behind) = if local.id() == remote.id() {
+        (0, 0)
+    } else {
+        repo.graph_ahead_behind(local.id(), remote.id())
+            .map_err(|e| anyhow::anyhow!("Vergleich {short} / {upstream} fehlgeschlagen: {e}"))?
+    };
+    let branch = short.clone();
+    let outcome = match (ahead, behind) {
+        (0, 0) => CheckoutOutcome::Switched,
+        (0, by) => CheckoutOutcome::FastForwarded { branch, by },
+        (ahead, 0) => CheckoutOutcome::LocalAhead { branch, ahead },
+        (ahead, behind) => CheckoutOutcome::Diverged {
+            branch,
+            ahead,
+            behind,
+        },
+    };
+    // Nur beim Vorspulen der Remote-Baum, sonst immer der lokale Stand.
+    let (object, update) = if ahead == 0 && behind > 0 {
+        let update = RefUpdate::FastForward {
+            branch: short.clone(),
+            from: local.id(),
+            to: remote.id(),
+        };
+        (remote.into_object(), update)
+    } else {
+        (local.into_object(), RefUpdate::None)
+    };
+    Ok(CheckoutTarget {
+        object,
+        branch: Some(short),
+        reference: None,
+        update,
+        outcome,
+    })
+}
 
-    // Dry-run zuerst
-    {
+fn ensure_not_checked_out_elsewhere(repo: &Repository, branch: &str) -> anyhow::Result<()> {
+    match branch_checked_out_elsewhere(repo, branch) {
+        Some(path) => Err(anyhow::Error::new(
+            BranchSwitchBlocked::CheckedOutElsewhere {
+                branch: branch.to_string(),
+                path,
+            },
+        )),
+        None => Ok(()),
+    }
+}
+
+fn apply_ref_update(repo: &Repository, update: &RefUpdate) -> anyhow::Result<()> {
+    match update {
+        RefUpdate::None => {}
+        RefUpdate::Create {
+            branch,
+            at,
+            upstream,
+        } => {
+            let commit = repo
+                .find_commit(*at)
+                .map_err(|e| anyhow::anyhow!("Commit nicht gefunden: {e}"))?;
+            let mut local_branch = repo
+                .branch(branch, &commit, false)
+                .map_err(|e| anyhow::anyhow!("Lokalen Branch erstellen fehlgeschlagen: {e}"))?;
+            let _ = local_branch.set_upstream(Some(upstream));
+        }
+        RefUpdate::FastForward { branch, from, to } => {
+            // Compare-and-Swap: hat sich der Ref seit dem Auflösen bewegt,
+            // bricht libgit2 mit GIT_EMODIFIED ab statt ihn zu überschreiben.
+            repo.reference_matching(
+                &format!("refs/heads/{branch}"),
+                *to,
+                true,
+                *from,
+                &format!("gitmanager: fast-forward {branch}"),
+            )
+            .map_err(|e| anyhow::anyhow!("Vorspulen von {branch} fehlgeschlagen: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// E15: gemeinsamer Ablauf für sicheren und Force-Wechsel. Ziel zuerst
+/// auflösen (inkl. Upstream-/Worktree-Prüfung), dann Dry-Run (nur sicher),
+/// Refs, Baum, HEAD. Refs vor dem Baum, damit ein gescheitertes Anlegen oder
+/// Vorspulen das Arbeitsverzeichnis nicht anfasst — außer beim Vorspulen des
+/// aktuellen HEAD-Branch: `checkout_tree` rechnet gegen HEAD als Basis, der
+/// Ref folgt dort erst nach dem Baum.
+fn switch_branch(path: &Path, branch_name: &str, force: bool) -> anyhow::Result<CheckoutOutcome> {
+    let repo = preflight_checkout(path)?;
+    let target = resolve_checkout_target(&repo, branch_name)?;
+
+    if !force {
+        // Dry-run zuerst
         let mut cb = git2::build::CheckoutBuilder::new();
         cb.dry_run();
         cb.safe();
-        if let Err(e) = repo.checkout_tree(&object, Some(&mut cb)) {
+        if let Err(e) = repo.checkout_tree(&target.object, Some(&mut cb)) {
             if e.code() == git2::ErrorCode::Conflict {
                 anyhow::bail!("Checkout würde Konflikte erzeugen (dirty Dateien): {e}");
             }
@@ -816,52 +1112,54 @@ pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<()> {
         }
     }
 
-    // Eigentlicher Checkout
-    let mut cb = git2::build::CheckoutBuilder::new();
-    cb.safe();
-    repo.checkout_tree(&object, Some(&mut cb))
-        .map_err(|e| anyhow::anyhow!("Checkout fehlgeschlagen: {e}"))?;
-
-    // Bei Remote-Branch: lokalen Tracking-Branch erstellen
-    if let Some(gref) = &reference {
-        let name = gref
-            .name()
-            .map_err(|e| anyhow::anyhow!("Ungültige Referenz: {e}"))?;
-        if name.starts_with("refs/remotes/") {
-            // K2: nur Remote-Präfix strippen (siehe remote_short_name).
-            let short = remote_short_name(name, branch_name);
-            let commit = object
-                .peel_to_commit()
-                .map_err(|e| anyhow::anyhow!("Commit nicht gefunden: {e}"))?;
-            if repo.find_branch(&short, BranchType::Local).is_err() {
-                let mut local_branch = repo
-                    .branch(&short, &commit, false)
-                    .map_err(|e| anyhow::anyhow!("Lokalen Branch erstellen fehlgeschlagen: {e}"))?;
-                // Upstream als Kurzname (origin/feature/foo), nicht Full-Ref.
-                let upstream = name.strip_prefix("refs/remotes/").unwrap_or(name);
-                let _ = local_branch.set_upstream(Some(upstream));
-            }
-            repo.set_head(&format!("refs/heads/{short}"))
-                .map_err(|e| anyhow::anyhow!("HEAD setzen fehlgeschlagen: {e}"))?;
-            return Ok(());
-        }
+    let updates_head = match &target.update {
+        RefUpdate::FastForward { branch, .. } => repo.head().is_ok_and(|h| {
+            h.name()
+                .is_ok_and(|n| n.strip_prefix("refs/heads/") == Some(branch.as_str()))
+        }),
+        _ => false,
+    };
+    if !updates_head {
+        apply_ref_update(&repo, &target.update)?;
     }
 
-    set_head_from_reference(&repo, reference.as_ref(), &object)
+    // Eigentlicher Checkout
+    let mut cb = git2::build::CheckoutBuilder::new();
+    if force {
+        cb.force();
+    } else {
+        cb.safe();
+    }
+    let label = if force { "Force Checkout" } else { "Checkout" };
+    repo.checkout_tree(&target.object, Some(&mut cb))
+        .map_err(|e| anyhow::anyhow!("{label} fehlgeschlagen: {e}"))?;
+
+    if updates_head {
+        apply_ref_update(&repo, &target.update)?;
+    }
+    match &target.branch {
+        Some(branch) => repo
+            .set_head(&format!("refs/heads/{branch}"))
+            .map_err(|e| anyhow::anyhow!("HEAD setzen fehlgeschlagen: {e}"))?,
+        None => set_head_from_reference(&repo, target.reference.as_ref(), &target.object)?,
+    }
+    Ok(target.outcome)
+}
+
+/// Führt sicheren Branch-Wechsel durch (nur wenn keine Konflikte, sonst Fehler).
+/// E15: Remote-Ref (`origin/x`) mit vorhandenem lokalem `x` → vorspulen oder
+/// lokalen Stand auschecken (siehe [`CheckoutOutcome`]), nie Remote-Baum
+/// unter lokalem Ref.
+pub fn checkout_branch(path: &Path, branch_name: &str) -> anyhow::Result<CheckoutOutcome> {
+    switch_branch(path, branch_name, false)
 }
 
 /// Force Checkout (überschreibt lokale Änderungen) – nur nach Bestätigung via Dialog nach Dirty-Check.
 /// Verhindert versehentliches Zerstören eines laufenden Merge/Rebase-States.
-pub fn checkout_branch_force(path: &Path, branch_name: &str) -> anyhow::Result<()> {
-    let repo = preflight_checkout(path)?;
-    let (object, reference) = repo
-        .revparse_ext(branch_name)
-        .map_err(|e| anyhow::anyhow!("Branch '{branch_name}' nicht gefunden: {e}"))?;
-    let mut cb = git2::build::CheckoutBuilder::new();
-    cb.force();
-    repo.checkout_tree(&object, Some(&mut cb))
-        .map_err(|e| anyhow::anyhow!("Force Checkout fehlgeschlagen: {e}"))?;
-    set_head_from_reference(&repo, reference.as_ref(), &object)
+/// E15: Remote-Ref wie bei [`checkout_branch`] auf den lokalen Branch
+/// abgebildet (ggf. angelegt) statt Detached HEAD.
+pub fn checkout_branch_force(path: &Path, branch_name: &str) -> anyhow::Result<CheckoutOutcome> {
+    switch_branch(path, branch_name, true)
 }
 
 /// M4: typisierter Stash-Pop-Konflikt — statt String-Match
@@ -891,7 +1189,14 @@ pub fn is_stash_pop_failed(err: &anyhow::Error) -> bool {
 }
 
 /// Stash + Checkout (für Dirty-Dialog Option)
-pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<()> {
+pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<CheckoutOutcome> {
+    // E15: deterministische Abbrüche (Merge/Rebase, Branch fehlt, anderer
+    // Upstream, Worktree) vor dem Stash — sonst liefe das Arbeitsverzeichnis
+    // durch Stash + Pop, und `stash_pop` stellt den Index nicht wieder her.
+    {
+        let repo = preflight_checkout(path)?;
+        resolve_checkout_target(&repo, branch_name)?;
+    }
     let mut repo =
         Repository::open(path).map_err(|e| anyhow::anyhow!("Repo öffnen fehlgeschlagen: {e}"))?;
     let sig = repo
@@ -913,11 +1218,11 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<()> 
     // Jetzt checkout
     let stashed = stash_result.is_ok();
     match checkout_branch(path, branch_name) {
-        Ok(()) => {
+        Ok(outcome) => {
             // Nur poppen wenn tatsächlich gestasht wurde — sonst würde
             // stash_pop(0) einen alten, bewusst aufgehobenen Stash poppen (K1).
             if !stashed {
-                return Ok(());
+                return Ok(outcome);
             }
             // Versuche stash pop, aber ignoriere Konflikte (lasse stash bestehen)
             let mut repo2 = Repository::open(path)
@@ -931,7 +1236,7 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<()> 
                     detail: format!("{e}"),
                 }));
             }
-            Ok(())
+            Ok(outcome)
         }
         Err(e) => {
             // Checkout fehlgeschlagen → versuche stash wiederherzustellen
@@ -2614,6 +2919,425 @@ mod tests {
         let res = stash_and_checkout(dir.path(), "nonexistent_xyz");
         assert!(res.is_err());
         // should not panic, and stash if created should be popped back
+    }
+
+    // --- E15: Wechsel auf Remote-Branch mit abweichendem lokalem Branch ---
+
+    fn git_identity(dir: &Path) {
+        git_cmd(dir, &["config", "user.name", "Test"]);
+        git_cmd(dir, &["config", "user.email", "test@test.com"]);
+    }
+
+    fn commit_file(dir: &Path, file: &str, content: &str, msg: &str) {
+        fs::write(dir.join(file), content).unwrap();
+        git_cmd(dir, &["add", file]);
+        git_cmd(dir, &["commit", "-m", msg]);
+    }
+
+    /// Bare-Origin + Klon `c1`: `main` (a.txt) und `feature/x` (zusätzlich
+    /// x.txt), beide gepusht mit Upstream; c1 steht danach wieder auf `main`.
+    fn origin_and_clone_with_feature(base: &Path) -> PathBuf {
+        git_cmd(base, &["init", "--bare", "origin.git"]);
+        git_cmd(base, &["clone", "origin.git", "c1"]);
+        let c1 = base.join("c1");
+        git_identity(&c1);
+        git_cmd(&c1, &["checkout", "-b", "main"]);
+        commit_file(&c1, "a.txt", "one\n", "initial");
+        git_cmd(&c1, &["push", "-u", "origin", "main"]);
+        git_cmd(&c1, &["checkout", "-b", "feature/x"]);
+        commit_file(&c1, "x.txt", "x1\n", "feature");
+        git_cmd(&c1, &["push", "-u", "origin", "feature/x"]);
+        git_cmd(&c1, &["checkout", "main"]);
+        c1
+    }
+
+    /// Zweiter Klon `c2` pusht einen weiteren Commit (Datei `file`) auf
+    /// `branch` — origin läuft c1 danach voraus (c1 muss noch fetchen).
+    fn push_from_second_clone(base: &Path, branch: &str, file: &str) {
+        git_cmd(base, &["clone", "-b", branch, "origin.git", "c2"]);
+        let c2 = base.join("c2");
+        git_identity(&c2);
+        commit_file(&c2, file, "remote\n", "remote commit");
+        git_cmd(&c2, &["push", "origin", branch]);
+    }
+
+    fn ref_oid(dir: &Path, name: &str) -> git2::Oid {
+        Repository::open(dir).unwrap().refname_to_id(name).unwrap()
+    }
+
+    /// Symbolisches Ziel von HEAD (`refs/heads/…`), leer bei Detached HEAD.
+    fn head_target(dir: &Path) -> String {
+        let repo = Repository::open(dir).unwrap();
+        let head = repo.find_reference("HEAD").unwrap();
+        head.symbolic_target()
+            .ok()
+            .flatten()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn dirty(dir: &Path) -> bool {
+        is_dirty(&Repository::open(dir).unwrap())
+    }
+
+    fn canon(p: &Path) -> PathBuf {
+        p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+    }
+
+    #[test]
+    fn checkout_remote_branch_fast_forwards_stale_local() {
+        // E15/Step 1: lokales feature/x hinter origin/feature/x → vorspulen
+        // statt Remote-Baum + alter lokaler Ref (Phantom-Staging).
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        push_from_second_clone(base.path(), "feature/x", "y.txt");
+        git_cmd(&c1, &["fetch", "origin"]);
+        let outcome = checkout_branch(&c1, "origin/feature/x").unwrap();
+        assert_eq!(
+            outcome,
+            CheckoutOutcome::FastForwarded {
+                branch: "feature/x".to_string(),
+                by: 1
+            }
+        );
+        assert!(!dirty(&c1), "kein Phantom-Diff nach dem Wechsel");
+        assert_eq!(head_target(&c1), "refs/heads/feature/x");
+        assert_eq!(
+            ref_oid(&c1, "refs/heads/feature/x"),
+            ref_oid(&c1, "refs/remotes/origin/feature/x"),
+            "lokaler Branch muss vorgespult sein"
+        );
+        assert!(
+            c1.join("y.txt").exists(),
+            "Remote-Stand im Arbeitsverzeichnis"
+        );
+    }
+
+    #[test]
+    fn checkout_remote_branch_fast_forwards_current_head() {
+        // E15: c1 steht schon auf dem veralteten feature/x und wählt
+        // origin/feature/x → Baum und Ref vorgespult, sauber.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["checkout", "feature/x"]);
+        push_from_second_clone(base.path(), "feature/x", "y.txt");
+        git_cmd(&c1, &["fetch", "origin"]);
+        let outcome = checkout_branch(&c1, "origin/feature/x").unwrap();
+        assert_eq!(
+            outcome,
+            CheckoutOutcome::FastForwarded {
+                branch: "feature/x".to_string(),
+                by: 1
+            }
+        );
+        assert!(!dirty(&c1), "kein Phantom-Diff nach dem Vorspulen");
+        assert_eq!(head_target(&c1), "refs/heads/feature/x");
+        assert_eq!(
+            ref_oid(&c1, "refs/heads/feature/x"),
+            ref_oid(&c1, "refs/remotes/origin/feature/x")
+        );
+        assert!(c1.join("y.txt").exists());
+    }
+
+    #[test]
+    fn checkout_remote_branch_keeps_local_ahead() {
+        // E15/Step 2: lokales feature/x hat einen eigenen Commit → Wechsel
+        // auf den lokalen Stand, Ergebnis „voraus“.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["checkout", "feature/x"]);
+        commit_file(&c1, "local.txt", "local\n", "local-only");
+        git_cmd(&c1, &["checkout", "main"]);
+        let local_before = ref_oid(&c1, "refs/heads/feature/x");
+        let outcome = checkout_branch(&c1, "origin/feature/x").unwrap();
+        assert_eq!(
+            outcome,
+            CheckoutOutcome::LocalAhead {
+                branch: "feature/x".to_string(),
+                ahead: 1
+            }
+        );
+        assert!(!dirty(&c1), "lokaler Stand sauber ausgecheckt");
+        assert_eq!(head_target(&c1), "refs/heads/feature/x");
+        assert_eq!(ref_oid(&c1, "refs/heads/feature/x"), local_before);
+        assert!(c1.join("local.txt").exists());
+    }
+
+    #[test]
+    fn checkout_remote_branch_keeps_diverged_local() {
+        // E15/Step 2: lokal und Remote je ein eigener Commit → lokaler
+        // Stand, Ref unverändert, Ergebnis „divergiert“.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["checkout", "feature/x"]);
+        commit_file(&c1, "local.txt", "local\n", "local-only");
+        git_cmd(&c1, &["checkout", "main"]);
+        push_from_second_clone(base.path(), "feature/x", "y.txt");
+        git_cmd(&c1, &["fetch", "origin"]);
+        let local_before = ref_oid(&c1, "refs/heads/feature/x");
+        let outcome = checkout_branch(&c1, "origin/feature/x").unwrap();
+        assert_eq!(
+            outcome,
+            CheckoutOutcome::Diverged {
+                branch: "feature/x".to_string(),
+                ahead: 1,
+                behind: 1
+            }
+        );
+        assert!(!dirty(&c1), "lokaler Stand sauber ausgecheckt");
+        assert_eq!(head_target(&c1), "refs/heads/feature/x");
+        assert_eq!(
+            ref_oid(&c1, "refs/heads/feature/x"),
+            local_before,
+            "divergierter Ref bleibt unverändert"
+        );
+        assert!(c1.join("local.txt").exists());
+        assert!(!c1.join("y.txt").exists(), "kein Remote-Baum");
+    }
+
+    #[test]
+    fn checkout_force_remote_only_branch_attaches_local_branch() {
+        // E15/Step 3: Force auf origin/only-remote → angehängter lokaler
+        // Branch mit Upstream statt Detached HEAD.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(base.path(), &["clone", "-b", "main", "origin.git", "c2"]);
+        let c2 = base.path().join("c2");
+        git_identity(&c2);
+        git_cmd(&c2, &["checkout", "-b", "only-remote"]);
+        commit_file(&c2, "r.txt", "r\n", "remote branch");
+        git_cmd(&c2, &["push", "origin", "only-remote"]);
+        git_cmd(&c1, &["fetch", "origin"]);
+        fs::write(c1.join("a.txt"), "dirty\n").unwrap();
+        let outcome = checkout_branch_force(&c1, "origin/only-remote").unwrap();
+        assert_eq!(outcome, CheckoutOutcome::Switched);
+        assert_eq!(head_target(&c1), "refs/heads/only-remote");
+        let repo = Repository::open(&c1).unwrap();
+        assert!(!get_branch(&repo).1, "kein Detached HEAD");
+        let local = repo.find_branch("only-remote", BranchType::Local).unwrap();
+        assert_eq!(
+            local.upstream().unwrap().name().unwrap(),
+            Some("origin/only-remote")
+        );
+        assert!(!is_dirty(&repo), "Force verwirft die Änderung");
+        assert!(c1.join("r.txt").exists());
+    }
+
+    #[test]
+    fn checkout_safe_remote_only_branch_creates_tracking_branch() {
+        // Bestehendes Verhalten abgesichert: kein lokaler Branch → anlegen
+        // mit Upstream, HEAD angehängt.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["branch", "-D", "feature/x"]);
+        let outcome = checkout_branch(&c1, "origin/feature/x").unwrap();
+        assert_eq!(outcome, CheckoutOutcome::Switched);
+        assert_eq!(head_target(&c1), "refs/heads/feature/x");
+        assert!(!dirty(&c1));
+        let repo = Repository::open(&c1).unwrap();
+        let local = repo.find_branch("feature/x", BranchType::Local).unwrap();
+        assert_eq!(
+            local.upstream().unwrap().name().unwrap(),
+            Some("origin/feature/x")
+        );
+    }
+
+    #[test]
+    fn checkout_force_remote_branch_fast_forwards_stale_local() {
+        // E15: Force-Variante analog — veraltetes lokales feature/x wird
+        // vorgespult, lokale Änderung verworfen, kein Phantom-Diff.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        push_from_second_clone(base.path(), "feature/x", "y.txt");
+        git_cmd(&c1, &["fetch", "origin"]);
+        fs::write(c1.join("a.txt"), "dirty\n").unwrap();
+        let outcome = checkout_branch_force(&c1, "origin/feature/x").unwrap();
+        assert_eq!(
+            outcome,
+            CheckoutOutcome::FastForwarded {
+                branch: "feature/x".to_string(),
+                by: 1
+            }
+        );
+        assert!(!dirty(&c1));
+        assert_eq!(head_target(&c1), "refs/heads/feature/x");
+        assert_eq!(
+            ref_oid(&c1, "refs/heads/feature/x"),
+            ref_oid(&c1, "refs/remotes/origin/feature/x")
+        );
+    }
+
+    #[test]
+    fn checkout_remote_branch_rejects_other_upstream() {
+        // E15/Step 4: lokales feature/x verfolgt upstream/feature/x, gewählt
+        // wird origin/feature/x → Fehler, Arbeitsverzeichnis unverändert.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(
+            base.path(),
+            &["clone", "--bare", "origin.git", "upstream.git"],
+        );
+        let upstream_url = base.path().join("upstream.git");
+        git_cmd(
+            &c1,
+            &["remote", "add", "upstream", upstream_url.to_str().unwrap()],
+        );
+        git_cmd(&c1, &["fetch", "upstream"]);
+        git_cmd(
+            &c1,
+            &[
+                "branch",
+                "--set-upstream-to=upstream/feature/x",
+                "feature/x",
+            ],
+        );
+        for force in [false, true] {
+            let res = if force {
+                checkout_branch_force(&c1, "origin/feature/x")
+            } else {
+                checkout_branch(&c1, "origin/feature/x")
+            };
+            let err = res.expect_err("anderer Upstream muss abbrechen");
+            assert!(
+                err.to_string().contains("verfolgt upstream/feature/x"),
+                "unerwartete Meldung: {err}"
+            );
+            assert_eq!(
+                err.downcast_ref::<BranchSwitchBlocked>(),
+                Some(&BranchSwitchBlocked::UpstreamMismatch {
+                    branch: "feature/x".to_string(),
+                    upstream: "upstream/feature/x".to_string(),
+                })
+            );
+            assert_eq!(head_target(&c1), "refs/heads/main");
+            assert!(!dirty(&c1), "Arbeitsverzeichnis unverändert");
+            assert!(!c1.join("x.txt").exists());
+        }
+    }
+
+    #[test]
+    fn checkout_rejects_branch_checked_out_in_linked_worktree() {
+        // E15/Step 5: feature/x ist in einem verknüpften Worktree HEAD →
+        // Fehler mit Worktree-Pfad, Prüfung vor checkout_tree (c1 sauber).
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let wt = base.path().join("wt");
+        git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "feature/x"]);
+        for target in ["feature/x", "origin/feature/x"] {
+            for force in [false, true] {
+                let res = if force {
+                    checkout_branch_force(&c1, target)
+                } else {
+                    checkout_branch(&c1, target)
+                };
+                let err = res.expect_err("Worktree-Branch muss abbrechen");
+                match err.downcast_ref::<BranchSwitchBlocked>() {
+                    Some(BranchSwitchBlocked::CheckedOutElsewhere { branch, path }) => {
+                        assert_eq!(branch, "feature/x");
+                        assert_eq!(canon(path), canon(&wt));
+                    }
+                    other => panic!("{target} force={force}: unerwartet {other:?} / {err}"),
+                }
+                assert!(
+                    err.to_string().contains("wt"),
+                    "Meldung nennt den Worktree-Pfad: {err}"
+                );
+                assert_eq!(head_target(&c1), "refs/heads/main");
+                assert!(
+                    !dirty(&c1),
+                    "{target} force={force}: c1 muss sauber bleiben"
+                );
+                assert!(!c1.join("x.txt").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn branch_checked_out_elsewhere_reads_all_worktrees() {
+        // E15: Haupt-Worktree und verknüpfte Worktrees, der eigene zählt nicht.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let wt = base.path().join("wt");
+        git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "feature/x"]);
+        let main_repo = Repository::open(&c1).unwrap();
+        assert_eq!(
+            branch_checked_out_elsewhere(&main_repo, "feature/x").map(|p| canon(&p)),
+            Some(canon(&wt))
+        );
+        assert_eq!(branch_checked_out_elsewhere(&main_repo, "main"), None);
+        assert_eq!(branch_checked_out_elsewhere(&main_repo, "other"), None);
+        let wt_repo = Repository::open(&wt).unwrap();
+        assert_eq!(
+            branch_checked_out_elsewhere(&wt_repo, "main").map(|p| canon(&p)),
+            Some(canon(&c1))
+        );
+        assert_eq!(branch_checked_out_elsewhere(&wt_repo, "feature/x"), None);
+        drop(wt_repo);
+        // Verwaister Worktree (Ordner gelöscht, nicht gesperrt) zählt wie
+        // bei `git worktree prune` nicht mehr.
+        fs::remove_dir_all(&wt).unwrap();
+        assert_eq!(branch_checked_out_elsewhere(&main_repo, "feature/x"), None);
+        drop(main_repo);
+        checkout_branch(&c1, "feature/x").unwrap();
+        assert_eq!(head_target(&c1), "refs/heads/feature/x");
+        assert!(!dirty(&c1));
+    }
+
+    #[test]
+    fn branch_checked_out_elsewhere_normalizes_relative_gitdir() {
+        // E15-Review: `worktree.useRelativePaths` schreibt `<admin>/gitdir`
+        // relativ → Pfad ohne `..`-Teile, gleich dem echten Worktree-Ordner.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let wt = base.path().join("wt");
+        git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "feature/x"]);
+        // <c1>/.git/worktrees/wt → vier Ebenen hoch bis base.
+        fs::write(c1.join(".git/worktrees/wt/gitdir"), "../../../../wt/.git\n").unwrap();
+        let repo = Repository::open(&c1).unwrap();
+        let path = branch_checked_out_elsewhere(&repo, "feature/x").expect("Worktree erkannt");
+        assert!(
+            !path.components().any(|c| c == Component::ParentDir),
+            "kein `..` im Pfad: {}",
+            path.display()
+        );
+        assert_eq!(path, canon(&wt));
+    }
+
+    #[test]
+    fn stash_and_checkout_blocked_switch_keeps_index() {
+        // E15-Review: Upstream-/Worktree-Abbruch vor dem Stash — kein
+        // Stash + Pop, die gestagte Änderung bleibt gestagt.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(
+            &c1,
+            &["branch", "--set-upstream-to=origin/main", "feature/x"],
+        );
+        let wt = base.path().join("wt");
+        git_cmd(
+            &c1,
+            &["worktree", "add", "-b", "wt-branch", wt.to_str().unwrap()],
+        );
+        fs::write(c1.join("a.txt"), "staged\n").unwrap();
+        git_cmd(&c1, &["add", "a.txt"]);
+        for target in ["origin/feature/x", "wt-branch"] {
+            let err = stash_and_checkout(&c1, target).expect_err("Wechsel muss abbrechen");
+            assert!(
+                err.downcast_ref::<BranchSwitchBlocked>().is_some(),
+                "{target}: unerwartet {err}"
+            );
+            let repo = Repository::open(&c1).unwrap();
+            assert!(
+                repo.revparse_single("stash@{0}").is_err(),
+                "{target}: kein Stash angelegt"
+            );
+            assert_eq!(
+                repo.status_file(Path::new("a.txt")).unwrap(),
+                git2::Status::INDEX_MODIFIED,
+                "{target}: Änderung bleibt gestagt"
+            );
+            assert_eq!(head_target(&c1), "refs/heads/main");
+        }
     }
 
     #[test]

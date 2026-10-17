@@ -98,6 +98,22 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::En, "branch_conflict_error") => "Branch switch not possible".to_string(),
         (Language::De, "branch_conflict_error") => "Branch-Wechsel nicht möglich".to_string(),
 
+        // ── Branch-Wechsel auf Remote-Branch (E15) ─────────────────────
+        (Language::En, "branch_local_ahead") => "Local branch {} is {} commits ahead – local state checked out".to_string(),
+        (Language::De, "branch_local_ahead") => "Lokaler Branch {} ist {} Commits voraus – lokaler Stand ausgecheckt".to_string(),
+        (Language::En, "branch_local_ahead_one") => "Local branch {} is 1 commit ahead – local state checked out".to_string(),
+        (Language::De, "branch_local_ahead_one") => "Lokaler Branch {} ist 1 Commit voraus – lokaler Stand ausgecheckt".to_string(),
+        (Language::En, "branch_local_diverged") => "Local branch {} differs ({} ahead, {} behind) – local state checked out".to_string(),
+        (Language::De, "branch_local_diverged") => "Lokaler Branch {} weicht ab ({} voraus, {} hinterher) – lokaler Stand ausgecheckt".to_string(),
+        (Language::En, "branch_fast_forwarded") => "Fast-forwarded local branch {} by {} commits".to_string(),
+        (Language::De, "branch_fast_forwarded") => "Lokaler Branch {} um {} Commits vorgespult".to_string(),
+        (Language::En, "branch_fast_forwarded_one") => "Fast-forwarded local branch {} by 1 commit".to_string(),
+        (Language::De, "branch_fast_forwarded_one") => "Lokaler Branch {} um 1 Commit vorgespult".to_string(),
+        (Language::En, "branch_upstream_mismatch") => "Local branch {} tracks {}".to_string(),
+        (Language::De, "branch_upstream_mismatch") => "Lokaler Branch {} verfolgt {}".to_string(),
+        (Language::En, "branch_checked_out_elsewhere") => "Branch {} is checked out in {}".to_string(),
+        (Language::De, "branch_checked_out_elsewhere") => "Branch {} ist in {} ausgecheckt".to_string(),
+
         // ── Repo list ──────────────────────────────────────────────────
         (Language::En, "no_repos_found") => "No repositories found".to_string(),
         (Language::De, "no_repos_found") => "Keine Repositories gefunden".to_string(),
@@ -505,14 +521,18 @@ pub fn tr(lang: Language, key: &str) -> String {
 }
 
 /// Format helper: replaces `{}` placeholders sequentially.
+/// Sucht hinter dem eingesetzten Text weiter — Argumente mit `{}` (Branch-
+/// namen, Pfade) verschlucken sonst den nächsten Platzhalter.
 pub fn tr_fmt(lang: Language, key: &str, args: &[&str]) -> String {
     let mut s = tr(lang, key);
+    let mut from = 0;
     for arg in args {
-        if let Some(pos) = s.find("{}") {
-            s.replace_range(pos..pos + 2, arg);
-        } else {
+        let Some(rel) = s[from..].find("{}") else {
             break;
-        }
+        };
+        let pos = from + rel;
+        s.replace_range(pos..pos + 2, arg);
+        from = pos + arg.len();
     }
     s
 }
@@ -552,6 +572,16 @@ mod tests {
         assert_eq!(
             tr_fmt(Language::De, "profiles_count", &["3"]),
             "Profile (3):"
+        );
+        // Argument mit `{}` (gültiger Branchname) bleibt wörtlich, der
+        // nächste Platzhalter bekommt das nächste Argument.
+        assert_eq!(
+            tr_fmt(
+                Language::En,
+                "branch_checked_out_elsewhere",
+                &["feat/{}", "C:\\wt"]
+            ),
+            "Branch feat/{} is checked out in C:\\wt"
         );
     }
 
@@ -800,6 +830,65 @@ mod tests {
         assert!(
             !en_m.contains("weitere"),
             "EN main must not be German: {en_m}"
+        );
+    }
+
+    #[test]
+    fn tr_mr_keys_exist() {
+        // Merge-Requests-Plan: jeder Task trägt seine Schlüssel hier nach
+        // (Tabelle anhang/i18n-keys.md).
+        let keys = [
+            // Task 1 (E15): Branch-Wechsel auf Remote-Branch
+            "branch_local_ahead",
+            "branch_local_ahead_one",
+            "branch_local_diverged",
+            "branch_fast_forwarded",
+            "branch_fast_forwarded_one",
+            "branch_upstream_mismatch",
+            "branch_checked_out_elsewhere",
+        ];
+        for key in keys {
+            let en = tr(Language::En, key);
+            let de = tr(Language::De, key);
+            assert_ne!(en, key, "missing EN key: {key}");
+            assert_ne!(de, key, "missing DE key: {key}");
+            // En enthält kein Deutsch.
+            for german in [
+                "ä",
+                "ö",
+                "ü",
+                "ß",
+                "„",
+                "Lokaler",
+                "ausgecheckt",
+                "verfolgt",
+                "voraus",
+                "hinterher",
+                "vorgespult",
+            ] {
+                assert!(
+                    !en.contains(german),
+                    "EN {key} must not contain German '{german}': {en}"
+                );
+            }
+            // Deutsche Texte ohne ASCII-Anführungszeichen.
+            assert!(!de.contains('"'), "DE {key} uses ASCII quotes: {de}");
+        }
+        assert_eq!(
+            tr_fmt(Language::De, "branch_local_diverged", &["feature/x", "2", "3"]),
+            "Lokaler Branch feature/x weicht ab (2 voraus, 3 hinterher) – lokaler Stand ausgecheckt"
+        );
+        assert_eq!(
+            tr_fmt(
+                Language::En,
+                "branch_checked_out_elsewhere",
+                &["feature/x", "C:\\wt"]
+            ),
+            "Branch feature/x is checked out in C:\\wt"
+        );
+        assert_eq!(
+            tr_fmt(Language::De, "branch_fast_forwarded_one", &["main"]),
+            "Lokaler Branch main um 1 Commit vorgespult"
         );
     }
 

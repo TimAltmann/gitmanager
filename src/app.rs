@@ -61,6 +61,57 @@ pub fn fetch_error_parts(e: &anyhow::Error) -> (String, bool, bool) {
     (msg, partial, is_fetch)
 }
 
+/// E15: Hinweis nach dem Wechsel auf einen Remote-Branch, dessen lokaler
+/// Branch vorgespult wurde, voraus ist oder divergiert. `None` → die
+/// bisherige Erfolgsmeldung.
+pub fn checkout_outcome_notice(
+    lang: Language,
+    outcome: &crate::git::CheckoutOutcome,
+) -> Option<String> {
+    use crate::git::CheckoutOutcome;
+    Some(match outcome {
+        CheckoutOutcome::Switched => return None,
+        CheckoutOutcome::FastForwarded { branch, by: 1 } => {
+            tr_fmt(lang, "branch_fast_forwarded_one", &[branch])
+        }
+        CheckoutOutcome::FastForwarded { branch, by } => {
+            tr_fmt(lang, "branch_fast_forwarded", &[branch, &by.to_string()])
+        }
+        CheckoutOutcome::LocalAhead { branch, ahead: 1 } => {
+            tr_fmt(lang, "branch_local_ahead_one", &[branch])
+        }
+        CheckoutOutcome::LocalAhead { branch, ahead } => {
+            tr_fmt(lang, "branch_local_ahead", &[branch, &ahead.to_string()])
+        }
+        CheckoutOutcome::Diverged {
+            branch,
+            ahead,
+            behind,
+        } => tr_fmt(
+            lang,
+            "branch_local_diverged",
+            &[branch, &ahead.to_string(), &behind.to_string()],
+        ),
+    })
+}
+
+/// E15: Fehlerdetail für den Branch-Wechsel — typisierte Abbrüche
+/// (`BranchSwitchBlocked`) lokalisiert, sonst der bisherige Fehlertext.
+pub fn branch_switch_error_detail(lang: Language, e: &anyhow::Error) -> String {
+    use crate::git::BranchSwitchBlocked;
+    match e.downcast_ref::<BranchSwitchBlocked>() {
+        Some(BranchSwitchBlocked::UpstreamMismatch { branch, upstream }) => {
+            tr_fmt(lang, "branch_upstream_mismatch", &[branch, upstream])
+        }
+        Some(BranchSwitchBlocked::CheckedOutElsewhere { branch, path }) => tr_fmt(
+            lang,
+            "branch_checked_out_elsewhere",
+            &[branch, &path.display().to_string()],
+        ),
+        None => format!("{e:#}"),
+    }
+}
+
 /// M2: Zähler-Label für die gecappte Dialog-Dateiliste — nur bei
 /// tatsächlicher Trunkierung mit "+" (`files_truncated` aus
 /// `get_detailed_status`), nicht schon bei exakt CAP Einträgen (F1#F3).
@@ -1394,8 +1445,9 @@ impl MyApp {
             crate::git::checkout_branch(&repo_path, &target_branch)
         };
 
+        let lang = self.config.language;
         match result {
-            Ok(()) => {
+            Ok(outcome) => {
                 self.status_message = Some(format!(
                     "Branch zu '{}' gewechselt: {}",
                     target_branch,
@@ -1406,13 +1458,22 @@ impl MyApp {
                 self.branch_dialog = None;
                 self.record_usage(&repo_path, UsageType::BranchSwitch);
                 self.start_scan();
+                // E15: Hinweis (vorgespult / voraus / divergiert) erst nach
+                // `start_scan` — während eines Auto-Fetch überschreibt der
+                // sonst „auto_fetch_running“ (Scan bleibt per pending_scan gemerkt).
+                if let Some(notice) = checkout_outcome_notice(lang, &outcome) {
+                    self.status_message = Some(notice);
+                    self.status_message_time = Some(std::time::Instant::now());
+                }
             }
             Err(e) => {
+                // E15: Upstream-/Worktree-Abbruch lokalisiert.
+                let detail = branch_switch_error_detail(lang, &e);
                 // Wenn Fehler und Dialog offen, zeige Fehler im Dialog, sonst global
                 if let Some(dlg) = &mut self.branch_dialog {
-                    dlg.error = Some(format!("{e:#}"));
+                    dlg.error = Some(detail);
                 } else {
-                    self.error = Some(format!("Branch-Wechsel fehlgeschlagen: {e:#}"));
+                    self.error = Some(format!("Branch-Wechsel fehlgeschlagen: {detail}"));
                 }
                 // Bei stash_and_checkout kann es sein dass stash pop fehlgeschlagen ist, aber checkout ok – dann trotzdem neu scannen
                 // M4: typisiert statt String-Match.
@@ -3183,6 +3244,167 @@ mod tests {
             top_bar_collapsed = false;
         }
         assert!(!top_bar_collapsed);
+    }
+
+    #[test]
+    fn checkout_outcome_notice_texts() {
+        // E15: Hinweis nur bei abweichendem lokalem Branch, Einzahl getrennt.
+        use crate::git::CheckoutOutcome;
+        assert_eq!(
+            checkout_outcome_notice(Language::De, &CheckoutOutcome::Switched),
+            None
+        );
+        let ff = |by| CheckoutOutcome::FastForwarded {
+            branch: "feature/x".to_string(),
+            by,
+        };
+        assert_eq!(
+            checkout_outcome_notice(Language::De, &ff(1)).as_deref(),
+            Some("Lokaler Branch feature/x um 1 Commit vorgespult")
+        );
+        assert_eq!(
+            checkout_outcome_notice(Language::De, &ff(3)).as_deref(),
+            Some("Lokaler Branch feature/x um 3 Commits vorgespult")
+        );
+        assert_eq!(
+            checkout_outcome_notice(Language::En, &ff(3)).as_deref(),
+            Some("Fast-forwarded local branch feature/x by 3 commits")
+        );
+        let ahead = |ahead| CheckoutOutcome::LocalAhead {
+            branch: "feature/x".to_string(),
+            ahead,
+        };
+        assert_eq!(
+            checkout_outcome_notice(Language::De, &ahead(1)).as_deref(),
+            Some("Lokaler Branch feature/x ist 1 Commit voraus – lokaler Stand ausgecheckt")
+        );
+        assert_eq!(
+            checkout_outcome_notice(Language::En, &ahead(2)).as_deref(),
+            Some("Local branch feature/x is 2 commits ahead – local state checked out")
+        );
+        let diverged = CheckoutOutcome::Diverged {
+            branch: "feature/x".to_string(),
+            ahead: 2,
+            behind: 3,
+        };
+        assert_eq!(
+            checkout_outcome_notice(Language::De, &diverged).as_deref(),
+            Some(
+                "Lokaler Branch feature/x weicht ab (2 voraus, 3 hinterher) – lokaler Stand ausgecheckt"
+            )
+        );
+        assert_eq!(
+            checkout_outcome_notice(Language::En, &diverged).as_deref(),
+            Some("Local branch feature/x differs (2 ahead, 3 behind) – local state checked out")
+        );
+    }
+
+    #[test]
+    fn branch_switch_error_detail_localizes_blocked() {
+        // E15: typisierte Abbrüche lokalisiert, andere Fehler unverändert.
+        use crate::git::BranchSwitchBlocked;
+        let upstream = anyhow::Error::new(BranchSwitchBlocked::UpstreamMismatch {
+            branch: "feature/x".to_string(),
+            upstream: "upstream/feature/x".to_string(),
+        });
+        assert_eq!(
+            branch_switch_error_detail(Language::En, &upstream),
+            "Local branch feature/x tracks upstream/feature/x"
+        );
+        assert_eq!(
+            branch_switch_error_detail(Language::De, &upstream),
+            "Lokaler Branch feature/x verfolgt upstream/feature/x"
+        );
+        let wt = PathBuf::from("/tmp/wt");
+        let elsewhere = anyhow::Error::new(BranchSwitchBlocked::CheckedOutElsewhere {
+            branch: "feature/x".to_string(),
+            path: wt.clone(),
+        });
+        assert_eq!(
+            branch_switch_error_detail(Language::En, &elsewhere),
+            format!("Branch feature/x is checked out in {}", wt.display())
+        );
+        assert_eq!(
+            branch_switch_error_detail(Language::De, &elsewhere),
+            format!("Branch feature/x ist in {} ausgecheckt", wt.display())
+        );
+        let other = anyhow::anyhow!("Checkout fehlgeschlagen: boom");
+        assert_eq!(
+            branch_switch_error_detail(Language::En, &other),
+            "Checkout fehlgeschlagen: boom"
+        );
+    }
+
+    /// E15: Repo mit lokalem `feature` einen Commit hinter
+    /// `refs/remotes/origin/feature` (nur git2, kein Netz).
+    fn repo_with_stale_feature(path: &Path) {
+        std::fs::create_dir(path).unwrap();
+        let repo = git2::Repository::init(path).unwrap();
+        let mut cfg = repo.config().unwrap();
+        cfg.set_str("user.name", "Test").unwrap();
+        cfg.set_str("user.email", "test@test.com").unwrap();
+        std::fs::write(path.join("a.txt"), "one\n").unwrap();
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("a.txt")).unwrap();
+        idx.write().unwrap();
+        let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        let first = repo
+            .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        let first = repo.find_commit(first).unwrap();
+        repo.branch("feature", &first, false).unwrap();
+        // Remote-Stand: ein Commit weiter (b.txt), nur als Remote-Ref.
+        let blob = repo.blob(b"two\n").unwrap();
+        let mut tb = repo.treebuilder(Some(&tree)).unwrap();
+        tb.insert("b.txt", blob, 0o100644).unwrap();
+        let tree2 = repo.find_tree(tb.write().unwrap()).unwrap();
+        let second = repo
+            .commit(None, &sig, &sig, "remote", &tree2, &[&first])
+            .unwrap();
+        repo.reference("refs/remotes/origin/feature", second, true, "test")
+            .unwrap();
+    }
+
+    #[test]
+    fn execute_branch_switch_notice_survives_auto_fetch() {
+        // E15-Review: läuft ein Auto-Fetch, darf `start_scan` den Hinweis
+        // nicht durch „auto_fetch_running“ ersetzen; der Scan bleibt gemerkt.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("repo");
+        repo_with_stale_feature(&path);
+        let mut app = test_app();
+        app.config.roots.clear();
+        app.config.language = Language::De;
+        app.auto_fetching = true;
+        app.execute_branch_switch(path.clone(), "origin/feature".to_string(), false, false);
+        assert!(app.error.is_none(), "unerwarteter Fehler: {:?}", app.error);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Lokaler Branch feature um 1 Commit vorgespult")
+        );
+        assert!(app.pending_scan, "Folge-Scan nach dem Auto-Fetch gemerkt");
+        assert!(!app.scanning);
+    }
+
+    #[test]
+    fn execute_branch_switch_shows_fast_forward_notice() {
+        // E15: Dropdown „origin/feature“ mit veraltetem lokalem `feature`
+        // → vorgespult, Hinweis als Statusmeldung, kein Fehler.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("repo");
+        repo_with_stale_feature(&path);
+        let mut app = test_app();
+        // Folge-Scan ohne Suchpfade (keine Platte, kein Netz).
+        app.config.roots.clear();
+        app.config.language = Language::De;
+        app.execute_branch_switch(path.clone(), "origin/feature".to_string(), false, false);
+        assert!(app.error.is_none(), "unerwarteter Fehler: {:?}", app.error);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Lokaler Branch feature um 1 Commit vorgespult")
+        );
+        assert!(path.join("b.txt").exists());
     }
 
     #[test]
