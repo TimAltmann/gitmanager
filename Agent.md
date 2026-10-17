@@ -22,7 +22,7 @@ Ohne den Export kommt `cargo: command not found` — die häufigste Fehlerquelle
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
 
-cargo test                  # 234 Tests, ~8s, nutzt vendored-libgit2/openssl (kein Netzwerk)
+cargo test                  # 685 Tests, nutzt vendored-libgit2/openssl (kein Netzwerk, kein glab)
 cargo test -- --list        # nur Tests auflisten
 cargo test -- --nocapture   # mit stdout
 
@@ -98,6 +98,17 @@ docker compose run --rm dev cargo build --target x86_64-pc-windows-gnu --release
 docker compose run --rm dev cargo xwin build --target x86_64-pc-windows-msvc --release
 ```
 
+**DoD über Docker** (ohne lokales `cargo`, Image mit rustfmt + clippy):
+
+```bash
+docker compose run --rm dev sh -c "cargo fmt --check && cargo clippy -- -D warnings && cargo test --verbose"
+# zusätzlich bei Windows-Code (cfg(windows)-Nachbarschaft, app.rs, Prozessstart wie glab/git CLI):
+docker compose run --rm dev cargo clippy --target x86_64-pc-windows-gnu -- -D warnings
+docker compose run --rm dev cargo build --release --target x86_64-pc-windows-gnu
+```
+
+Hinweis: Das Image nutzt eine feste rustc-Version, CI `stable` — neue clippy-Lints können abweichen.
+
 CI-Ablauf (`.github/workflows/ci.yml`, exakt diese Reihenfolge): `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo test --verbose` → `cargo build --release --target x86_64-pc-windows-gnu`.
 > **Pflicht-Definition-of-Done bei JEDER Aufgabe:** „Fertig“ heißt immer **alle CI-Stages lokal grün** in obiger Reihenfolge — kein Fix/Feature ist done, solange eine Stage rot ist. `cargo test` allein reicht nicht; auch `fmt`+`clippy` allein reichen nicht. Vor jedem Push/Commit lokal ausführen:
 > ```bash
@@ -116,12 +127,16 @@ CI-Ablauf (`.github/workflows/ci.yml`, exakt diese Reihenfolge): `cargo fmt --ch
 
 **Aufbau:**
 - `src/main.rs` → `src/app.rs:MyApp` (`eframe::App`): hält `AppConfig`, `Vec<RepoInfo>`, `mpsc`-Channels (`scan_tx/rx`, `launch_err`, `config_update`), scannt async via `scan_repos`; verwaltet `tray_popup_open`/`tray_popup_rect`/`window_visible`/`should_quit` + `record_usage()` für MRU, zeigt `tray_popup` via `show_viewport_immediate` (AlwaysOnTop, undecorated, transparent).
-- `src/config.rs:AppConfig` (versioniert, aktuell `10`): atomarer Save (`*.tmp`→`rename`), `try_load()` mit Migration `v2..v10`, validiert/clamped (`branch_display_limit 50..500`, `max_depth 1..10`, `tray_branch_limit 5..50`, `tray_icons.max_display 5..50`), `LanguageProfile`/`IdeConfig`/`AgentProfile`/`RepoUiState` + `TrayIconConfig` (`icon_order`/`hidden_icon_ids`/`max_display`) + `RepoUsage` (`last_opened`/`last_branch_switch`/`last_config_change` + Counter, Key via `repo_state_key(path)` normalisiert auf Windows via `to_lowercase`).
+- `src/config.rs:AppConfig` (versioniert, aktuell `15`): atomarer Save (`*.tmp`→`rename`), `try_load()` mit Migration `v2..v15`, validiert/clamped (`branch_display_limit 50..500`, `max_depth 1..10`, `tray_branch_limit 5..50`, `tray_icons.max_display 5..50`), `LanguageProfile`/`IdeConfig`/`AgentProfile`/`RepoUiState` + `TrayIconConfig` (`icon_order`/`hidden_icon_ids`/`max_display`) + `RepoUsage` (`last_opened`/`last_branch_switch`/`last_config_change` + Counter, Key via `repo_state_key(path)` normalisiert auf Windows via `to_lowercase`).
+- **Config v15 / `MrConfig`** (`AppConfig.merge_requests`, `#[serde(default)]` auf Feld- und Struct-Ebene): glab-Programm, Intervall, Chip-Vorgabe „Alle offenen“, Bot-Approvals, `include_nonlocal`, Opt-out-Liste `excluded_projects` (`host/full/path`, klein), `extra_hosts`, `host_aliases`, `api_protocols`, `review_root`, „Danach öffnen“. `MrConfig::normalize()` läuft in `try_load()` und vor dem Speichern in den Einstellungen. **Downgrade:** Eine ältere Version (< v15) ignoriert `merge_requests` und verwirft es beim nächsten Speichern; nach erneutem Update gelten die Defaults. Das Token liegt nie in der Config, sondern in glab.
 - `src/scanner.rs`: `WalkDir` + `rayon` parallel, respektiert `max_depth`/`max_scan_depth` pro Profil, skippt `node_modules/target/.git`, liefert `RepoInfo` via `git::get_repo_info`.
 - `src/git.rs`: Wrapper um `git2::Repository` (`get_branch`, `list_branches`, `checkout_branch*`, `stash_and_checkout`, `fetch_all`, `is_dirty`), + Launch-Logik `launch_ide`/`launch_agent`/`open_shell` mit Placeholder-Substitution `{file}/{dir}/{repo}`, Shell-Guard `use_shell && !allow_unsafe`, VS (`vswhere`) / Rider (Toolbox) Discovery mit `OnceLock<CachedPath>` + 5-min TTL + `*_force()`.
 - `src/ui/`: `app.rs` zeichnet `TopBar`/`CentralPanel`(`repo_list`)/`StatusBar`/`BranchDialog`/`SettingsWindow` + `tray_popup` via `show_tray_popup_viewport`; `repo_list.rs` rendert Repo-Cards (Branch-/Solution-Dropdowns als `Window`+Filter, IDE/Agent/Explorer/Shell-Icons via `include_image!`); `settings.rs` Tabs `General/Profiles/Agents/Terminal/Appearance/Language/Icons/TrayIcons` mit `SettingsState::from_config`/`merge_auto_detected` + `show_tray_icons_tab` (max_display Slider + reorder/hide); `tray_popup.rs` rendert pro Repo 3-Zeilen-Card (Header, Branch-Dropdown, Tools-Zeile) mit `calculate_popup_position` + Fokus-Verlust-Auto-Close; `theme.rs` 5 Themes.
 - `src/tray.rs` (nur Windows): `create_tray_channels` + `TrayIcon`/`Menu` mit synchronem `MenuEvent::set_event_handler` + Weiterleitung in `mpsc` (`tray_rx`/`menu_rx`) zur Erhaltung von `TrayIconEvent.rect` für exakte Popup-Positionierung über dem Tray-Icon.
-- `src/i18n.rs`: `match (Language,key)` + `tr`/`tr_fmt`, Keys in `tabs_*`/`icons_*`/`tray_*`/`tray_icons_*`/`tray_max_display` etc.
+- `src/gitlab/` (Merge Requests, ohne UI): `remote.rs` (Remotes, Host-Zuordnung), `glab.rs` (`GlabRunner`, `SystemGlab` mit Timeout/ohne Konsolenfenster, `GatedRunner`, `FakeGlab` nur für Tests), `graphql.rs` (Abfragen über `glab api graphql`, Parser), `model.rs` (Gruppen, Sortierung, Badge, Pipeline-Link), `service.rs` (Erkennung, Abruf, Prüfung, Token prüfen/speichern), `checkout.rs` (Checkout-Menü K1), `secret.rs` (`SecretString`), `time.rs`. Netz-Aufrufe nur an GitLab-Hosts, bei denen glab angemeldet ist oder die in den Einstellungen stehen.
+- `src/app/` (Teile von `MyApp`): `merge_requests.rs` (Erkennung, Abruf, Umschalter, Badge, Statusleiste), `mr_checkout.rs` (Worktree/Klon/Umschalten, „Danach öffnen“), `mr_settings.rs` (Worker des Einstellungs-Tabs, Empfänger `mr_settings_rx` in `MyApp`). UI: `src/ui/merge_requests.rs` (Ansicht, Design B), `src/ui/settings/merge_requests.rs` (Tab „Merge Requests“); Farben über `mr_palette` in `theme.rs`.
+- **Tests und glab:** Kein Test startet glab oder geht ins Netz — alles über `Arc<dyn GlabRunner>`, Tests nutzen `FakeGlab` mit Fixtures (`src/gitlab/fixtures/*.json`); `SystemGlab::run` panict unter `cfg(test)` bei `program == "glab"`. Tokens nur als `SecretString` in Kind-stdin/-Env, nie in argv, Logs oder `{:?}`.
+- `src/i18n.rs`: `match (Language,key)` + `tr`/`tr_fmt`, Keys in `tabs_*`/`icons_*`/`tray_*`/`tray_icons_*`/`tray_max_display` etc. Neue Merge-Request-Keys (`mr_*`, `mrs_*`, `view_*`, `rel_*`, `tray_mrs*`) gehören in die Liste von `tr_mr_keys_exist` (prüft auch: En ohne Deutsch, gleiche Platzhalteranzahl De/En, deutsche Anführungszeichen „…“).
 - `assets/icons/*.svg` + `assets/demo.*`, `build.rs` (Windows-Icon), `docker-compose.yml`/`scripts/build.*` für Cross-Build.
 
 **Patterns:** Immediate-mode (kein retained state, `ctx.request_repaint*`), `mpsc` für Hintergrund-Threads (Scan/Launch/Config-Update), versionierte Config-Migration, gefilterte/geordnete Views (`visible_ides()`/`filtered_agents()`), atomares Schreiben, TTL-Cache für teure Pfad-Discovery.

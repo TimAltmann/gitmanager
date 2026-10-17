@@ -1699,11 +1699,54 @@ mod tests {
             "mrs_alias_remove",
             "mrs_glab_pending",
         ];
+        // Vollständigkeit: Liste ohne Dubletten, und jeder MR-Schlüssel aus
+        // `tr` steht in der Liste (sonst prüft niemand seine Texte). Beide
+        // Sprachen scannen: ein Schlüssel nur mit En-Arm fällt sonst durch.
+        let listed: std::collections::HashSet<&str> = keys.iter().copied().collect();
+        assert_eq!(listed.len(), keys.len(), "doppelter Schlüssel in der Liste");
+        for line in include_str!("i18n.rs").lines() {
+            let t = line.trim_start();
+            let Some(rest) = t
+                .strip_prefix("(Language::De, \"")
+                .or_else(|| t.strip_prefix("(Language::En, \""))
+            else {
+                continue;
+            };
+            let key = rest.split('"').next().unwrap_or_default();
+            if ["mr_", "mrs_", "view_", "rel_", "tray_mrs"]
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+            {
+                assert!(listed.contains(key), "MR key not listed: {key}");
+            }
+        }
         for key in keys {
             let en = tr(Language::En, key);
             let de = tr(Language::De, key);
             assert_ne!(en, key, "missing EN key: {key}");
             assert_ne!(de, key, "missing DE key: {key}");
+            // tr_fmt füllt `{}` der Reihe nach: beide Sprachen gleich viele.
+            assert_eq!(
+                en.matches("{}").count(),
+                de.matches("{}").count(),
+                "placeholder count differs for {key}: EN {en} / DE {de}"
+            );
+            // En nur ASCII plus Typografie (keine Umlaute, kein „).
+            assert!(
+                en.chars().all(|c| c.is_ascii() || "–…“”·→↗’".contains(c)),
+                "EN {key} has non-English characters: {en}"
+            );
+            // Anführungszeichen paarweise: De „…“, En “…”.
+            assert_eq!(
+                de.matches('„').count(),
+                de.matches('“').count(),
+                "DE {key} unbalanced quotes: {de}"
+            );
+            assert_eq!(
+                en.matches('“').count(),
+                en.matches('”').count(),
+                "EN {key} unbalanced quotes: {en}"
+            );
             // En enthält kein Deutsch.
             for german in [
                 "ä",
@@ -1765,6 +1808,40 @@ mod tests {
                 "Projekt",
                 "unbekannt",
                 "Eigene",
+                // Task 10–12: Tray, Auschecken, Einstellungs-Tab
+                "Hauptfenster",
+                "Beenden",
+                "angelegt",
+                "geklont",
+                "Bereits",
+                "gewechselt",
+                "Auschecken",
+                "fehlgeschlagen",
+                "Bereit",
+                "Rechte",
+                "Abgelaufen",
+                "Widerrufen",
+                "erreichbar",
+                "Anmeldung",
+                "Speichern",
+                "gespeichert",
+                "Zugriff",
+                "einbezogen",
+                "zugreifbar",
+                "Anzeige",
+                "Aktualis",
+                "Umgebungsvariable",
+                "Zuordn",
+                "Zweck",
+                "Leerzeichen",
+                "Trotzdem",
+                " und ",
+                " mit ",
+                " von ",
+                " der ",
+                " die ",
+                " das ",
+                " ist ",
             ] {
                 assert!(
                     !en.contains(german),
