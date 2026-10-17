@@ -916,32 +916,46 @@ fn expand_env_vars(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Strin
     out
 }
 
+/// Locks des prozessweiten Gates. Alle Runner einer Sitzung teilen sich
+/// eins (`GatedRunner::with_gate`), auch nach einem Wechsel des
+/// glab-Programms und beim Prüfen eines noch nicht gespeicherten Programms.
+#[derive(Default)]
+pub struct GlabGate {
+    rw: RwLock<()>,
+    hosts: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+impl GlabGate {
+    fn host_lock(&self, host: &str) -> Arc<Mutex<()>> {
+        let mut hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(hosts.entry(host.to_ascii_lowercase()).or_default())
+    }
+}
+
 /// Prozessweites Gate: lesende Aufrufe teilen sich den Lese-Lock und laufen
 /// je Host einzeln (höchstens ein glab-Prozess je Host); `auth login` und
 /// `config set` nehmen den Schreib-Lock und laufen exklusiv.
 pub struct GatedRunner<R: GlabRunner> {
     inner: R,
-    gate: RwLock<()>,
-    hosts: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    gate: Arc<GlabGate>,
 }
 
 impl<R: GlabRunner> GatedRunner<R> {
+    /// Runner mit eigenem Gate (Tests); die App baut ihre Runner mit
+    /// `with_gate` an einem gemeinsamen Gate.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(inner: R) -> Self {
-        Self {
-            inner,
-            gate: RwLock::new(()),
-            hosts: Mutex::new(HashMap::new()),
-        }
+        Self::with_gate(inner, Arc::default())
+    }
+
+    /// Runner hinter einem geteilten Gate.
+    pub fn with_gate(inner: R, gate: Arc<GlabGate>) -> Self {
+        Self { inner, gate }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn inner(&self) -> &R {
         &self.inner
-    }
-
-    fn host_lock(&self, host: &str) -> Arc<Mutex<()>> {
-        let mut hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
-        Arc::clone(hosts.entry(host.to_ascii_lowercase()).or_default())
     }
 }
 
@@ -951,12 +965,12 @@ impl<R: GlabRunner> GlabRunner for GatedRunner<R> {
         // Vergiftete Locks (Panic in einem Aufruf) sperren weiter normal.
         match req.kind {
             CallKind::Write => {
-                let _gate = self.gate.write().unwrap_or_else(PoisonError::into_inner);
+                let _gate = self.gate.rw.write().unwrap_or_else(PoisonError::into_inner);
                 self.inner.run(req)
             }
             CallKind::Read => {
-                let _gate = self.gate.read().unwrap_or_else(PoisonError::into_inner);
-                let host = req.host_key.as_deref().map(|h| self.host_lock(h));
+                let _gate = self.gate.rw.read().unwrap_or_else(PoisonError::into_inner);
+                let host = req.host_key.as_deref().map(|h| self.gate.host_lock(h));
                 let _host = host
                     .as_ref()
                     .map(|m| m.lock().unwrap_or_else(PoisonError::into_inner));
@@ -1206,6 +1220,13 @@ pub mod fake {
                 }
             }
             reply.result
+        }
+    }
+
+    /// Ein Fake hinter mehreren `GatedRunner` (geteiltes Gate).
+    impl GlabRunner for Arc<FakeGlab> {
+        fn run(&self, req: GlabRequest) -> Result<GlabOutput, GlabError> {
+            FakeGlab::run(self, req)
         }
     }
 }
@@ -2017,6 +2038,55 @@ mod tests {
         read.join().unwrap().unwrap();
         assert!(fake.write_overlapped());
         assert_eq!(fake.max_parallel("gitlab.example.com"), 2);
+    }
+
+    /// Zwei Runner mit demselben Gate (neues glab-Programm nach
+    /// „Speichern“, laufender Worker mit dem alten): `auth login` des einen
+    /// läuft exklusiv gegenüber Lesern des anderen, Leser je Host einzeln.
+    #[test]
+    fn runners_sharing_a_gate_exclude_each_other() {
+        let fake = Arc::new(FakeGlab::new());
+        let gate = Arc::new(GlabGate::default());
+        let old = Arc::new(GatedRunner::with_gate(Arc::clone(&fake), Arc::clone(&gate)));
+        let new = Arc::new(GatedRunner::with_gate(Arc::clone(&fake), gate));
+        fake.push_when(
+            |r| r.kind == CallKind::Write,
+            FakeReply::stdout(0, "", "").delay(Duration::from_millis(40)),
+        );
+        for _ in 0..2 {
+            fake.push_when(
+                is_host("a.example.com"),
+                FakeReply::http(200, "{}").delay(Duration::from_millis(20)),
+            );
+        }
+        let write = {
+            let old = Arc::clone(&old);
+            thread::spawn(move || {
+                old.run(
+                    GlabRequest::write(
+                        Some("a.example.com"),
+                        ["auth", "login", "--hostname", "a.example.com", "--stdin"],
+                    )
+                    .with_stdin(StdinBody::Secret(SecretString::new(TOKEN.to_string()))),
+                )
+            })
+        };
+        let reads: Vec<_> = [Arc::clone(&old), new]
+            .into_iter()
+            .map(|runner| {
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(10));
+                    runner.run(GlabRequest::api("a.example.com", ["user"]))
+                })
+            })
+            .collect();
+        write.join().unwrap().unwrap();
+        for read in reads {
+            read.join().unwrap().unwrap();
+        }
+        assert!(!fake.write_overlapped());
+        assert_eq!(fake.max_parallel("a.example.com"), 1);
+        assert_eq!(fake.take_calls().len(), 3);
     }
 
     // --- Step 3: SystemGlab gegen ein Stub-Skript ------------------------

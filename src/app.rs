@@ -1,9 +1,10 @@
 mod merge_requests;
 mod mr_checkout;
+mod mr_settings;
 
 use crate::config::{AfterAction, AppConfig, RepoSortMode};
 use crate::git::{launch_agent, launch_ide, MrPrep, RepoInfo};
-use crate::gitlab::glab::{GatedRunner, GlabErrorKind, GlabRunner, SystemGlab};
+use crate::gitlab::glab::{GlabErrorKind, GlabRunner};
 use crate::gitlab::model::MrSnapshot;
 use crate::gitlab::remote::{GlabHost, HostMap, LocalProject};
 use crate::i18n::{tr, tr_fmt, Language};
@@ -16,6 +17,7 @@ use crate::ui::{
 use egui::{Color32, RichText, Vec2};
 use merge_requests::{top_bar_button, MrResult, TOP_BAR_CAPTIONS_WIDTH, TOP_BAR_COMPACT_WIDTH};
 use mr_checkout::{MrCheckoutFailure, MrSwitch};
+use mr_settings::{GlabFactory, MrSettingsCache, MrSettingsResult};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -304,6 +306,9 @@ pub struct MyApp {
     main_view: MainView,
     /// glab-Aufrufe der Sitzung (immer `GatedRunner`, E16); Tests: `FakeGlab`
     glab: Arc<dyn GlabRunner>,
+    /// Programm hinter `glab`; ein anderes nach „Speichern“ → neuer Runner
+    glab_program: String,
+    glab_factory: GlabFactory,
     /// Lokale glab-Erkennung je Kandidat (E16), Cache je Sitzung; nach jedem
     /// Scan nur für neue Kandidaten ergänzt
     glab_hosts: Vec<GlabHost>,
@@ -341,6 +346,13 @@ pub struct MyApp {
     mr_notice: Option<String>,
     /// „In Repo-Liste zeigen“: hervorgehobene Karte und seit wann
     repo_highlight: Option<(RepoHighlight, std::time::Instant)>,
+    /// Lokale Erkennung (E16) für diese Hosts erneut, auch wenn bekannt
+    mr_rediscover: std::collections::BTreeSet<String>,
+    /// Einstellungs-Tab „Merge Requests“: Worker-Ergebnisse kommen auch
+    /// nach dem Schließen an (der `SettingsState` wird dann verworfen)
+    mr_settings_tx: Sender<MrSettingsResult>,
+    mr_settings_rx: Receiver<MrSettingsResult>,
+    mr_settings: MrSettingsCache,
 }
 
 impl MyApp {
@@ -366,9 +378,10 @@ impl MyApp {
         let (update_tx, update_rx) =
             mpsc::channel::<Result<Option<crate::updater::UpdateInfo>, String>>();
         let (mr_tx, mr_rx) = mpsc::channel();
-        let glab: Arc<dyn GlabRunner> = Arc::new(GatedRunner::new(SystemGlab::new(
-            config.merge_requests.glab_program.clone(),
-        )));
+        let (mr_settings_tx, mr_settings_rx) = mpsc::channel();
+        let glab_factory = mr_settings::system_glab_factory();
+        let glab_program = config.merge_requests.glab_program.clone();
+        let glab = glab_factory(&glab_program);
         let mr_view = MrViewState::new(&config.merge_requests);
 
         let mut app = Self {
@@ -417,6 +430,8 @@ impl MyApp {
             last_config_save: None,
             main_view: MainView::Repos,
             glab,
+            glab_program,
+            glab_factory,
             glab_hosts: Vec::new(),
             mr_hosts: HostMap::default(),
             mr_locals: Vec::new(),
@@ -438,6 +453,10 @@ impl MyApp {
             pending_after_checkout: None,
             mr_notice: None,
             repo_highlight: None,
+            mr_rediscover: Default::default(),
+            mr_settings_tx,
+            mr_settings_rx,
+            mr_settings: MrSettingsCache::default(),
         };
         #[cfg(target_os = "windows")]
         {
@@ -2414,6 +2433,7 @@ impl eframe::App for MyApp {
         self.maybe_auto_fetch(ctx);
         // Merge Requests: Ergebnisse übernehmen, Intervall nur bei sichtbarem Fenster.
         self.poll_mr(ctx);
+        self.poll_mr_settings(ctx);
         self.maybe_refresh_mr(ctx);
         self.handle_close_request(ctx);
         // P5: gebatchte Usage-Saves hier flush (deckt auch ui()-Actions vom
@@ -2689,14 +2709,19 @@ impl eframe::App for MyApp {
             if let Some(mut state) = self.settings_state.take() {
                 let mut save: Option<AppConfig> = None;
                 let mut open = self.show_settings;
+                let mut mr_out = crate::ui::settings::MrSettingsOutput::default();
                 crate::ui::settings::show_settings_window(
                     &ctx,
                     &mut state,
                     &mut open,
                     &mut save,
                     self.update_error.as_deref(),
+                    &self.mr_settings_input(),
+                    &mut mr_out,
                 );
                 self.show_settings = open;
+                // Tab „Merge Requests“: Prüfung und Token wirken sofort
+                self.handle_mr_settings_output(mr_out, &state.draft.merge_requests);
 
                 if let Some(new_cfg) = save {
                     // Theme sofort anwenden
@@ -2721,6 +2746,7 @@ impl eframe::App for MyApp {
                         }
                     }
                     self.config = new_cfg;
+                    self.apply_glab_program();
                     // Autostart nach Save anwenden (Registry Run-Key schreiben/entfernen)
                     let autostart_failed = match crate::autostart::apply_autostart(autostart) {
                         Ok(()) => false,
@@ -2780,6 +2806,7 @@ impl eframe::App for MyApp {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+    use crate::gitlab::glab::GatedRunner;
 
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -2853,8 +2880,13 @@ mod tests {
         let (_config_update_tx, config_update_rx) = mpsc::channel();
         let (_update_tx, update_rx) = mpsc::channel();
         let (mr_tx, mr_rx) = mpsc::channel();
+        let (mr_settings_tx, mr_settings_rx) = mpsc::channel();
         let config = AppConfig::default();
         let mr_view = MrViewState::new(&config.merge_requests);
+        let glab_program = config.merge_requests.glab_program.clone();
+        // Jedes Programm landet beim selben `FakeGlab`
+        let fake = Arc::clone(&glab);
+        let glab_factory: GlabFactory = Box::new(move |_| Arc::clone(&fake));
         MyApp {
             config,
             repos: Vec::new(),
@@ -2899,6 +2931,8 @@ mod tests {
             repo_sort_dirty: true,
             main_view: MainView::Repos,
             glab,
+            glab_program,
+            glab_factory,
             glab_hosts: Vec::new(),
             mr_hosts: HostMap::default(),
             mr_locals: Vec::new(),
@@ -2920,6 +2954,10 @@ mod tests {
             pending_after_checkout: None,
             mr_notice: None,
             repo_highlight: None,
+            mr_rediscover: Default::default(),
+            mr_settings_tx,
+            mr_settings_rx,
+            mr_settings: MrSettingsCache::default(),
         }
     }
 

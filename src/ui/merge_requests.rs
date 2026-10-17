@@ -185,7 +185,7 @@ pub struct MrViewActions {
     pub fetch_uninvolved: bool,
     /// Nächste Seite „Nicht beteiligt“
     pub load_more: bool,
-    /// Einstellungen öffnen (Tab „Merge Requests“ ab Task 12)
+    /// Einstellungen direkt im Tab „Merge Requests“ öffnen (Deep-Link)
     pub open_settings_mr_tab: bool,
 }
 

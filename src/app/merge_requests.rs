@@ -135,11 +135,17 @@ impl MyApp {
             return false;
         }
         let known: HashSet<&str> = self.glab_hosts.iter().map(|h| h.key.as_str()).collect();
-        let candidates: Vec<String> =
+        let mut candidates: Vec<String> =
             discovery_candidates(&self.repos, &self.config.merge_requests)
                 .into_iter()
                 .filter(|c| !known.contains(c.as_str()))
                 .collect();
+        // Ausdrücklich angefragte Hosts (`rediscover_mr_hosts`), auch bekannte
+        for host in std::mem::take(&mut self.mr_rediscover) {
+            if !candidates.contains(&host) {
+                candidates.push(host);
+            }
+        }
         if candidates.is_empty() {
             return false;
         }
@@ -302,10 +308,22 @@ impl MyApp {
         self.start_mr_refresh();
     }
 
+    /// Lokale Erkennung (E16) für diese Hosts erneut, auch wenn der Cache
+    /// sie kennt (Token gespeichert, GitLab-Host oder „gehört zu …“ im
+    /// Einstellungs-Tab); läuft gerade eine, folgen sie danach.
+    pub(super) fn rediscover_mr_hosts(&mut self, hosts: Vec<String>) {
+        self.mr_rediscover.extend(
+            hosts
+                .into_iter()
+                .map(|h| h.trim().to_lowercase())
+                .filter(|h| !h.is_empty()),
+        );
+        self.start_mr_discovery();
+    }
+
     /// Anmeldung geändert (Token gespeichert, Task 12): laufende Ergebnisse
     /// verwerfen und neu laden. Laufende Seiten „Nicht beteiligt“ zählen
     /// weiter mit (`mr_more_pending`), ihre Ergebnisse verwirft die Epoche.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn bump_mr_auth_epoch(&mut self) {
         self.mr_auth_epoch = self.mr_auth_epoch.wrapping_add(1);
         self.start_mr_refresh();
@@ -595,8 +613,7 @@ impl MyApp {
     }
 
     /// Klicks der MR-Ansicht; Auschecken und „Bereits ausgecheckt“ siehe
-    /// `mr_checkout.rs`. Der Einstellungs-Tab „Merge Requests“ folgt in
-    /// Task 12.
+    /// `mr_checkout.rs`, den Einstellungs-Tab `mr_settings.rs`.
     fn handle_mr_actions(&mut self, ctx: &egui::Context, actions: MrViewActions) {
         if let Some(url) = actions.open_url {
             ctx.open_url(egui::OpenUrl::new_tab(url));
@@ -617,8 +634,20 @@ impl MyApp {
             self.start_mr_load_more();
         }
         if actions.open_settings_mr_tab {
-            self.show_settings = true;
+            self.open_settings_mr_tab();
+        }
+    }
+
+    /// Deep-Link (glab fehlt, nicht angemeldet, kein GitLab-Host, alles
+    /// abgewählt): Einstellungen direkt im Tab „Merge Requests“; ein offener
+    /// Entwurf bleibt erhalten.
+    fn open_settings_mr_tab(&mut self) {
+        if !self.show_settings || self.settings_state.is_none() {
             self.settings_state = Some(SettingsState::from_config(&self.config));
+        }
+        self.show_settings = true;
+        if let Some(state) = self.settings_state.as_mut() {
+            state.select_merge_requests_tab();
         }
     }
 }
@@ -1584,9 +1613,19 @@ mod tests {
             open_settings_mr_tab: true,
             ..MrViewActions::default()
         };
-        app.handle_mr_actions(&egui::Context::default(), actions);
+        app.handle_mr_actions(&egui::Context::default(), actions.clone());
         assert!(app.show_settings);
-        assert!(app.settings_state.is_some());
+        let state = app.settings_state.as_ref().expect("Einstellungen offen");
+        assert!(state.shows_merge_requests_tab(), "Deep-Link in den Tab");
+        // Offener Entwurf bleibt erhalten, nur der Tab wechselt
+        app.settings_state = Some(SettingsState::from_config(&app.config));
+        if let Some(state) = app.settings_state.as_mut() {
+            state.draft.merge_requests.refresh_interval_min = 42;
+        }
+        app.handle_mr_actions(&egui::Context::default(), actions);
+        let state = app.settings_state.as_ref().expect("Einstellungen offen");
+        assert!(state.shows_merge_requests_tab());
+        assert_eq!(state.draft.merge_requests.refresh_interval_min, 42);
     }
 
     #[test]

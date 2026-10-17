@@ -6,6 +6,13 @@ use crate::i18n::{tr, tr_fmt, Language};
 use egui::{Color32, RichText, Vec2};
 use std::path::PathBuf;
 
+mod merge_requests;
+
+pub use merge_requests::{
+    error_reason, forget_token_fields, project_paths_for_host, rediscover_candidates, set_alias,
+    verify_error, GlabCheck, MrSettingsInput, MrSettingsOutput, TokenEvent,
+};
+
 const ICON_CHEVRON_DOWN: egui::ImageSource =
     egui::include_image!("../../assets/icons/chevron-down.svg");
 const ICON_CHEVRON_UP: egui::ImageSource =
@@ -28,6 +35,22 @@ enum SettingsTab {
     Language,
     Icons,
     TrayIcons,
+    MergeRequests,
+}
+
+/// Reiter des Einstellungsfensters in Anzeigereihenfolge.
+fn settings_tabs(lang: Language) -> Vec<(SettingsTab, String)> {
+    vec![
+        (SettingsTab::General, tr(lang, "tabs_general")),
+        (SettingsTab::Profiles, tr(lang, "tabs_profiles")),
+        (SettingsTab::Agents, tr(lang, "tabs_agents")),
+        (SettingsTab::Terminal, tr(lang, "tabs_terminal")),
+        (SettingsTab::Appearance, tr(lang, "tabs_appearance")),
+        (SettingsTab::Language, tr(lang, "tabs_language")),
+        (SettingsTab::Icons, tr(lang, "tabs_icons")),
+        (SettingsTab::TrayIcons, tr(lang, "tabs_tray_icons")),
+        (SettingsTab::MergeRequests, tr(lang, "tabs_merge_requests")),
+    ]
 }
 
 pub struct SettingsState {
@@ -44,6 +67,8 @@ pub struct SettingsState {
     new_agent_name: String,
     new_agent_program: String,
     prev_ide_args: std::collections::HashMap<String, Vec<String>>,
+    /// Tab „Merge Requests“ (Token-Formular, erste Prüfung)
+    mr: merge_requests::MrSettingsState,
 }
 
 fn ensure_icon_orders(profile: &mut LanguageProfile, agents: &[AgentProfile]) {
@@ -97,6 +122,7 @@ impl SettingsState {
             new_agent_name: String::new(),
             new_agent_program: String::new(),
             prev_ide_args: Default::default(),
+            mr: Default::default(),
         }
     }
 
@@ -131,6 +157,33 @@ impl SettingsState {
             ensure_icon_orders(profile, &self.draft.agents);
         }
     }
+
+    /// Deep-Link aus der MR-Ansicht: Tab „Merge Requests“ direkt öffnen.
+    pub fn select_merge_requests_tab(&mut self) {
+        self.selected_tab = SettingsTab::MergeRequests;
+    }
+
+    /// Ist der Tab „Merge Requests“ gewählt?
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn shows_merge_requests_tab(&self) -> bool {
+        self.selected_tab == SettingsTab::MergeRequests
+    }
+
+    /// Id des offenen Token-Feldes (`forget_token_fields`).
+    pub fn token_field_id(&self) -> Option<egui::Id> {
+        self.mr.token_field_id()
+    }
+
+    /// Ergebnis eines Token-Workers für das offene Formular; nach dem
+    /// Speichern zusätzlich die Erfolgszeile.
+    pub fn on_token_event(&mut self, ctx: &egui::Context, host: &str, event: TokenEvent) {
+        let lang = self.draft.language;
+        if matches!(event, TokenEvent::Saved(Ok(_))) {
+            self.error = None;
+            self.success = Some(tr_fmt(lang, "mrs_token_saved", &[host]));
+        }
+        self.mr.on_token_event(ctx, lang, host, event);
+    }
 }
 
 pub fn show_settings_window(
@@ -139,6 +192,8 @@ pub fn show_settings_window(
     open: &mut bool,
     on_save: &mut Option<AppConfig>,
     update_error: Option<&str>,
+    mr_input: &MrSettingsInput,
+    mr_out: &mut MrSettingsOutput,
 ) {
     let mut should_close = false;
 
@@ -149,19 +204,10 @@ pub fn show_settings_window(
         .default_height(560.0)
         .min_width(640.0)
         .show(ctx, |ui| {
-            // Tabs
+            // Tabs (umbrechend, seit „Merge Requests“ neun Reiter)
             let lang = state.draft.language;
-            ui.horizontal(|ui| {
-                for (tab, label) in [
-                    (SettingsTab::General, tr(lang, "tabs_general")),
-                    (SettingsTab::Profiles, tr(lang, "tabs_profiles")),
-                    (SettingsTab::Agents, tr(lang, "tabs_agents")),
-                    (SettingsTab::Terminal, tr(lang, "tabs_terminal")),
-                    (SettingsTab::Appearance, tr(lang, "tabs_appearance")),
-                    (SettingsTab::Language, tr(lang, "tabs_language")),
-                    (SettingsTab::Icons, tr(lang, "tabs_icons")),
-                    (SettingsTab::TrayIcons, tr(lang, "tabs_tray_icons")),
-                ] {
+            ui.horizontal_wrapped(|ui| {
+                for (tab, label) in settings_tabs(lang) {
                     let is_active = state.selected_tab == tab;
                     if ui
                         .selectable_label(is_active, RichText::new(label).size(12.0).strong())
@@ -174,188 +220,211 @@ pub fn show_settings_window(
             ui.separator();
             ui.add_space(6.0);
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                match state.selected_tab {
-                    SettingsTab::General => show_general_tab(ui, state, update_error),
-                    SettingsTab::Profiles => show_profiles_tab(ui, state),
-                    SettingsTab::Agents => show_agents_tab(ui, state),
-                    SettingsTab::Terminal => show_terminal_tab(ui, state),
-                    SettingsTab::Appearance => show_appearance_tab(ui, state),
-                    SettingsTab::Language => show_language_tab(ui, state),
-                    SettingsTab::Icons => show_icons_tab(ui, state),
-                    SettingsTab::TrayIcons => show_tray_icons_tab(ui, state),
-                }
+            // Fußzeile (Config-Pfad, Meldungen, Speichern/Schließen) fest unter
+            // der ScrollArea, wie im Mockup des Tabs „Merge Requests“
+            egui::Panel::bottom("settings_footer")
+                .frame(egui::Frame::new().inner_margin(egui::Margin {
+                    left: 0,
+                    right: 0,
+                    top: 8,
+                    bottom: 0,
+                }))
+                .show(ui, |ui| {
+                    if let Some(cfg_path) = AppConfig::config_path() {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {}",
+                                tr(state.draft.language, "config_path"),
+                                cfg_path.display()
+                            ))
+                            .size(10.0)
+                            .color(Color32::from_rgb(140, 140, 140)),
+                        );
+                        ui.add_space(8.0);
+                    }
 
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(8.0);
+                    if let Some(err) = &state.error {
+                        ui.colored_label(Color32::from_rgb(200, 40, 40), format!("✗ {}", err));
+                        ui.add_space(4.0);
+                    }
+                    if let Some(msg) = &state.success {
+                        ui.colored_label(Color32::from_rgb(40, 140, 40), format!("✓ {}", msg));
+                        ui.add_space(4.0);
+                    }
 
-                if let Some(cfg_path) = AppConfig::config_path() {
-                    ui.label(
-                        RichText::new(format!(
-                            "{} {}",
-                            tr(state.draft.language, "config_path"),
-                            cfg_path.display()
-                        ))
-                        .size(10.0)
-                        .color(Color32::from_rgb(140, 140, 140)),
-                    );
                     ui.add_space(8.0);
-                }
-
-                if let Some(err) = &state.error {
-                    ui.colored_label(Color32::from_rgb(200, 40, 40), format!("✗ {}", err));
-                    ui.add_space(4.0);
-                }
-                if let Some(msg) = &state.success {
-                    ui.colored_label(Color32::from_rgb(40, 140, 40), format!("✓ {}", msg));
-                    ui.add_space(4.0);
-                }
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button(RichText::new(tr(state.draft.language, "close")).size(12.0))
-                            .clicked()
-                        {
-                            should_close = true;
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(tr(state.draft.language, "save"))
-                                        .size(12.0)
-                                        .strong(),
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button(RichText::new(tr(state.draft.language, "close")).size(12.0))
+                                .clicked()
+                            {
+                                should_close = true;
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(tr(state.draft.language, "save"))
+                                            .size(12.0)
+                                            .strong(),
+                                    )
+                                    .fill(Color32::from_rgb(60, 120, 220))
+                                    .stroke(egui::Stroke::NONE),
                                 )
-                                .fill(Color32::from_rgb(60, 120, 220))
-                                .stroke(egui::Stroke::NONE),
-                            )
-                            .clicked()
-                        {
-                            let lang = state.draft.language;
-                            if state.draft.roots.is_empty() {
-                                state.error = Some(tr(lang, "error_need_path"));
-                                state.success = None;
-                            } else if state.draft.profiles.is_empty() {
-                                state.error = Some(tr(lang, "error_need_profile"));
-                                state.success = None;
-                            } else {
-                                // Validierung Profile
-                                let mut valid = true;
-                                for p in &state.draft.profiles {
-                                    if p.id.trim().is_empty() || p.display_name.trim().is_empty() {
-                                        state.error =
-                                            Some(tr_fmt(lang, "error_profile_empty", &[&p.id]));
-                                        valid = false;
-                                        break;
-                                    }
-                                    if p.file_extension.trim().is_empty() {
-                                        state.error = Some(tr_fmt(
-                                            lang,
-                                            "error_profile_ext",
-                                            &[&p.display_name],
-                                        ));
-                                        valid = false;
-                                        break;
-                                    }
-                                    // Validierung Config-Selektoren (pro Profil)
-                                    {
-                                        use std::collections::HashSet;
-                                        let mut seen: HashSet<String> = HashSet::new();
-                                        for sel in &p.config_selectors {
-                                            if sel.id.trim().is_empty() {
-                                                state.error = Some(format!(
-                                                    "Selector in Profil '{}' hat leere ID",
-                                                    p.display_name
-                                                ));
-                                                valid = false;
-                                                break;
-                                            }
-                                            if sel.display_name.trim().is_empty() {
-                                                state.error = Some(format!(
-                                                    "Selector '{}' in Profil '{}' braucht Anzeigename",
-                                                    sel.id, p.display_name
-                                                ));
-                                                valid = false;
-                                                break;
-                                            }
-                                            if sel.file_path.trim().is_empty() {
-                                                state.error = Some(format!(
-                                                    "Selector '{}' in Profil '{}' braucht Dateipfad",
-                                                    sel.id, p.display_name
-                                                ));
-                                                valid = false;
-                                                break;
-                                            }
-                                            if sel.key.trim().is_empty() {
-                                                state.error = Some(format!(
-                                                    "Selector '{}' in Profil '{}' braucht Key",
-                                                    sel.id, p.display_name
-                                                ));
-                                                valid = false;
-                                                break;
-                                            }
-                                            if sel.key_attribute.trim().is_empty() {
-                                                state.error = Some(format!(
-                                                    "Selector '{}' in Profil '{}' braucht Key-Attribut",
-                                                    sel.id, p.display_name
-                                                ));
-                                                valid = false;
-                                                break;
-                                            }
-                                            if sel.value_attribute.trim().is_empty() {
-                                                state.error = Some(format!(
-                                                    "Selector '{}' in Profil '{}' braucht Value-Attribut",
-                                                    sel.id, p.display_name
-                                                ));
-                                                valid = false;
-                                                break;
-                                            }
-                                            let nid = sel.id.trim().to_lowercase().replace(' ', "_");
-                                            if !seen.insert(nid) {
-                                                state.error = Some(format!(
-                                                    "Doppelte Selector-ID '{}' in Profil '{}'",
-                                                    sel.id, p.display_name
-                                                ));
-                                                valid = false;
-                                                break;
-                                            }
-                                        }
-                                        if !valid {
+                                .clicked()
+                            {
+                                let lang = state.draft.language;
+                                if state.draft.roots.is_empty() {
+                                    state.error = Some(tr(lang, "error_need_path"));
+                                    state.success = None;
+                                } else if state.draft.profiles.is_empty() {
+                                    state.error = Some(tr(lang, "error_need_profile"));
+                                    state.success = None;
+                                } else {
+                                    // Validierung Profile
+                                    let mut valid = true;
+                                    for p in &state.draft.profiles {
+                                        if p.id.trim().is_empty() || p.display_name.trim().is_empty() {
+                                            state.error =
+                                                Some(tr_fmt(lang, "error_profile_empty", &[&p.id]));
+                                            valid = false;
                                             break;
                                         }
-                                    }
-                                }
-                                if valid {
-                                    match state.draft.clone().save() {
-                                        Ok(()) => {
-                                            state.error = None;
-                                            state.success = Some(tr(lang, "saved_scan_restart"));
-                                            *on_save = Some(state.draft.clone());
-                                        }
-                                        Err(e) => {
+                                        if p.file_extension.trim().is_empty() {
                                             state.error = Some(tr_fmt(
                                                 lang,
-                                                "save_failed",
-                                                &[&format!("{e:#}")],
+                                                "error_profile_ext",
+                                                &[&p.display_name],
                                             ));
-                                            state.success = None;
+                                            valid = false;
+                                            break;
+                                        }
+                                        // Validierung Config-Selektoren (pro Profil)
+                                        {
+                                            use std::collections::HashSet;
+                                            let mut seen: HashSet<String> = HashSet::new();
+                                            for sel in &p.config_selectors {
+                                                if sel.id.trim().is_empty() {
+                                                    state.error = Some(format!(
+                                                        "Selector in Profil '{}' hat leere ID",
+                                                        p.display_name
+                                                    ));
+                                                    valid = false;
+                                                    break;
+                                                }
+                                                if sel.display_name.trim().is_empty() {
+                                                    state.error = Some(format!(
+                                                        "Selector '{}' in Profil '{}' braucht Anzeigename",
+                                                        sel.id, p.display_name
+                                                    ));
+                                                    valid = false;
+                                                    break;
+                                                }
+                                                if sel.file_path.trim().is_empty() {
+                                                    state.error = Some(format!(
+                                                        "Selector '{}' in Profil '{}' braucht Dateipfad",
+                                                        sel.id, p.display_name
+                                                    ));
+                                                    valid = false;
+                                                    break;
+                                                }
+                                                if sel.key.trim().is_empty() {
+                                                    state.error = Some(format!(
+                                                        "Selector '{}' in Profil '{}' braucht Key",
+                                                        sel.id, p.display_name
+                                                    ));
+                                                    valid = false;
+                                                    break;
+                                                }
+                                                if sel.key_attribute.trim().is_empty() {
+                                                    state.error = Some(format!(
+                                                        "Selector '{}' in Profil '{}' braucht Key-Attribut",
+                                                        sel.id, p.display_name
+                                                    ));
+                                                    valid = false;
+                                                    break;
+                                                }
+                                                if sel.value_attribute.trim().is_empty() {
+                                                    state.error = Some(format!(
+                                                        "Selector '{}' in Profil '{}' braucht Value-Attribut",
+                                                        sel.id, p.display_name
+                                                    ));
+                                                    valid = false;
+                                                    break;
+                                                }
+                                                let nid = sel.id.trim().to_lowercase().replace(' ', "_");
+                                                if !seen.insert(nid) {
+                                                    state.error = Some(format!(
+                                                        "Doppelte Selector-ID '{}' in Profil '{}'",
+                                                        sel.id, p.display_name
+                                                    ));
+                                                    valid = false;
+                                                    break;
+                                                }
+                                            }
+                                            if !valid {
+                                                break;
+                                            }
                                         }
                                     }
-                                } else {
-                                    state.success = None;
+                                    // Merge Requests: glab-Programm ohne Shell-Metazeichen
+                                    if valid
+                                        && !merge_requests::valid_glab_program(
+                                            &state.draft.merge_requests.glab_program,
+                                        )
+                                    {
+                                        state.error = Some(tr(lang, "mrs_glab_invalid"));
+                                        valid = false;
+                                    }
+                                    if valid {
+                                        // Wie beim Laden bereinigen (Listen, Intervall, Pfade)
+                                        state.draft.merge_requests.normalize();
+                                        match state.draft.clone().save() {
+                                            Ok(()) => {
+                                                state.error = None;
+                                                state.success = Some(tr(lang, "saved_scan_restart"));
+                                                *on_save = Some(state.draft.clone());
+                                            }
+                                            Err(e) => {
+                                                state.error = Some(tr_fmt(
+                                                    lang,
+                                                    "save_failed",
+                                                    &[&format!("{e:#}")],
+                                                ));
+                                                state.success = None;
+                                            }
+                                        }
+                                    } else {
+                                        state.success = None;
+                                    }
                                 }
                             }
-                        }
-                        if ui.button(tr(state.draft.language, "reset")).clicked() {
-                            state.error = None;
-                            state.success = None;
-                        }
+                            if ui.button(tr(state.draft.language, "reset")).clicked() {
+                                state.error = None;
+                                state.success = None;
+                            }
+                        });
                     });
                 });
-                ui.add_space(8.0);
-            });
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    match state.selected_tab {
+                        SettingsTab::General => show_general_tab(ui, state, update_error),
+                        SettingsTab::Profiles => show_profiles_tab(ui, state),
+                        SettingsTab::Agents => show_agents_tab(ui, state),
+                        SettingsTab::Terminal => show_terminal_tab(ui, state),
+                        SettingsTab::Appearance => show_appearance_tab(ui, state),
+                        SettingsTab::Language => show_language_tab(ui, state),
+                        SettingsTab::Icons => show_icons_tab(ui, state),
+                        SettingsTab::TrayIcons => show_tray_icons_tab(ui, state),
+                        SettingsTab::MergeRequests => {
+                            merge_requests::show_merge_requests_tab(ui, state, mr_input, mr_out)
+                        }
+                    }
+                    ui.add_space(12.0);
+                });
         });
 
     if should_close {
@@ -3140,6 +3209,9 @@ mod tests {
         assert_eq!(state.new_profile_ext, "");
         assert_eq!(state.new_agent_name, "");
         assert_eq!(state.new_agent_program, "");
+        // Tab „Merge Requests“: nicht gewählt, kein offenes Token-Formular
+        assert!(!state.shows_merge_requests_tab());
+        assert!(state.token_field_id().is_none());
     }
 
     #[test]
@@ -3172,6 +3244,58 @@ mod tests {
         let mut state = SettingsState::from_config(&cfg);
         state.draft.active_profile_id = "changed".to_string();
         assert_ne!(cfg.active_profile_id, "changed");
+    }
+
+    #[test]
+    fn settings_tabs_include_merge_requests() {
+        let tabs = settings_tabs(Language::De);
+        assert_eq!(tabs.len(), 9);
+        assert_eq!(
+            tabs.last(),
+            Some(&(SettingsTab::MergeRequests, "Merge Requests".to_string()))
+        );
+        let mut state = SettingsState::from_config(&AppConfig::default());
+        state.select_merge_requests_tab();
+        assert_eq!(state.selected_tab, SettingsTab::MergeRequests);
+    }
+
+    /// Fenster mit dem Tab „Merge Requests“ und fester Fußzeile zeichnet
+    /// ohne Panik; der erste Frame fragt die glab-Prüfung an.
+    #[test]
+    fn settings_window_renders_merge_requests_tab() {
+        let cfg = AppConfig::default();
+        let mut state = SettingsState::from_config(&cfg);
+        state.select_merge_requests_tab();
+        let probes = std::collections::BTreeMap::new();
+        let probing = std::collections::BTreeSet::new();
+        let input = MrSettingsInput {
+            theme: &cfg.theme,
+            glab_program: "glab",
+            repos: &[],
+            glab_hosts: &[],
+            probes: &probes,
+            probing: &probing,
+            glab_check: None,
+            glab_checking: false,
+            token_busy: None,
+            env_token: None,
+            now: 0,
+        };
+        let ctx = egui::Context::default();
+        let mut out = MrSettingsOutput::default();
+        let mut open = true;
+        let mut save = None;
+        for _ in 0..2 {
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let ctx = ui.ctx().clone();
+                show_settings_window(
+                    &ctx, &mut state, &mut open, &mut save, None, &input, &mut out,
+                );
+            });
+            output.drop_without_applying_deltas();
+        }
+        assert!(open && save.is_none());
+        assert_eq!(out.start_glab_check.as_deref(), Some("glab"));
     }
 
     #[test]

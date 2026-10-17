@@ -691,8 +691,6 @@ fn load_uninvolved_pages(
 /// fehlende Pfade (höchstens 10). Ohne gespeicherte Anmeldung (und ohne
 /// Env-Token) kein Netz-Aufruf. Nur für angemeldete Hosts oder nach einer
 /// ausdrücklichen Aktion des Users aufrufen.
-// Vorübergehend bis zur Verdrahtung im Einstellungs-Tab (Task 12).
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn probe_host(runner: &dyn GlabRunner, host: &str, project_paths: &[String]) -> HostProbe {
     probe_as(
         runner,
@@ -1278,8 +1276,6 @@ fn encode_path(path: &str) -> String {
 /// Token ablehnt. Fehlt dem neuen Token `api`, fragt ein Aufruf mit der
 /// bisherigen Anmeldung, ob glab damit Schreibrechte verlöre. Ungültig,
 /// abgelaufen oder widerrufen → `Err`.
-// Vorübergehend bis zur Verdrahtung im Einstellungs-Tab (Task 12).
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn verify_token(
     runner: &dyn GlabRunner,
     host: &str,
@@ -1403,8 +1399,6 @@ fn stored_login_full(runner: &dyn GlabRunner, host: &str) -> bool {
 /// Env-Token) liefert denselben Benutzer; glabs Meldungen („Logged in as“,
 /// „Could not look up the username“) zählen nicht, aus ihnen wird nur der
 /// Speicherort gelesen.
-// Vorübergehend bis zur Verdrahtung im Einstellungs-Tab (Task 12).
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn save_token(
     runner: &dyn GlabRunner,
     host: &str,
@@ -1474,8 +1468,6 @@ pub fn login_key(host: &str) -> &str {
 /// Gesetzte Env-Variable mit Token im eigenen Prozess (`GITLAB_TOKEN`,
 /// `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN`, in glabs Reihenfolge): glab nimmt
 /// sie für jeden Host statt der gespeicherten Anmeldung.
-// Vorübergehend bis zur Verdrahtung im Einstellungs-Tab (Task 12).
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn env_token_override() -> Option<&'static str> {
     env_token_in(|key| std::env::var_os(key))
 }
@@ -1488,8 +1480,6 @@ fn env_token_in(lookup: impl Fn(&str) -> Option<OsString>) -> Option<&'static st
 
 /// Link „Token in GitLab erstellen“, vorbelegt mit Name und Scopes:
 /// `read_api` (Nur lesen) bzw. `api,write_repository` (Voll).
-// Vorübergehend bis zur Verdrahtung im Einstellungs-Tab (Task 12).
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn token_create_url(host: &str, protocol: Protocol, read_only: bool) -> String {
     let scopes = if read_only {
         "read_api"
