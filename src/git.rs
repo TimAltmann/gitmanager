@@ -1708,7 +1708,7 @@ pub fn resolve_rider_path_force() -> Option<PathBuf> {
     resolve_rider_path()
 }
 
-fn set_creation_flags(_cmd: &mut std::process::Command, _flags: u32) {
+pub(crate) fn set_creation_flags(_cmd: &mut std::process::Command, _flags: u32) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
