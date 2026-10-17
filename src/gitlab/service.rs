@@ -294,7 +294,7 @@ fn ends_host(kind: &GlabErrorKind) -> bool {
 }
 
 /// Anmeldefehler: das Token (bzw. keins) wird nicht angenommen.
-fn is_auth_error(kind: &GlabErrorKind) -> bool {
+pub fn is_auth_error(kind: &GlabErrorKind) -> bool {
     use GlabErrorKind::{Expired, InvalidToken, NotAuthenticated, Revoked};
     matches!(kind, NotAuthenticated | InvalidToken | Expired | Revoked)
 }

@@ -879,6 +879,17 @@ pub fn pipeline_url(mr: &MergeRequest) -> Option<String> {
 }
 
 /// E7: Pfad beginnt mit genau einem `/`, ohne `\`, `@` und Steuerzeichen.
+/// Link zum MR (E12, „Im Browser öffnen“): `webUrl` nur mit Schema
+/// http/https, ohne Userinfo, `\`, Leer- und Steuerzeichen; sonst `None`
+/// (kein `file:`, UNC- oder Laufwerkspfad an die Shell).
+pub fn mr_url(mr: &MergeRequest) -> Option<&str> {
+    let url = mr.web_url.as_str();
+    let clean = !url
+        .chars()
+        .any(|c| c == '\\' || c.is_control() || c.is_whitespace());
+    (clean && split_origin(url).is_some()).then_some(url)
+}
+
 fn safe_path(path: &str) -> bool {
     path.starts_with('/')
         && !path.starts_with("//")
@@ -2379,6 +2390,34 @@ mod tests {
         ] {
             let mr = with_pipeline(web, None, "/g/p/-/pipelines/7");
             assert_eq!(pipeline_url(&mr), None, "{web:?} muss abgelehnt werden");
+        }
+    }
+
+    #[test]
+    fn mr_url_only_http_and_https() {
+        let mut mr = Mr::new(412, "kern/backend-api", ME, "2026-10-17T09:00:00Z").mr();
+        for web in [
+            "https://gitlab.example.com/kern/backend-api/-/merge_requests/412",
+            "HTTP://gitlab.local:8080/gitlab/g/p/-/merge_requests/5",
+        ] {
+            mr.web_url = web.to_string();
+            assert_eq!(mr_url(&mr), Some(web));
+        }
+        for web in [
+            "file:///C:/x.exe",
+            "\\\\host\\share\\x.exe",
+            "C:\\x.exe",
+            "javascript:alert(1)",
+            "javascript://gitlab.example.com/%0Aalert(1)",
+            "https://user@gitlab.example.com/g/p/-/merge_requests/5",
+            "https://gitlab.example.com\\@evil.example/x",
+            "https://gitlab.example.com/g/p/-/merge_requests/5 --flag",
+            "https://gitlab.example.com/g/p\n/-/merge_requests/5",
+            "https:///g/p/-/merge_requests/5",
+            "",
+        ] {
+            mr.web_url = web.to_string();
+            assert_eq!(mr_url(&mr), None, "{web:?} muss abgelehnt werden");
         }
     }
 

@@ -58,6 +58,18 @@ impl<'a> MrRefInfo<'a> {
     fn local_names(&self) -> [String; 2] {
         [self.source_branch.to_string(), fallback_branch(self.iid)]
     }
+
+    /// v1 (E6): gelöschter Quell-Branch, sonst Fork-MR – auch mit lokalem
+    /// Fork-Remote (Task 15).
+    fn unavailable(&self) -> Option<UnavailableReason> {
+        if self.source_branch.is_empty() || self.source_branch_exists == Some(false) {
+            Some(UnavailableReason::SourceBranchDeleted)
+        } else if self.is_fork() {
+            Some(UnavailableReason::Fork)
+        } else {
+            None
+        }
+    }
 }
 
 fn fallback_branch(iid: u64) -> String {
@@ -304,29 +316,14 @@ pub fn build_checkout_menu(
     let mru = lookup.mru;
     let names = mr.local_names();
     let names = [names[0].as_str(), names[1].as_str()];
-    let candidates = mr
-        .source_project_path
-        .map(|full_path| {
-            let project = ProjectRef {
-                hosts,
-                host_key: mr.host_key,
-                full_path,
-            };
-            candidates(repos, &project)
-        })
-        .unwrap_or_default();
+    let candidates = source_candidates(mr, repos, hosts);
     let mut menu = CheckoutMenu {
         already: checked_out_in(&candidates, &names),
+        unavailable: mr.unavailable(),
         ..CheckoutMenu::default()
     };
-    if mr.source_branch.is_empty() || mr.source_branch_exists == Some(false) {
-        menu.unavailable = Some(UnavailableReason::SourceBranchDeleted);
-        return menu;
-    }
-    // v1 (E6): Fork-MRs nie, auch nicht über einen lokalen Fork-Remote
-    // (Task 15). `already` bleibt: ein lokaler Stand ist nur ein Ordner.
-    if mr.is_fork() {
-        menu.unavailable = Some(UnavailableReason::Fork);
+    // E6: `already` bleibt, ein lokaler Stand ist nur ein Ordner
+    if menu.unavailable.is_some() {
         return menu;
     }
     let base = base_clone(&candidates, mru);
@@ -355,6 +352,29 @@ pub fn build_checkout_menu(
     menu
 }
 
+/// Was eine MR-Zeile je Frame für ihren Button braucht.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckoutBrief {
+    pub already: Option<AlreadyCheckedOut>,
+    pub unavailable: Option<UnavailableReason>,
+    /// Gescannter Klon des Quellprojekts vorhanden; sonst „nicht lokal“
+    pub has_clone: bool,
+}
+
+/// Wie `build_checkout_menu`, aber ohne Worktree-Vorschlag (Pfadschlüssel
+/// aller Repos und Worktrees), Klon-Zustände und MRU: die braucht erst das
+/// geöffnete Menü.
+pub fn checkout_brief(mr: &MrRefInfo, repos: &[RepoInfo], hosts: &HostMap) -> CheckoutBrief {
+    let names = mr.local_names();
+    let names = [names[0].as_str(), names[1].as_str()];
+    let candidates = source_candidates(mr, repos, hosts);
+    CheckoutBrief {
+        already: checked_out_in(&candidates, &names),
+        unavailable: mr.unavailable(),
+        has_clone: !candidates.is_empty(),
+    }
+}
+
 /// Ordner, in dem `branch` für `project` ausgecheckt ist: gescannte Klone
 /// mit Remote auf das Projekt und die übrigen Worktrees ihrer Repos (aus dem
 /// Scan, `RepoInfo.worktrees`), auch außerhalb der Suchpfade.
@@ -366,6 +386,25 @@ pub fn find_checked_out(repos: &[RepoInfo], branch: &str, project: &ProjectRef) 
 struct Candidate<'r> {
     repo: &'r RepoInfo,
     remote: &'r RemoteInfo,
+}
+
+/// Klone mit Remote auf das Quellprojekt des MR (keine, wenn es unbekannt
+/// ist).
+fn source_candidates<'r>(
+    mr: &MrRefInfo,
+    repos: &'r [RepoInfo],
+    hosts: &HostMap,
+) -> Vec<Candidate<'r>> {
+    mr.source_project_path
+        .map(|full_path| {
+            let project = ProjectRef {
+                hosts,
+                host_key: mr.host_key,
+                full_path,
+            };
+            candidates(repos, &project)
+        })
+        .unwrap_or_default()
 }
 
 /// Klone mit Remote auf `project`, in Scan-Reihenfolge.
@@ -1307,6 +1346,51 @@ mod tests {
             no_web.web_url = web_url.to_string();
             let m = menu(&no_web, &[], &review_cfg(), false, &no_mru);
             assert_eq!(m, CheckoutMenu::default(), "{web_url}");
+        }
+    }
+
+    // --- Kurzfassung je Frame ---
+
+    #[test]
+    fn checkout_brief_matches_menu() {
+        let mut on_branch = backend("/dev/backend-api-2", "feature/x");
+        on_branch.behind = 2;
+        let github = repo(
+            "/dev/rust",
+            "main",
+            &[("origin", "https://github.com/kern/backend-api.git")],
+        );
+        let normal = mr(418, "feature/x");
+        let mut fork = mr(418, "feature/x");
+        fork.source_project_path = Some("tim/backend-api".to_string());
+        let mut deleted = mr(418, "feature/x");
+        deleted.source_branch_exists = Some(false);
+        let cases = [
+            (
+                &normal,
+                vec![backend("/dev/backend-api", "main"), on_branch.clone()],
+            ),
+            (&normal, vec![backend("/dev/backend-api", "main")]),
+            (&normal, vec![github]),
+            (&normal, Vec::new()),
+            (&fork, vec![backend("/dev/backend-api", "main")]),
+            (
+                &deleted,
+                vec![backend("/dev/backend-api", "main"), on_branch],
+            ),
+        ];
+        for (mr, repos) in cases {
+            let m = menu(mr, &repos, &review_cfg(), false, &no_mru);
+            let hosts = hosts_for(&repos);
+            let brief = checkout_brief(&MrRefInfo::from_mr(mr), &repos, &hosts);
+            assert_eq!(brief.already, m.already, "{repos:?}");
+            assert_eq!(brief.unavailable, m.unavailable, "{repos:?}");
+            if m.unavailable.is_none() {
+                // „nicht lokal“ genau dann, wenn das Menü weder Worktree
+                // noch Klon anbietet
+                let offers = m.new_worktree.is_some() || !m.clones.is_empty();
+                assert_eq!(brief.has_clone, offers, "{repos:?}");
+            }
         }
     }
 
