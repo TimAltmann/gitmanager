@@ -514,6 +514,72 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::En, "tray_icon_theme_light") => "Light (dark icon)".to_string(),
         (Language::De, "tray_icon_theme_light") => "Light (dunkles Icon)".to_string(),
 
+        // ── Merge Requests: Approvals, Pipeline, Threads, Review ─────
+        (Language::En, "mr_appr_of") => "{} of {} approvals".to_string(),
+        (Language::De, "mr_appr_of") => "{} von {} Approvals".to_string(),
+        (Language::En, "mr_appr_one") => "1 approval".to_string(),
+        (Language::De, "mr_appr_one") => "1 Approval".to_string(),
+        (Language::En, "mr_appr_n") => "{} approvals".to_string(),
+        (Language::De, "mr_appr_n") => "{} Approvals".to_string(),
+        (Language::En, "mr_appr_short") => "{}/{}".to_string(),
+        (Language::De, "mr_appr_short") => "{}/{}".to_string(),
+        (Language::En, "mr_appr_no_rule") => "No approval rule – no approvals required".to_string(),
+        (Language::De, "mr_appr_no_rule") => "Keine Approval-Regel – keine Approvals erforderlich".to_string(),
+        (Language::En, "mr_appr_you") => "{} (you)".to_string(),
+        (Language::De, "mr_appr_you") => "{} (du)".to_string(),
+        (Language::En, "mr_rev_started") => "{} started reviewing".to_string(),
+        (Language::De, "mr_rev_started") => "{} hat das Review begonnen".to_string(),
+        (Language::En, "mr_rev_waiting") => "{} pending".to_string(),
+        (Language::De, "mr_rev_waiting") => "{} ausstehend".to_string(),
+        (Language::En, "mr_pipe_success") => "Pipeline passed".to_string(),
+        (Language::De, "mr_pipe_success") => "Pipeline grün".to_string(),
+        (Language::En, "mr_pipe_failed") => "Pipeline failed".to_string(),
+        (Language::De, "mr_pipe_failed") => "Pipeline fehlgeschlagen".to_string(),
+        (Language::En, "mr_pipe_running") => "Pipeline running".to_string(),
+        (Language::De, "mr_pipe_running") => "Pipeline läuft".to_string(),
+        (Language::En, "mr_pipe_pending") => "Pipeline pending".to_string(),
+        (Language::De, "mr_pipe_pending") => "Pipeline wartet".to_string(),
+        (Language::En, "mr_pipe_canceled") => "Pipeline canceled".to_string(),
+        (Language::De, "mr_pipe_canceled") => "Pipeline abgebrochen".to_string(),
+        (Language::En, "mr_pipe_skipped") => "Pipeline skipped".to_string(),
+        (Language::De, "mr_pipe_skipped") => "Pipeline übersprungen".to_string(),
+        (Language::En, "mr_pipe_manual") => "Pipeline manual".to_string(),
+        (Language::De, "mr_pipe_manual") => "Pipeline manuell".to_string(),
+        (Language::En, "mr_pipe_none") => "No pipeline".to_string(),
+        (Language::De, "mr_pipe_none") => "Keine Pipeline".to_string(),
+        (Language::En, "mr_threads_one") => "1 open thread".to_string(),
+        (Language::De, "mr_threads_one") => "1 offener Thread".to_string(),
+        (Language::En, "mr_threads_many") => "{} open threads".to_string(),
+        (Language::De, "mr_threads_many") => "{} offene Threads".to_string(),
+        (Language::En, "mr_threads_resolved") => "all threads resolved".to_string(),
+        (Language::De, "mr_threads_resolved") => "alle Threads gelöst".to_string(),
+        (Language::En, "mr_threads_none") => "no threads".to_string(),
+        (Language::De, "mr_threads_none") => "keine Threads".to_string(),
+        (Language::En, "mr_threads_tt") => "{} open · {} resolved".to_string(),
+        (Language::De, "mr_threads_tt") => "{} offen · {} gelöst".to_string(),
+        (Language::En, "mr_threads_none_tt") => "No discussion threads".to_string(),
+        (Language::De, "mr_threads_none_tt") => "Keine Diskussions-Threads".to_string(),
+        (Language::En, "mr_rev_pending") => "Review pending".to_string(),
+        (Language::De, "mr_rev_pending") => "Review ausstehend".to_string(),
+        (Language::En, "mr_rev_approved") => "Approved by you".to_string(),
+        (Language::De, "mr_rev_approved") => "Von dir approved".to_string(),
+        (Language::En, "mr_rev_changes") => "Changes requested".to_string(),
+        (Language::De, "mr_rev_changes") => "Änderungen angefragt".to_string(),
+        (Language::En, "mr_rev_commented") => "Commented".to_string(),
+        (Language::De, "mr_rev_commented") => "Kommentiert".to_string(),
+
+        // ── Relative Zeiten ──────────────────────────────────────────
+        (Language::En, "rel_now") => "just now".to_string(),
+        (Language::De, "rel_now") => "gerade eben".to_string(),
+        (Language::En, "rel_min") => "{} min ago".to_string(),
+        (Language::De, "rel_min") => "vor {} Min.".to_string(),
+        (Language::En, "rel_hour") => "{} h ago".to_string(),
+        (Language::De, "rel_hour") => "vor {} Std.".to_string(),
+        (Language::En, "rel_yesterday") => "yesterday".to_string(),
+        (Language::De, "rel_yesterday") => "gestern".to_string(),
+        (Language::En, "rel_days") => "{} days ago".to_string(),
+        (Language::De, "rel_days") => "vor {} Tagen".to_string(),
+
         // fallback for any missing key -> return key itself
         (Language::En, _) => key.to_string(),
         (Language::De, _) => key.to_string(),
@@ -846,6 +912,38 @@ mod tests {
             "branch_fast_forwarded_one",
             "branch_upstream_mismatch",
             "branch_checked_out_elsewhere",
+            // Task 6: Approvals, Pipeline, Threads, Review, relative Zeiten
+            "mr_appr_of",
+            "mr_appr_one",
+            "mr_appr_n",
+            "mr_appr_short",
+            "mr_appr_no_rule",
+            "mr_appr_you",
+            "mr_rev_started",
+            "mr_rev_waiting",
+            "mr_pipe_success",
+            "mr_pipe_failed",
+            "mr_pipe_running",
+            "mr_pipe_pending",
+            "mr_pipe_canceled",
+            "mr_pipe_skipped",
+            "mr_pipe_manual",
+            "mr_pipe_none",
+            "mr_threads_one",
+            "mr_threads_many",
+            "mr_threads_resolved",
+            "mr_threads_none",
+            "mr_threads_tt",
+            "mr_threads_none_tt",
+            "mr_rev_pending",
+            "mr_rev_approved",
+            "mr_rev_changes",
+            "mr_rev_commented",
+            "rel_now",
+            "rel_min",
+            "rel_hour",
+            "rel_yesterday",
+            "rel_days",
         ];
         for key in keys {
             let en = tr(Language::En, key);
@@ -865,6 +963,25 @@ mod tests {
                 "voraus",
                 "hinterher",
                 "vorgespult",
+                "Approval",
+                "Diskussions",
+                "gelöst",
+                "offen",
+                "ausstehend",
+                "begonnen",
+                "Änderungen",
+                "angefragt",
+                "Kommentiert",
+                "grün",
+                "läuft",
+                "wartet",
+                "Keine",
+                "gerade",
+                "gestern",
+                "vor ",
+                "Std.",
+                "Tagen",
+                "(du)",
             ] {
                 assert!(
                     !en.contains(german),
@@ -890,6 +1007,20 @@ mod tests {
             tr_fmt(Language::De, "branch_fast_forwarded_one", &["main"]),
             "Lokaler Branch main um 1 Commit vorgespult"
         );
+        assert_eq!(
+            tr_fmt(Language::De, "mr_appr_of", &["1", "2"]),
+            "1 von 2 Approvals"
+        );
+        assert_eq!(
+            tr_fmt(Language::En, "mr_threads_tt", &["2", "3"]),
+            "2 open · 3 resolved"
+        );
+        assert_eq!(
+            tr_fmt(Language::De, "mr_rev_started", &["Miriam Becker"]),
+            "Miriam Becker hat das Review begonnen"
+        );
+        assert_eq!(tr_fmt(Language::De, "rel_hour", &["3"]), "vor 3 Std.");
+        assert_eq!(tr_fmt(Language::En, "rel_days", &["4"]), "4 days ago");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! Merge Requests über GitLab und glab: Remotes und Host-Zuordnung (E16),
-//! glab-Runner, GraphQL-Abfragen und Parser, später Domänenlogik, Service und
+//! glab-Runner, GraphQL-Abfragen und Parser, Domänenlogik, später Service und
 //! Checkout.
 
 // Vorübergehend bis zur Verdrahtung (Task 10–12): Das Crate ist ein reines
@@ -8,5 +8,7 @@
 
 pub mod glab;
 pub mod graphql;
+pub mod model;
 pub mod remote;
 pub mod secret;
+pub mod time;
