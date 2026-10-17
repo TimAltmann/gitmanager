@@ -1,3 +1,4 @@
+use crate::gitlab::checkout::MrCheckoutPlan;
 use crate::gitlab::remote::RemoteInfo;
 use git2::{BranchType, Repository, StatusOptions};
 use std::collections::HashMap;
@@ -90,6 +91,28 @@ pub struct RepoInfo {
     /// gruppiert werden können. Scan-only, Default `<path>/.git`.
     #[cfg_attr(not(test), allow(dead_code))]
     pub common_dir: PathBuf,
+    /// Anzahl geänderter Einträge wie bei `is_dirty` (ein untracked Ordner
+    /// zählt einmal), für „{n} Änderungen“ im Checkout-Menü. Scan-only,
+    /// Default 1 bei `dirty`, sonst 0.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub dirty_files: usize,
+    /// Die übrigen Worktrees desselben Repos (Haupt- und verknüpfte, ohne
+    /// den eigenen) mit ihrem Branch, auch außerhalb der Suchpfade – für
+    /// „Bereits ausgecheckt“ (K1). Scan-only, Default leer.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub worktrees: Vec<WorktreeHead>,
+    /// Verknüpfter Worktree (`git worktree add`), kein eigener Klon: nie
+    /// Basis-Klon für neue Worktrees (K1). Scan-only, Default `false`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub is_linked_worktree: bool,
+}
+
+/// Anderer Worktree eines Repos (`RepoInfo.worktrees`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeHead {
+    pub path: PathBuf,
+    /// Kurzname des ausgecheckten Branches, `None` bei Detached HEAD
+    pub branch: Option<String>,
 }
 
 impl RepoInfo {
@@ -114,6 +137,9 @@ impl RepoInfo {
             behind: 0,
             remotes: Vec::new(),
             common_dir,
+            dirty_files: usize::from(dirty),
+            worktrees: Vec::new(),
+            is_linked_worktree: false,
         }
     }
 
@@ -177,15 +203,18 @@ fn parse_head_file(git_dir: &Path) -> Option<String> {
 /// libgit2 als einen Eintrag (z.B. `target/`), das reicht für Bool.
 /// Mit Rekursion würden tausende Dateien einzeln gestat'ed (pro Repo pro Scan).
 pub fn is_dirty(repo: &Repository) -> bool {
+    dirty_count(repo) > 0
+}
+
+/// Anzahl geänderter Einträge mit denselben Optionen wie [`is_dirty`]
+/// (untracked Ordner als ein Eintrag); Fehler → 0.
+fn dirty_count(repo: &Repository) -> usize {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
         .recurse_untracked_dirs(false)
         .include_ignored(false)
         .include_unmodified(false);
-    match repo.statuses(Some(&mut opts)) {
-        Ok(statuses) => !statuses.is_empty(),
-        Err(_) => false,
-    }
+    repo.statuses(Some(&mut opts)).map_or(0, |s| s.len())
 }
 
 /// Detaillierter Status: staged, unstaged, untracked, Konflikte
@@ -344,8 +373,32 @@ pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
     Err(anyhow::Error::new(PartialFetch { succeeded, failed }))
 }
 
+/// K1: holt nur die angegebenen Refspecs eines Remotes, z. B. den
+/// Quell-Branch eines MR (`MrCheckoutPlan::refspec`). Ausdrücklich ohne
+/// Prune (`FetchPrune::Off` übersteuert `fetch.prune` des Users) und ohne
+/// Tags: andere Remote-Refs bleiben unberührt. Auth und CLI-Fallback wie
+/// [`fetch_all`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn fetch_refspecs(path: &Path, remote: &str, refspecs: &[&str]) -> anyhow::Result<()> {
+    let repo =
+        Repository::open(path).map_err(|e| anyhow::anyhow!("Failed to open repository: {e}"))?;
+    fetch_remote_with(&repo, path, remote, refspecs, false)
+}
+
 /// Ein Remote fetchen: libgit2 mit Auth-Callbacks, Fallback auf System-`git`.
 fn fetch_one_remote(repo: &Repository, repo_path: &Path, remote_name: &str) -> anyhow::Result<()> {
+    fetch_remote_with(repo, repo_path, remote_name, &[], true)
+}
+
+/// Fetch eines Remotes mit expliziten Refspecs (leer = konfigurierte) und
+/// wählbarem Prune. Mit Refspecs ohne Tags (wie `--no-tags`).
+fn fetch_remote_with(
+    repo: &Repository,
+    repo_path: &Path,
+    remote_name: &str,
+    refspecs: &[&str],
+    prune: bool,
+) -> anyhow::Result<()> {
     match repo.find_remote(remote_name) {
         Ok(mut remote) => {
             let remote_url = remote.url().unwrap_or("").to_string();
@@ -357,16 +410,23 @@ fn fetch_one_remote(repo: &Repository, repo_path: &Path, remote_name: &str) -> a
             });
             // Zertifikatsprüfung NICHT deaktivieren (TLS bleibt verifiziert).
             let mut opts = git2::FetchOptions::new();
-            opts.prune(git2::FetchPrune::On);
+            opts.prune(if prune {
+                git2::FetchPrune::On
+            } else {
+                git2::FetchPrune::Off
+            });
+            if !refspecs.is_empty() {
+                opts.download_tags(git2::AutotagOption::None);
+            }
             opts.remote_callbacks(callbacks);
-            match remote.fetch(&[] as &[&str], Some(&mut opts), None) {
+            match remote.fetch(refspecs, Some(&mut opts), None) {
                 Ok(()) => Ok(()),
                 Err(lib_err) => {
                     eprintln!(
                         "libgit2 fetch für Remote '{remote_name}' fehlgeschlagen ({lib_err}), versuche System-git..."
                     );
                     // Fallback: System-git nutzt Credential-Manager/SSH-Agent des Users.
-                    match fetch_with_git_cli(repo_path, remote_name) {
+                    match fetch_with_git_cli(repo_path, remote_name, refspecs, prune) {
                         Ok(()) => {
                             eprintln!(
                                 "System-git fetch für Remote '{remote_name}' erfolgreich (Fallback)"
@@ -481,20 +541,36 @@ fn default_ssh_key_paths() -> Vec<PathBuf> {
 /// mit authentifizierten Repos, wo reines libgit2 ohne Callbacks scheitert.
 /// `Ok` nur bei Exit-Code 0, sonst `Err` mit stderr (English-neutral via git,
 /// aber nur fürs Log — strukturierter Fehler bleibt libgit2).
-pub fn fetch_with_git_cli(repo_path: &Path, remote_name: &str) -> anyhow::Result<()> {
+///
+/// K1: ohne Refspecs `git -C p fetch --prune <remote>` (Refresh), mit
+/// Refspecs `git -C p fetch --no-prune --no-tags <remote> <refspec…>`.
+pub fn fetch_with_git_cli(
+    repo_path: &Path,
+    remote_name: &str,
+    refspecs: &[&str],
+    prune: bool,
+) -> anyhow::Result<()> {
     let repo_str = repo_path.display().to_string();
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["-C", &repo_str, "fetch", remote_name, "--prune"]);
-    // Windows-GUI: kein Konsolen-Flash.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+    let mut args = vec!["-C", &repo_str, "fetch"];
+    args.push(if prune { "--prune" } else { "--no-prune" });
+    if !refspecs.is_empty() {
+        args.push("--no-tags");
     }
+    args.push(remote_name);
+    args.extend_from_slice(refspecs);
+    run_git_cli(&args, &format!("fetch '{remote_name}'"))
+}
+
+/// System-`git` ohne Konsolenfenster. `Ok` nur bei Exit-Code 0, sonst `Err`
+/// mit stderr/stdout (nur fürs Log, siehe [`fetch_with_git_cli`]).
+fn run_git_cli(args: &[&str], what: &str) -> anyhow::Result<()> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args);
+    // Windows-GUI: kein Konsolen-Flash (CREATE_NO_WINDOW).
+    set_creation_flags(&mut cmd, 0x08000000);
     let out = cmd
         .output()
-        .map_err(|e| anyhow::anyhow!("git fetch spawn failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("git {what} spawn failed: {e}"))?;
     if out.status.success() {
         return Ok(());
     }
@@ -511,9 +587,7 @@ pub fn fetch_with_git_cli(repo_path: &Path, remote_name: &str) -> anyhow::Result
     } else {
         format!("{stderr} / {stdout}")
     };
-    Err(anyhow::anyhow!(
-        "git fetch '{remote_name}' failed: {detail}"
-    ))
+    Err(anyhow::anyhow!("git {what} failed: {detail}"))
 }
 
 /// Strukturierter Fetch-Fehler (alle Remotes failed UND partielle Fehlschläge).
@@ -1264,6 +1338,429 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<Chec
     }
 }
 
+// --- Merge-Request-Checkout (K1) ---
+
+/// K1: Stand des lokalen MR-Branches nach [`prepare_mr_branch`].
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MrPrepOutcome {
+    /// Lokaler Branch neu am MR-Stand angelegt, Upstream gesetzt
+    Created,
+    UpToDate,
+    /// Lokaler Branch war Vorfahr, um `by` Commits vorgespult
+    FastForwarded {
+        by: usize,
+    },
+    /// Lokaler Branch hat eigene Commits; Ref unverändert
+    LocalAhead {
+        ahead: usize,
+    },
+    /// Lokaler Branch und MR-Stand divergieren; Ref unverändert
+    Diverged {
+        ahead: usize,
+        behind: usize,
+    },
+    /// Branch ist im Klon selbst HEAD; Ref unverändert (kein Pull in v1)
+    AlreadyHead {
+        behind: usize,
+    },
+}
+
+/// K1: Ergebnis von [`prepare_mr_branch`].
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MrPrep {
+    /// Tatsächlich genutzter lokaler Branch: `sourceBranch` oder bei
+    /// Namens-/Upstream-Konflikt `mr-<iid>`
+    pub local_branch: String,
+    pub outcome: MrPrepOutcome,
+}
+
+/// K1: typisierte Fehler beim Auschecken eines MR. Display bleibt Deutsch wie
+/// die übrigen git.rs-Fehler; die UI lokalisiert per Match bzw. Downcast.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckoutError {
+    /// Branch ist HEAD in einem anderen Worktree (oder im Basis-Klon selbst)
+    CheckedOutElsewhere { branch: String, path: PathBuf },
+    /// Remote-Branch fehlt nach dem Fetch (`<remote>/<src>`)
+    RemoteBranchMissing { upstream: String },
+    /// Weder `sourceBranch` noch `mr-<iid>` sind als lokaler Branch nutzbar
+    BranchNameTaken { branch: String, fallback: String },
+    /// Zielordner existiert und ist nicht leer
+    TargetNotEmpty { path: PathBuf },
+    /// Sonstiger git-Fehler (libgit2; der CLI-Fehler steht nur im Log)
+    Git(String),
+}
+
+impl std::fmt::Display for CheckoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CheckedOutElsewhere { branch, path } => {
+                write!(f, "Branch {branch} ist in {} ausgecheckt", path.display())
+            }
+            Self::RemoteBranchMissing { upstream } => {
+                write!(f, "Remote-Branch {upstream} nicht gefunden")
+            }
+            Self::BranchNameTaken { branch, fallback } => write!(
+                f,
+                "Weder {branch} noch {fallback} lassen sich als lokaler Branch nutzen"
+            ),
+            Self::TargetNotEmpty { path } => write!(
+                f,
+                "Der Ordner {} existiert bereits und ist nicht leer",
+                path.display()
+            ),
+            Self::Git(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl std::error::Error for CheckoutError {}
+
+/// K1: bereitet nach [`fetch_refspecs`] den lokalen MR-Branch im Klon
+/// `base_path` vor. Ändert nur Refs, nie Arbeitsverzeichnis oder HEAD, und
+/// setzt nie zurück: fehlt der Branch, wird er am MR-Stand angelegt (mit
+/// Upstream); ist er Vorfahr, wird er per Compare-and-Swap vorgespult;
+/// voraus/divergiert bleibt er unverändert. Vorher wie beim Branch-Wechsel
+/// (E15) die Worktree-Prüfung ([`branch_checked_out_elsewhere`]).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn prepare_mr_branch(base_path: &Path, plan: &MrCheckoutPlan) -> Result<MrPrep, CheckoutError> {
+    let repo = Repository::open(base_path)
+        .map_err(|e| CheckoutError::Git(format!("Repo öffnen fehlgeschlagen: {e}")))?;
+    let target =
+        repo.refname_to_id(&plan.remote_ref())
+            .map_err(|_| CheckoutError::RemoteBranchMissing {
+                upstream: plan.upstream(),
+            })?;
+    let local_branch = choose_mr_branch(&repo, plan)?;
+    if let Some(path) = branch_checked_out_elsewhere(&repo, &local_branch) {
+        return Err(CheckoutError::CheckedOutElsewhere {
+            branch: local_branch,
+            path,
+        });
+    }
+    if let Some(expected) = plan.expected_sha.as_deref() {
+        if !target.to_string().starts_with(expected) {
+            eprintln!(
+                "MR !{}: geholter Stand {target} weicht von diffHeadSha {expected} ab (MR inzwischen aktualisiert?)",
+                plan.iid
+            );
+        }
+    }
+    let git_err = |e: anyhow::Error| CheckoutError::Git(e.to_string());
+    let local_ref = format!("refs/heads/{local_branch}");
+    let Ok(local) = repo.refname_to_id(&local_ref) else {
+        let update = RefUpdate::Create {
+            branch: local_branch.clone(),
+            at: target,
+            upstream: plan.upstream(),
+        };
+        apply_ref_update(&repo, &update).map_err(git_err)?;
+        return Ok(MrPrep {
+            local_branch,
+            outcome: MrPrepOutcome::Created,
+        });
+    };
+    let (ahead, behind) = if local == target {
+        (0, 0)
+    } else {
+        repo.graph_ahead_behind(local, target).map_err(|e| {
+            CheckoutError::Git(format!(
+                "Vergleich {local_branch} / {} fehlgeschlagen: {e}",
+                plan.upstream()
+            ))
+        })?
+    };
+    let is_head = repo
+        .head()
+        .is_ok_and(|h| h.name().is_ok_and(|n| n == local_ref));
+    let outcome = match (ahead, behind) {
+        _ if is_head => MrPrepOutcome::AlreadyHead { behind },
+        (0, 0) => MrPrepOutcome::UpToDate,
+        (0, by) => {
+            let update = RefUpdate::FastForward {
+                branch: local_branch.clone(),
+                from: local,
+                to: target,
+            };
+            apply_ref_update(&repo, &update).map_err(git_err)?;
+            MrPrepOutcome::FastForwarded { by }
+        }
+        (ahead, 0) => MrPrepOutcome::LocalAhead { ahead },
+        (ahead, behind) => MrPrepOutcome::Diverged { ahead, behind },
+    };
+    Ok(MrPrep {
+        local_branch,
+        outcome,
+    })
+}
+
+/// Lokaler Branch für den MR: `sourceBranch`, außer ein gleichnamiger
+/// Branch verfolgt einen anderen Upstream oder das Anlegen kollidiert
+/// (Ordner/Datei wie `x` gegen `x/y`, nur Groß-/Kleinschreibung verschieden –
+/// lose Refs unter Windows) – dann `mr-<iid>`. Ein vorhandener Branch ohne
+/// Upstream zählt wie in E15 als der MR-Branch.
+fn choose_mr_branch(repo: &Repository, plan: &MrCheckoutPlan) -> Result<String, CheckoutError> {
+    let locals: Vec<String> = repo
+        .branches(Some(BranchType::Local))
+        .map(|branches| {
+            branches
+                .flatten()
+                .filter_map(|(b, _)| b.name().ok().flatten().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let upstream = plan.remote_ref();
+    let usable = |name: &str| {
+        if locals.iter().any(|l| l == name) {
+            return repo
+                .branch_upstream_name(&format!("refs/heads/{name}"))
+                .ok()
+                .and_then(|b| b.as_str().ok().map(str::to_string))
+                .is_none_or(|tracked| tracked.is_empty() || tracked == upstream);
+        }
+        !locals.iter().any(|l| {
+            l.eq_ignore_ascii_case(name) || is_ref_dir_of(l, name) || is_ref_dir_of(name, l)
+        })
+    };
+    let fallback = plan.fallback_branch();
+    if usable(&plan.source_branch) {
+        Ok(plan.source_branch.clone())
+    } else if usable(&fallback) {
+        Ok(fallback)
+    } else {
+        Err(CheckoutError::BranchNameTaken {
+            branch: plan.source_branch.clone(),
+            fallback,
+        })
+    }
+}
+
+/// Ist `dir` ein Ordner-Präfix von `name` (`feature` vor `feature/x`)?
+/// Ohne Groß-/Kleinschreibung wie lose Refs unter Windows.
+fn is_ref_dir_of(dir: &str, name: &str) -> bool {
+    name.as_bytes().get(dir.len()) == Some(&b'/')
+        && name
+            .get(..dir.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(dir))
+}
+
+/// K1: legt im Ordner `target_path` einen Worktree des Klons `base_path` auf
+/// dem lokalen Branch `local_branch` an (Ordnername = Worktree-Name). Der
+/// Zielordner darf fehlen oder leer sein; Elternordner (Review-Ordner)
+/// werden angelegt, ein verwaister Eintrag für denselben Ordner wird
+/// entfernt. libgit2 zuerst, Fallback `git -C base worktree add`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn add_worktree(
+    base_path: &Path,
+    target_path: &Path,
+    local_branch: &str,
+) -> Result<(), CheckoutError> {
+    let repo = Repository::open(base_path)
+        .map_err(|e| CheckoutError::Git(format!("Repo öffnen fehlgeschlagen: {e}")))?;
+    let full = format!("refs/heads/{local_branch}");
+    // Branch darf in keinem Worktree HEAD sein – auch nicht im Basis-Klon,
+    // den `branch_checked_out_elsewhere` als eigenen Worktree auslässt.
+    let elsewhere = if repo.head().is_ok_and(|h| h.name().is_ok_and(|n| n == full)) {
+        repo.workdir().map(|w| w.components().collect())
+    } else {
+        branch_checked_out_elsewhere(&repo, local_branch)
+    };
+    if let Some(path) = elsewhere {
+        return Err(CheckoutError::CheckedOutElsewhere {
+            branch: local_branch.to_string(),
+            path,
+        });
+    }
+    let reference = repo
+        .find_reference(&full)
+        .map_err(|e| CheckoutError::Git(format!("Branch {local_branch} nicht gefunden: {e}")))?;
+    let name = target_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| {
+            CheckoutError::Git(format!("Ungültiger Zielordner: {}", target_path.display()))
+        })?
+        .to_string();
+    prepare_target_dir(target_path)?;
+    prune_stale_worktrees_at(&repo, target_path);
+    let admin = repo.commondir().join("worktrees").join(&name);
+    let admin_existed = admin.exists();
+    let mut opts = git2::WorktreeAddOptions::new();
+    opts.reference(Some(&reference));
+    let Err(lib_err) = repo.worktree(&name, target_path, Some(&opts)) else {
+        return Ok(());
+    };
+    eprintln!(
+        "libgit2 worktree add nach '{}' fehlgeschlagen ({lib_err}), versuche System-git...",
+        target_path.display()
+    );
+    // Halbfertigen Stand von libgit2 entfernen – nur, was dieser Aufruf
+    // angelegt hat (der Zielordner fehlte oder war leer und ist entfernt).
+    if !admin_existed {
+        let _ = std::fs::remove_dir_all(&admin);
+    }
+    let _ = std::fs::remove_dir_all(target_path);
+    worktree_add_with_git_cli(base_path, target_path, local_branch).map_err(|cli_err| {
+        eprintln!("System-git worktree add ebenfalls fehlgeschlagen: {cli_err:#}");
+        let _ = std::fs::remove_dir_all(target_path);
+        // Strukturierter Fehler bleibt libgit2-basiert (wie beim Fetch).
+        CheckoutError::Git(format!("Worktree anlegen fehlgeschlagen: {lib_err}"))
+    })
+}
+
+/// Verwaiste Worktree-Einträge, die auf genau `target` zeigen (Ordner im
+/// Explorer gelöscht, ohne `git worktree prune`), entfernen: libgit2 legt
+/// `<commondir>/worktrees/<name>` exklusiv an, und `git worktree add`
+/// verweigert einen „missing but already registered worktree“. Gesperrte
+/// Einträge und solche für andere Ordner (z. B. auf einem getrennten
+/// Laufwerk) bleiben. `prune` ohne Flags entfernt nur den Admin-Ordner
+/// ungültiger, ungesperrter Einträge, nie ein Arbeitsverzeichnis.
+fn prune_stale_worktrees_at(repo: &Repository, target: &Path) {
+    let Ok(names) = repo.worktrees() else {
+        return;
+    };
+    let target = missing_dir_key(target);
+    for name in names.iter().filter_map(|n| n.ok().flatten()) {
+        let Ok(wt) = repo.find_worktree(name) else {
+            continue;
+        };
+        let stale = wt.validate().is_err()
+            && matches!(wt.is_locked(), Ok(git2::WorktreeLockStatus::Unlocked))
+            && missing_dir_key(wt.path()) == target;
+        if !stale {
+            continue;
+        }
+        match wt.prune(None) {
+            Ok(()) => eprintln!("Verwaisten Worktree-Eintrag '{name}' entfernt"),
+            Err(e) => {
+                eprintln!("Verwaisten Worktree-Eintrag '{name}' entfernen fehlgeschlagen: {e}")
+            }
+        }
+    }
+}
+
+/// Vergleichsschlüssel für einen evtl. fehlenden Ordner: Elternordner
+/// kanonisch ([`canonical_key_path`]), Name angehängt; unter Windows ohne
+/// Groß-/Kleinschreibung. Git schreibt auch unter Windows `/`.
+fn missing_dir_key(path: &Path) -> String {
+    let key: PathBuf = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => canonical_key_path(parent).join(name),
+        _ => path.components().collect(),
+    };
+    let key = key.to_string_lossy().to_string();
+    if cfg!(windows) {
+        key.to_lowercase()
+    } else {
+        key
+    }
+}
+
+/// CLI-Fallback: `git -C <base> worktree add <target> <branch>`.
+fn worktree_add_with_git_cli(
+    base_path: &Path,
+    target_path: &Path,
+    local_branch: &str,
+) -> anyhow::Result<()> {
+    let base = base_path.display().to_string();
+    let target = target_path.display().to_string();
+    run_git_cli(
+        &["-C", &base, "worktree", "add", "--", &target, local_branch],
+        "worktree add",
+    )
+}
+
+/// K1: klont `url` nach `target_path` und checkt `branch` aus. Der Zielordner
+/// darf fehlen oder leer sein. libgit2 mit den Credentials wie beim Fetch
+/// ([`fetch_credentials`], globale Config für `credential.helper`), Fallback
+/// `git clone --branch <branch> <url> <target>`. Ein halber Klon wird
+/// wieder entfernt.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn clone_repo(url: &str, target_path: &Path, branch: &str) -> Result<(), CheckoutError> {
+    prepare_target_dir(target_path)?;
+    let config = git2::Config::open_default().ok();
+    let remote_url = url.to_string();
+    let mut callbacks = git2::RemoteCallbacks::new();
+    callbacks.credentials(move |cb_url, username_from_url, allowed| {
+        fetch_credentials(&config, cb_url, username_from_url, allowed, &remote_url)
+    });
+    let mut fetch_opts = git2::FetchOptions::new();
+    fetch_opts.remote_callbacks(callbacks);
+    let result = git2::build::RepoBuilder::new()
+        .branch(branch)
+        .fetch_options(fetch_opts)
+        .clone(url, target_path);
+    let Err(lib_err) = result else {
+        return Ok(());
+    };
+    eprintln!(
+        "libgit2 clone nach '{}' fehlgeschlagen ({lib_err}), versuche System-git...",
+        target_path.display()
+    );
+    // Der Zielordner fehlte oder war leer (und ist entfernt): alles darin
+    // stammt von diesem Aufruf.
+    let _ = std::fs::remove_dir_all(target_path);
+    clone_with_git_cli(url, target_path, branch).map_err(|cli_err| {
+        eprintln!("System-git clone ebenfalls fehlgeschlagen: {cli_err:#}");
+        let _ = std::fs::remove_dir_all(target_path);
+        CheckoutError::Git(format!("Klonen fehlgeschlagen: {lib_err}"))
+    })
+}
+
+/// CLI-Fallback: `git clone --branch <branch> -- <url> <target>`.
+fn clone_with_git_cli(url: &str, target_path: &Path, branch: &str) -> anyhow::Result<()> {
+    let target = target_path.display().to_string();
+    run_git_cli(&["clone", "--branch", branch, "--", url, &target], "clone")
+}
+
+/// Zielordner für Worktree oder Klon: darf fehlen oder leer sein. Ein leerer
+/// Ordner wird entfernt (libgit2 legt den Worktree-Ordner exklusiv an),
+/// Elternordner werden angelegt.
+fn prepare_target_dir(target: &Path) -> Result<(), CheckoutError> {
+    let not_empty = || CheckoutError::TargetNotEmpty {
+        path: target.to_path_buf(),
+    };
+    match std::fs::symlink_metadata(target) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(CheckoutError::Git(format!(
+                "Zielordner {} nicht lesbar: {e}",
+                target.display()
+            )))
+        }
+        Ok(meta) if meta.is_dir() => {
+            let has_entries = std::fs::read_dir(target)
+                .map_err(|e| {
+                    CheckoutError::Git(format!("Zielordner {} nicht lesbar: {e}", target.display()))
+                })?
+                .next()
+                .is_some();
+            if has_entries {
+                return Err(not_empty());
+            }
+            std::fs::remove_dir(target).map_err(|e| {
+                CheckoutError::Git(format!(
+                    "Leeren Zielordner {} entfernen fehlgeschlagen: {e}",
+                    target.display()
+                ))
+            })?;
+        }
+        // Datei oder Symlink
+        Ok(_) => return Err(not_empty()),
+    }
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            CheckoutError::Git(format!(
+                "Ordner {} anlegen fehlgeschlagen: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 /// Convenience: RepoInfo für einen Pfad ermitteln, falls es ein Repo ist
 pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
     let repo = open_repo(&path)?;
@@ -1295,16 +1792,64 @@ pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
         }
     }
     let (branch, is_detached) = get_branch(&repo);
-    let dirty = is_dirty(&repo);
+    let dirty_files = dirty_count(&repo);
     // Finding C: geöffnetes Handle wiederverwenden statt 2× erneut öffnen.
     let branches = list_branches_in(&repo);
     let (ahead, behind) = ahead_behind_in(&repo);
-    let mut info = RepoInfo::new(path, branch, dirty, is_detached).with_branches(branches);
+    let mut info =
+        RepoInfo::new(path, branch, dirty_files > 0, is_detached).with_branches(branches);
     info.ahead = ahead;
     info.behind = behind;
     info.remotes = read_remotes(&repo);
     info.common_dir = canonical_key_path(repo.commondir());
+    info.dirty_files = dirty_files;
+    info.worktrees = read_worktree_heads(&repo);
+    info.is_linked_worktree = repo.is_worktree();
     Some(info)
+}
+
+/// K1: die übrigen Worktrees desselben Repos mit ihrem Branch – bei einem
+/// verknüpften Worktree der Haupt-Worktree, dazu die verknüpften aus
+/// `Repository::worktrees()` außer dem eigenen. Liest wie
+/// [`branch_checked_out_elsewhere`] nur Dateien unter `commondir` (ein
+/// `readdir` je Repo); verwaiste Einträge fehlen.
+fn read_worktree_heads(repo: &Repository) -> Vec<WorktreeHead> {
+    let branch_of = |git_dir: &Path| {
+        head_symref(git_dir).and_then(|r| r.strip_prefix("refs/heads/").map(str::to_string))
+    };
+    let common = repo.commondir();
+    let mut heads = Vec::new();
+    if repo.is_worktree() {
+        let main = Repository::open(common).ok();
+        if let Some(workdir) = main.as_ref().and_then(|r| r.workdir()) {
+            heads.push(WorktreeHead {
+                // Ohne abschließenden Separator wie bei `branch_checked_out_elsewhere`
+                path: workdir.components().collect(),
+                branch: branch_of(common),
+            });
+        }
+    }
+    let Ok(names) = repo.worktrees() else {
+        return heads;
+    };
+    if names.is_empty() {
+        return heads;
+    }
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let own = canon(repo.path());
+    for name in names.iter().filter_map(|n| n.ok().flatten()) {
+        let admin = common.join("worktrees").join(name);
+        if canon(&admin) == own {
+            continue;
+        }
+        if let Some(path) = linked_worktree_path(&admin) {
+            heads.push(WorktreeHead {
+                path,
+                branch: branch_of(&admin),
+            });
+        }
+    }
+    heads
 }
 
 /// Kanonischer Pfad als Vergleichsschlüssel (`RepoInfo.common_dir`). libgit2
@@ -2638,11 +3183,11 @@ mod tests {
             .unwrap();
         drop(repo);
         assert!(
-            fetch_with_git_cli(dir.path(), "good").is_ok(),
+            fetch_with_git_cli(dir.path(), "good", &[], true).is_ok(),
             "git CLI fetch for file remote must succeed"
         );
         assert!(
-            fetch_with_git_cli(dir.path(), "does-not-exist-remote").is_err(),
+            fetch_with_git_cli(dir.path(), "does-not-exist-remote", &[], true).is_err(),
             "git CLI fetch for unknown remote must fail"
         );
     }
@@ -3499,6 +4044,686 @@ mod tests {
             );
             assert_eq!(head_target(&c1), "refs/heads/main");
         }
+    }
+
+    // --- K1: MR auschecken (fetch_refspecs, prepare_mr_branch, add_worktree, clone_repo) ---
+
+    fn mr_plan(source_branch: &str) -> MrCheckoutPlan {
+        MrCheckoutPlan {
+            iid: 418,
+            remote: "origin".to_string(),
+            source_branch: source_branch.to_string(),
+            expected_sha: None,
+        }
+    }
+
+    fn ref_exists(dir: &Path, name: &str) -> bool {
+        Repository::open(dir).unwrap().refname_to_id(name).is_ok()
+    }
+
+    /// Konfigurierter Upstream als voller Ref-Name.
+    fn upstream_of(dir: &Path, branch: &str) -> Option<String> {
+        Repository::open(dir)
+            .unwrap()
+            .branch_upstream_name(&format!("refs/heads/{branch}"))
+            .ok()
+            .and_then(|b| b.as_str().ok().map(str::to_string))
+    }
+
+    /// Zweiter Klon `c2` legt `branch` (von `main`) mit einem Commit auf
+    /// origin an; c1 kennt ihn danach noch nicht.
+    fn push_new_branch_from_second_clone(base: &Path, branch: &str) {
+        git_cmd(base, &["clone", "-b", "main", "origin.git", "c2"]);
+        let c2 = base.join("c2");
+        git_identity(&c2);
+        git_cmd(&c2, &["checkout", "-b", branch]);
+        commit_file(&c2, "y.txt", "y\n", "new branch");
+        git_cmd(&c2, &["push", "origin", branch]);
+    }
+
+    /// Ausgangslage für den Fetch-Test: c1 kennt `origin/old`; origin hat
+    /// danach `old` gelöscht, einen neuen Commit auf `feature/x`, einen neuen
+    /// Branch `fresh` und das Tag `v1`. `fetch.prune` des Users ist an.
+    fn origin_moved_on(base: &Path) -> PathBuf {
+        let c1 = origin_and_clone_with_feature(base);
+        git_cmd(&c1, &["push", "origin", "main:refs/heads/old"]);
+        git_cmd(&c1, &["fetch", "origin"]);
+        assert!(ref_exists(&c1, "refs/remotes/origin/old"));
+        push_from_second_clone(base, "feature/x", "y.txt");
+        let c2 = base.join("c2");
+        git_cmd(&c2, &["push", "origin", "--delete", "old"]);
+        git_cmd(&c2, &["push", "origin", "feature/x:refs/heads/fresh"]);
+        git_cmd(&c2, &["tag", "v1"]);
+        git_cmd(&c2, &["push", "origin", "v1"]);
+        git_cmd(&c1, &["config", "fetch.prune", "true"]);
+        c1
+    }
+
+    fn assert_fetched_only_feature(base: &Path, c1: &Path, local_before: git2::Oid) {
+        assert_eq!(
+            ref_oid(c1, "refs/remotes/origin/feature/x"),
+            ref_oid(&base.join("origin.git"), "refs/heads/feature/x"),
+            "angefragter Branch aktualisiert"
+        );
+        assert!(
+            ref_exists(c1, "refs/remotes/origin/old"),
+            "kein Prune trotz fetch.prune"
+        );
+        assert!(
+            !ref_exists(c1, "refs/remotes/origin/fresh"),
+            "nur der angefragte Branch"
+        );
+        assert!(!ref_exists(c1, "refs/tags/v1"), "keine Tags");
+        assert_eq!(
+            ref_oid(c1, "refs/heads/feature/x"),
+            local_before,
+            "lokale Branches bleiben unberührt"
+        );
+    }
+
+    #[test]
+    fn fetch_refspecs_fetches_only_the_branch_without_prune() {
+        let base = tempdir().unwrap();
+        let c1 = origin_moved_on(base.path());
+        let before = ref_oid(&c1, "refs/heads/feature/x");
+        let spec = mr_plan("feature/x").refspec();
+        fetch_refspecs(&c1, "origin", &[&spec]).unwrap();
+        assert_fetched_only_feature(base.path(), &c1, before);
+        assert!(fetch_refspecs(&c1, "nope", &[&spec]).is_err());
+    }
+
+    #[test]
+    fn fetch_refspecs_cli_path_fetches_only_the_branch_without_prune() {
+        let base = tempdir().unwrap();
+        let c1 = origin_moved_on(base.path());
+        let before = ref_oid(&c1, "refs/heads/feature/x");
+        let spec = mr_plan("feature/x").refspec();
+        fetch_with_git_cli(&c1, "origin", &[&spec], false).unwrap();
+        assert_fetched_only_feature(base.path(), &c1, before);
+    }
+
+    #[test]
+    fn prepare_mr_branch_creates_tracking_branch() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        push_new_branch_from_second_clone(base.path(), "feature/y");
+        let plan = mr_plan("feature/y");
+        fetch_refspecs(&c1, "origin", &[&plan.refspec()]).unwrap();
+        let prep = prepare_mr_branch(&c1, &plan).unwrap();
+        assert_eq!(
+            prep,
+            MrPrep {
+                local_branch: "feature/y".to_string(),
+                outcome: MrPrepOutcome::Created,
+            }
+        );
+        assert_eq!(
+            ref_oid(&c1, "refs/heads/feature/y"),
+            ref_oid(&c1, "refs/remotes/origin/feature/y")
+        );
+        assert_eq!(
+            upstream_of(&c1, "feature/y").as_deref(),
+            Some("refs/remotes/origin/feature/y")
+        );
+        // Nur Refs: Arbeitsverzeichnis und HEAD unverändert
+        assert_eq!(head_target(&c1), "refs/heads/main");
+        assert!(!dirty(&c1));
+        assert!(!c1.join("y.txt").exists());
+    }
+
+    #[test]
+    fn prepare_mr_branch_up_to_date_and_fast_forward() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let plan = mr_plan("feature/x");
+        assert_eq!(
+            prepare_mr_branch(&c1, &plan).unwrap(),
+            MrPrep {
+                local_branch: "feature/x".to_string(),
+                outcome: MrPrepOutcome::UpToDate,
+            }
+        );
+        push_from_second_clone(base.path(), "feature/x", "y.txt");
+        fetch_refspecs(&c1, "origin", &[&plan.refspec()]).unwrap();
+        let prep = prepare_mr_branch(&c1, &plan).unwrap();
+        assert_eq!(prep.outcome, MrPrepOutcome::FastForwarded { by: 1 });
+        assert_eq!(
+            ref_oid(&c1, "refs/heads/feature/x"),
+            ref_oid(&c1, "refs/remotes/origin/feature/x")
+        );
+        assert_eq!(head_target(&c1), "refs/heads/main");
+        assert!(!dirty(&c1));
+        assert!(!c1.join("y.txt").exists(), "Arbeitsverzeichnis unberührt");
+    }
+
+    #[test]
+    fn prepare_mr_branch_local_ahead_and_diverged_keep_ref() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["checkout", "feature/x"]);
+        commit_file(&c1, "local.txt", "l\n", "local");
+        git_cmd(&c1, &["checkout", "main"]);
+        let local = ref_oid(&c1, "refs/heads/feature/x");
+        let plan = mr_plan("feature/x");
+        assert_eq!(
+            prepare_mr_branch(&c1, &plan).unwrap().outcome,
+            MrPrepOutcome::LocalAhead { ahead: 1 }
+        );
+        assert_eq!(ref_oid(&c1, "refs/heads/feature/x"), local);
+        push_from_second_clone(base.path(), "feature/x", "y.txt");
+        fetch_refspecs(&c1, "origin", &[&plan.refspec()]).unwrap();
+        assert_eq!(
+            prepare_mr_branch(&c1, &plan).unwrap().outcome,
+            MrPrepOutcome::Diverged {
+                ahead: 1,
+                behind: 1
+            }
+        );
+        assert_eq!(
+            ref_oid(&c1, "refs/heads/feature/x"),
+            local,
+            "Divergenz setzt nie zurück"
+        );
+        assert!(!dirty(&c1));
+    }
+
+    #[test]
+    fn prepare_mr_branch_already_head_changes_nothing() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["checkout", "feature/x"]);
+        push_from_second_clone(base.path(), "feature/x", "y.txt");
+        let plan = mr_plan("feature/x");
+        fetch_refspecs(&c1, "origin", &[&plan.refspec()]).unwrap();
+        let before = ref_oid(&c1, "refs/heads/feature/x");
+        assert_eq!(
+            prepare_mr_branch(&c1, &plan).unwrap(),
+            MrPrep {
+                local_branch: "feature/x".to_string(),
+                outcome: MrPrepOutcome::AlreadyHead { behind: 1 },
+            }
+        );
+        assert_eq!(ref_oid(&c1, "refs/heads/feature/x"), before);
+        assert!(!dirty(&c1));
+        assert!(!c1.join("y.txt").exists());
+    }
+
+    #[test]
+    fn prepare_mr_branch_rejects_branch_in_other_worktree() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let wt = base.path().join("wt");
+        git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "feature/x"]);
+        match prepare_mr_branch(&c1, &mr_plan("feature/x")) {
+            Err(CheckoutError::CheckedOutElsewhere { branch, path }) => {
+                assert_eq!(branch, "feature/x");
+                assert_eq!(canon(&path), canon(&wt));
+            }
+            other => panic!("unerwartet: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_mr_branch_falls_back_on_other_upstream() {
+        // Lokales feature/x verfolgt upstream/feature/x → mr-418 mit
+        // Upstream origin/feature/x, feature/x bleibt unverändert.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let origin = base.path().join("origin.git");
+        git_cmd(
+            &c1,
+            &["remote", "add", "upstream", origin.to_str().unwrap()],
+        );
+        git_cmd(&c1, &["fetch", "upstream"]);
+        git_cmd(&c1, &["branch", "-u", "upstream/feature/x", "feature/x"]);
+        let before = ref_oid(&c1, "refs/heads/feature/x");
+        let prep = prepare_mr_branch(&c1, &mr_plan("feature/x")).unwrap();
+        assert_eq!(
+            prep,
+            MrPrep {
+                local_branch: "mr-418".to_string(),
+                outcome: MrPrepOutcome::Created,
+            }
+        );
+        assert_eq!(
+            upstream_of(&c1, "mr-418").as_deref(),
+            Some("refs/remotes/origin/feature/x")
+        );
+        assert_eq!(ref_oid(&c1, "refs/heads/feature/x"), before);
+        assert_eq!(
+            upstream_of(&c1, "feature/x").as_deref(),
+            Some("refs/remotes/upstream/feature/x")
+        );
+        // Zweiter Durchlauf findet mr-418 mit passendem Upstream wieder
+        assert_eq!(
+            prepare_mr_branch(&c1, &mr_plan("feature/x")).unwrap(),
+            MrPrep {
+                local_branch: "mr-418".to_string(),
+                outcome: MrPrepOutcome::UpToDate,
+            }
+        );
+    }
+
+    #[test]
+    fn prepare_mr_branch_falls_back_on_name_clash() {
+        // Ordner-/Datei-Konflikt (`feature` gegen `feature/x`) und Branch,
+        // der sich nur in der Groß-/Kleinschreibung unterscheidet.
+        for clash in ["feature", "Feature/X", "feature/x/deeper"] {
+            let base = tempdir().unwrap();
+            let c1 = origin_and_clone_with_feature(base.path());
+            git_cmd(&c1, &["branch", "-D", "feature/x"]);
+            git_cmd(&c1, &["branch", clash, "main"]);
+            let prep = prepare_mr_branch(&c1, &mr_plan("feature/x")).unwrap();
+            assert_eq!(prep.local_branch, "mr-418", "{clash}");
+            assert_eq!(prep.outcome, MrPrepOutcome::Created, "{clash}");
+            assert_eq!(
+                ref_oid(&c1, "refs/heads/mr-418"),
+                ref_oid(&c1, "refs/remotes/origin/feature/x")
+            );
+        }
+    }
+
+    #[test]
+    fn prepare_mr_branch_existing_branch_without_upstream_is_used() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["branch", "--unset-upstream", "feature/x"]);
+        assert_eq!(
+            prepare_mr_branch(&c1, &mr_plan("feature/x")).unwrap(),
+            MrPrep {
+                local_branch: "feature/x".to_string(),
+                outcome: MrPrepOutcome::UpToDate,
+            }
+        );
+    }
+
+    #[test]
+    fn prepare_mr_branch_errors() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        // Nicht geholt / gelöscht
+        assert_eq!(
+            prepare_mr_branch(&c1, &mr_plan("feature/nope")),
+            Err(CheckoutError::RemoteBranchMissing {
+                upstream: "origin/feature/nope".to_string()
+            })
+        );
+        // Weder feature/x noch mr-418 nutzbar
+        let origin = base.path().join("origin.git");
+        git_cmd(
+            &c1,
+            &["remote", "add", "upstream", origin.to_str().unwrap()],
+        );
+        git_cmd(&c1, &["fetch", "upstream"]);
+        git_cmd(&c1, &["branch", "-u", "upstream/feature/x", "feature/x"]);
+        git_cmd(&c1, &["branch", "--track", "mr-418", "upstream/main"]);
+        assert_eq!(
+            prepare_mr_branch(&c1, &mr_plan("feature/x")),
+            Err(CheckoutError::BranchNameTaken {
+                branch: "feature/x".to_string(),
+                fallback: "mr-418".to_string(),
+            })
+        );
+        let missing = base.path().join("missing");
+        assert!(matches!(
+            prepare_mr_branch(&missing, &mr_plan("feature/x")),
+            Err(CheckoutError::Git(_))
+        ));
+    }
+
+    #[test]
+    fn add_worktree_creates_folder_on_branch() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        // Review-Ordner gibt es noch nicht
+        let target = base.path().join("Reviews").join("backend-api-mr-418");
+        add_worktree(&c1, &target, "feature/x").unwrap();
+        assert_eq!(head_target(&target), "refs/heads/feature/x");
+        assert!(target.join("x.txt").exists());
+        assert!(!dirty(&target));
+        // Basis-Klon unverändert
+        assert_eq!(head_target(&c1), "refs/heads/main");
+        assert!(!dirty(&c1));
+        assert!(!c1.join("x.txt").exists());
+        // Worktree-Name = Ordnername
+        let repo = Repository::open(&c1).unwrap();
+        let wt = repo.find_worktree("backend-api-mr-418").unwrap();
+        assert_eq!(canon(wt.path()), canon(&target));
+        drop(repo);
+        assert_eq!(
+            get_repo_info(target.clone()).unwrap().common_dir,
+            canon(&c1.join(".git"))
+        );
+    }
+
+    #[test]
+    fn add_worktree_target_must_be_missing_or_empty() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let empty = base.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        add_worktree(&c1, &empty, "feature/x").unwrap();
+        assert_eq!(head_target(&empty), "refs/heads/feature/x");
+
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let full = base.path().join("full");
+        fs::create_dir(&full).unwrap();
+        fs::write(full.join("notes.txt"), "keep\n").unwrap();
+        assert_eq!(
+            add_worktree(&c1, &full, "feature/x"),
+            Err(CheckoutError::TargetNotEmpty { path: full.clone() })
+        );
+        assert_eq!(
+            fs::read_to_string(full.join("notes.txt")).unwrap(),
+            "keep\n"
+        );
+        assert!(!full.join(".git").exists());
+        let file = base.path().join("file");
+        fs::write(&file, "x").unwrap();
+        assert_eq!(
+            add_worktree(&c1, &file, "feature/x"),
+            Err(CheckoutError::TargetNotEmpty { path: file.clone() })
+        );
+        assert!(Repository::open(&c1)
+            .unwrap()
+            .worktrees()
+            .unwrap()
+            .is_empty());
+        // Unbekannter Branch
+        assert!(matches!(
+            add_worktree(&c1, &base.path().join("wt"), "nope"),
+            Err(CheckoutError::Git(_))
+        ));
+        assert!(!base.path().join("wt").exists());
+    }
+
+    #[test]
+    fn add_worktree_rejects_branch_checked_out_elsewhere() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let wt = base.path().join("wt");
+        git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "feature/x"]);
+        let target = base.path().join("second");
+        match add_worktree(&c1, &target, "feature/x") {
+            Err(CheckoutError::CheckedOutElsewhere { branch, path }) => {
+                assert_eq!(branch, "feature/x");
+                assert_eq!(canon(&path), canon(&wt));
+            }
+            other => panic!("unerwartet: {other:?}"),
+        }
+        // Branch ist HEAD im Basis-Klon selbst
+        match add_worktree(&c1, &target, "main") {
+            Err(CheckoutError::CheckedOutElsewhere { branch, path }) => {
+                assert_eq!(branch, "main");
+                assert_eq!(canon(&path), canon(&c1));
+            }
+            other => panic!("unerwartet: {other:?}"),
+        }
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn add_worktree_again_after_folder_was_deleted() {
+        // Review-Ordner im Explorer gelöscht, ohne `git worktree prune`: der
+        // verwaiste Eintrag mit gleichem Namen und Pfad blockiert nicht.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let target = base.path().join("Reviews").join("backend-api-mr-418");
+        add_worktree(&c1, &target, "feature/x").unwrap();
+        fs::remove_dir_all(&target).unwrap();
+        add_worktree(&c1, &target, "feature/x").unwrap();
+        assert_eq!(head_target(&target), "refs/heads/feature/x");
+        assert!(target.join("x.txt").exists());
+        assert_eq!(head_target(&c1), "refs/heads/main");
+        let admin = c1.join(".git").join("worktrees");
+        // Auch nach `git worktree add` (CLI) angelegte Einträge
+        fs::remove_dir_all(&target).unwrap();
+        git_cmd(&c1, &["worktree", "prune"]);
+        git_cmd(
+            &c1,
+            &["worktree", "add", target.to_str().unwrap(), "feature/x"],
+        );
+        fs::remove_dir_all(&target).unwrap();
+        add_worktree(&c1, &target, "feature/x").unwrap();
+        assert_eq!(head_target(&target), "refs/heads/feature/x");
+        // Gesperrte verwaiste Einträge bleiben: Fehler statt Prune. Der
+        // Branch gilt dort weiter als ausgecheckt (wie in E15) …
+        git_cmd(&c1, &["worktree", "lock", target.to_str().unwrap()]);
+        fs::remove_dir_all(&target).unwrap();
+        match add_worktree(&c1, &target, "feature/x") {
+            Err(CheckoutError::CheckedOutElsewhere { path, .. }) => {
+                assert_eq!(missing_dir_key(&path), missing_dir_key(&target));
+            }
+            other => panic!("unerwartet: {other:?}"),
+        }
+        // … und auch mit einem anderen Branch wird nichts entfernt
+        git_cmd(&c1, &["branch", "feature/other", "main"]);
+        assert!(matches!(
+            add_worktree(&c1, &target, "feature/other"),
+            Err(CheckoutError::Git(_))
+        ));
+        assert!(admin.join("backend-api-mr-418").join("locked").exists());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn add_worktree_keeps_stale_entry_of_other_folder() {
+        // Gleichnamiger verwaister Eintrag für einen anderen Ordner (z. B.
+        // auf einem gerade nicht verbundenen Laufwerk) bleibt erhalten.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["branch", "feature/old", "main"]);
+        let old = base.path().join("old").join("backend-api-mr-418");
+        add_worktree(&c1, &old, "feature/old").unwrap();
+        fs::remove_dir_all(&old).unwrap();
+        let admin = c1.join(".git").join("worktrees").join("backend-api-mr-418");
+        let gitdir = fs::read_to_string(admin.join("gitdir")).unwrap();
+        let target = base.path().join("Reviews").join("backend-api-mr-418");
+        // libgit2 scheitert am Admin-Ordner, `git worktree add` weicht auf
+        // einen freien Namen aus
+        add_worktree(&c1, &target, "feature/x").unwrap();
+        assert_eq!(head_target(&target), "refs/heads/feature/x");
+        assert_eq!(fs::read_to_string(admin.join("gitdir")).unwrap(), gitdir);
+    }
+
+    #[test]
+    fn add_worktree_cli_fallback() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let target = base.path().join("Reviews").join("cli-wt");
+        worktree_add_with_git_cli(&c1, &target, "feature/x").unwrap();
+        assert_eq!(head_target(&target), "refs/heads/feature/x");
+        assert!(!dirty(&target));
+        assert_eq!(head_target(&c1), "refs/heads/main");
+        assert!(worktree_add_with_git_cli(&c1, &base.path().join("x"), "nope").is_err());
+    }
+
+    #[test]
+    fn clone_repo_checks_out_branch() {
+        let base = tempdir().unwrap();
+        origin_and_clone_with_feature(base.path());
+        let origin = base.path().join("origin.git");
+        let target = base.path().join("clones").join("backend-api-mr-418");
+        clone_repo(origin.to_str().unwrap(), &target, "feature/x").unwrap();
+        assert_eq!(head_target(&target), "refs/heads/feature/x");
+        assert!(target.join("x.txt").exists());
+        assert!(!dirty(&target));
+        assert_eq!(
+            upstream_of(&target, "feature/x").as_deref(),
+            Some("refs/remotes/origin/feature/x")
+        );
+    }
+
+    #[test]
+    fn clone_repo_errors_leave_no_folder() {
+        let base = tempdir().unwrap();
+        origin_and_clone_with_feature(base.path());
+        let origin = base.path().join("origin.git");
+        let full = base.path().join("full");
+        fs::create_dir(&full).unwrap();
+        fs::write(full.join("notes.txt"), "keep\n").unwrap();
+        assert_eq!(
+            clone_repo(origin.to_str().unwrap(), &full, "feature/x"),
+            Err(CheckoutError::TargetNotEmpty { path: full.clone() })
+        );
+        assert_eq!(
+            fs::read_to_string(full.join("notes.txt")).unwrap(),
+            "keep\n"
+        );
+        // libgit2 und System-git scheitern → kein halber Klon bleibt liegen
+        let missing = base.path().join("missing.git");
+        let target = base.path().join("clone");
+        assert!(matches!(
+            clone_repo(missing.to_str().unwrap(), &target, "feature/x"),
+            Err(CheckoutError::Git(_))
+        ));
+        assert!(!target.exists());
+        let target = base.path().join("clone-branch");
+        assert!(clone_repo(origin.to_str().unwrap(), &target, "nope").is_err());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn clone_repo_cli_fallback() {
+        let base = tempdir().unwrap();
+        origin_and_clone_with_feature(base.path());
+        let origin = base.path().join("origin.git");
+        let target = base.path().join("cli-clone");
+        clone_with_git_cli(origin.to_str().unwrap(), &target, "feature/x").unwrap();
+        assert_eq!(head_target(&target), "refs/heads/feature/x");
+        assert!(target.join("x.txt").exists());
+    }
+
+    #[test]
+    fn get_repo_info_counts_dirty_files() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        assert_eq!(
+            get_repo_info(dir.path().to_path_buf()).unwrap().dirty_files,
+            0
+        );
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        fs::write(dir.path().join("new.txt"), "n\n").unwrap();
+        // Untracked Ordner zählt einmal (wie `is_dirty`, P1)
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/a.txt"), "a\n").unwrap();
+        fs::write(dir.path().join("sub/b.txt"), "b\n").unwrap();
+        let info = get_repo_info(dir.path().to_path_buf()).unwrap();
+        assert!(info.dirty);
+        assert_eq!(info.dirty_files, 3);
+    }
+
+    #[test]
+    fn get_repo_info_lists_other_worktrees() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let wt = base.path().join("wt");
+        let detached = base.path().join("detached");
+        let stale = base.path().join("stale");
+        git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "feature/x"]);
+        git_cmd(
+            &c1,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                detached.to_str().unwrap(),
+                "main",
+            ],
+        );
+        git_cmd(
+            &c1,
+            &["worktree", "add", "-b", "gone", stale.to_str().unwrap()],
+        );
+        fs::remove_dir_all(&stale).unwrap();
+        let sorted = |mut heads: Vec<WorktreeHead>| {
+            heads.sort_by(|a, b| a.path.cmp(&b.path));
+            heads
+                .into_iter()
+                .map(|h| (canon(&h.path), h.branch))
+                .collect::<Vec<_>>()
+        };
+        let main_info = get_repo_info(c1.clone()).unwrap();
+        assert!(!main_info.is_linked_worktree);
+        assert_eq!(
+            sorted(main_info.worktrees),
+            vec![
+                (canon(&detached), None),
+                (canon(&wt), Some("feature/x".to_string())),
+            ]
+        );
+        // Aus dem verknüpften Worktree: Haupt-Worktree und Geschwister, nicht er selbst
+        let wt_info = get_repo_info(wt.clone()).unwrap();
+        assert!(wt_info.is_linked_worktree);
+        let mut want = vec![
+            (canon(&c1), Some("main".to_string())),
+            (canon(&detached), None),
+        ];
+        want.sort();
+        assert_eq!(sorted(wt_info.worktrees), want);
+        // Ohne weitere Worktrees leer
+        let other = base.path().join("other");
+        fs::create_dir(&other).unwrap();
+        init_repo_with_commit(&other, "main");
+        assert!(get_repo_info(other).unwrap().worktrees.is_empty());
+    }
+
+    #[test]
+    fn find_checked_out_finds_worktree_outside_scan_root() {
+        use crate::config::MrConfig;
+        use crate::gitlab::checkout::{find_checked_out, ProjectRef};
+        use crate::gitlab::remote::{resolve_hosts, GlabHost};
+        // Scan-Root enthält nur c1; der Worktree liegt woanders
+        let scan_root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(scan_root.path());
+        let wt = outside.path().join("backend-api-mr-418");
+        git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "feature/x"]);
+        git_cmd(
+            &c1,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "git@gitlab.example.com:kern/backend-api.git",
+            ],
+        );
+        let cfg = crate::config::AppConfig {
+            roots: vec![scan_root.path().to_path_buf()],
+            max_depth: 2,
+            ..crate::config::AppConfig::default()
+        };
+        // origin.git ist bare und wird nicht gelistet
+        let repos = crate::scanner::scan_repos(&cfg);
+        let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["c1"], "nur c1 gescannt");
+        let glab = [GlabHost {
+            key: "gitlab.example.com".to_string(),
+            user: "tim".to_string(),
+            ..GlabHost::default()
+        }];
+        let hosts = resolve_hosts(
+            repos
+                .iter()
+                .flat_map(|r| r.remotes.iter().filter_map(|x| x.parsed.as_ref())),
+            &glab,
+            &MrConfig::default(),
+        );
+        let project = ProjectRef {
+            hosts: &hosts,
+            host_key: "gitlab.example.com",
+            full_path: "kern/backend-api",
+        };
+        assert_eq!(
+            find_checked_out(&repos, "feature/x", &project).map(|p| canon(&p)),
+            Some(canon(&wt))
+        );
+        let other = ProjectRef {
+            full_path: "web/kundenportal",
+            ..project
+        };
+        assert_eq!(find_checked_out(&repos, "feature/x", &other), None);
     }
 
     #[test]
