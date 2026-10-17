@@ -1,0 +1,10 @@
+{
+  "errors": [
+    {
+      "message": "Field 'reviewState' doesn't exist on type 'UserMergeRequestInteraction'",
+      "locations": [{ "line": 1, "column": 1043 }],
+      "path": ["fragment Mr", "reviewers", "nodes", "mergeRequestInteraction", "reviewState"],
+      "extensions": { "code": "undefinedField", "typeName": "UserMergeRequestInteraction", "fieldName": "reviewState" }
+    }
+  ]
+}

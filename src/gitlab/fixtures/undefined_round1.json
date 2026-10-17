@@ -1,0 +1,34 @@
+{
+  "errors": [
+    {
+      "message": "Field 'enterprise' doesn't exist on type 'Metadata'",
+      "locations": [{ "line": 1, "column": 38 }],
+      "path": ["query GmDashboard", "metadata", "enterprise"],
+      "extensions": { "code": "undefinedField", "typeName": "Metadata", "fieldName": "enterprise" }
+    },
+    {
+      "message": "Field 'webPath' doesn't exist on type 'MergeRequest'",
+      "locations": [{ "line": 1, "column": 512 }],
+      "path": ["fragment Mr", "webPath"],
+      "extensions": { "code": "undefinedField", "typeName": "MergeRequest", "fieldName": "webPath" }
+    },
+    {
+      "message": "Field 'approvalsRequired' doesn't exist on type 'MergeRequest'",
+      "locations": [{ "line": 1, "column": 790 }],
+      "path": ["fragment Mr", "approvalsRequired"],
+      "extensions": { "code": "undefinedField", "typeName": "MergeRequest", "fieldName": "approvalsRequired" }
+    },
+    {
+      "message": "Field 'approvalsLeft' doesn't exist on type 'MergeRequest'",
+      "locations": [{ "line": 1, "column": 808 }],
+      "path": ["fragment Mr", "approvalsLeft"],
+      "extensions": { "code": "undefinedField", "typeName": "MergeRequest", "fieldName": "approvalsLeft" }
+    },
+    {
+      "message": "Field 'detailedMergeStatus' doesn't exist on type 'MergeRequest'",
+      "locations": [{ "line": 1, "column": 960 }],
+      "path": ["fragment Mr", "detailedMergeStatus"],
+      "extensions": { "code": "undefinedField", "typeName": "MergeRequest", "fieldName": "detailedMergeStatus" }
+    }
+  ]
+}

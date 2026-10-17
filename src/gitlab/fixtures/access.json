@@ -1,0 +1,34 @@
+{
+  "data": {
+    "currentUser": { "username": "taltmann", "name": "Tim Altmann", "bot": false },
+    "metadata": { "version": "18.5.1-ee", "enterprise": true },
+    "projects": {
+      "nodes": [
+        {
+          "fullPath": "Kern/Backend-API",
+          "webUrl": "https://gitlab.example.com/Kern/Backend-API",
+          "archived": false,
+          "mergeRequestsEnabled": true,
+          "maxAccessLevel": { "integerValue": 30, "stringValue": "DEVELOPER" },
+          "userPermissions": { "readMergeRequest": true }
+        },
+        {
+          "fullPath": "oss/public-lib",
+          "webUrl": "https://gitlab.example.com/oss/public-lib",
+          "archived": false,
+          "mergeRequestsEnabled": true,
+          "maxAccessLevel": { "integerValue": 0, "stringValue": "NO_ACCESS" },
+          "userPermissions": { "readMergeRequest": true }
+        },
+        {
+          "fullPath": "alt/legacy-tool",
+          "webUrl": "https://gitlab.example.com/alt/legacy-tool",
+          "archived": true,
+          "mergeRequestsEnabled": false,
+          "maxAccessLevel": { "integerValue": 40, "stringValue": "MAINTAINER" },
+          "userPermissions": { "readMergeRequest": true }
+        }
+      ]
+    }
+  }
+}

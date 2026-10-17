@@ -1,0 +1,10 @@
+{
+  "errors": [
+    {
+      "message": "Field 'mergeRequests' doesn't accept argument 'not'",
+      "locations": [{ "line": 1, "column": 131 }],
+      "path": ["query GmUninvolved", "projects", "nodes", "mergeRequests", "not"],
+      "extensions": { "code": "argumentNotAccepted", "name": "mergeRequests", "typeName": "Field", "argumentName": "not" }
+    }
+  ]
+}

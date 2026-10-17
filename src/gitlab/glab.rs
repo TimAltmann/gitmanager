@@ -456,9 +456,13 @@ fn classify_stderr(stderr: &str) -> GlabErrorKind {
 
 /// `errors[].message` aus einem GraphQL-Body.
 fn graphql_errors(out: &GlabOutput) -> Vec<String> {
-    let Some(json) = out.json() else {
-        return Vec::new();
-    };
+    out.json()
+        .map(|json| graphql_messages(&json))
+        .unwrap_or_default()
+}
+
+/// `errors[].message` aus einem schon geparsten GraphQL-Body.
+pub(super) fn graphql_messages(json: &serde_json::Value) -> Vec<String> {
     let Some(errors) = json.get("errors").and_then(|e| e.as_array()) else {
         return Vec::new();
     };

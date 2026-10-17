@@ -1,0 +1,10 @@
+{
+  "errors": [
+    {
+      "message": "Field 'id' doesn't exist on type 'Note'",
+      "locations": [{ "line": 1, "column": 268 }],
+      "path": ["query GmMentions", "currentUser", "todos", "nodes", "note", "id"],
+      "extensions": { "code": "undefinedField", "typeName": "Note", "fieldName": "id" }
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "data": {
+    "projects": {
+      "nodes": [
+        {
+          "fullPath": "web/kundenportal",
+          "mergeRequests": {
+            "count": 5,
+            "pageInfo": { "hasNextPage": true, "endCursor": "eyJ1cGRhdGVkX2F0IjoiMjAyNi0xMC0xNyJ9" },
+            "nodes": [
+              {
+                "id": "gid://gitlab/MergeRequest/30095",
+                "iid": "95",
+                "title": "Footer-Links aktualisieren",
+                "draft": false,
+                "webUrl": "https://gitlab.example.com/web/kundenportal/-/merge_requests/95",
+                "webPath": "/web/kundenportal/-/merge_requests/95",
+                "updatedAt": "2026-10-17T09:30:00Z",
+                "sourceBranch": "content/footer-links",
+                "targetBranch": "develop",
+                "sourceBranchExists": true,
+                "diffHeadSha": "95959595959595959595959595959595959595aa",
+                "project": { "fullPath": "web/kundenportal" },
+                "sourceProject": { "fullPath": "web/kundenportal" },
+                "author": { "username": "alehmann", "name": "Anna Lehmann" },
+                "approvedBy": { "nodes": [{ "username": "jkrueger", "name": "Jonas Krüger", "bot": false }] },
+                "approvalsRequired": 2,
+                "approvalsLeft": 1,
+                "headPipeline": {
+                  "status": "SUCCESS",
+                  "path": "/web/kundenportal/-/pipelines/7720",
+                  "detailedStatus": { "detailsPath": "/web/kundenportal/-/pipelines/7720" }
+                },
+                "resolvableDiscussionsCount": 0,
+                "resolvedDiscussionsCount": 0,
+                "detailedMergeStatus": "NOT_APPROVED",
+                "reviewers": { "nodes": [] }
+              },
+              {
+                "id": "gid://gitlab/MergeRequest/30099",
+                "iid": "99",
+                "title": "Eigener MR (ohne not-Filter vom Server geliefert)",
+                "draft": false,
+                "webUrl": "https://gitlab.example.com/web/kundenportal/-/merge_requests/99",
+                "updatedAt": "2026-10-17T07:00:00Z",
+                "project": { "fullPath": "web/kundenportal" },
+                "author": { "username": "TAltmann", "name": "Tim Altmann" }
+              }
+            ]
+          }
+        },
+        {
+          "fullPath": "kern/backend-api",
+          "mergeRequests": {
+            "count": 1,
+            "pageInfo": { "hasNextPage": false, "endCursor": "eyJpZCI6IjUwNDIzIn0" },
+            "nodes": [
+              {
+                "id": "gid://gitlab/MergeRequest/50423",
+                "iid": "423",
+                "title": "Healthcheck-Endpunkt ergänzen",
+                "draft": false,
+                "webUrl": "https://gitlab.example.com/kern/backend-api/-/merge_requests/423",
+                "updatedAt": "2026-10-17T09:00:00Z",
+                "sourceBranch": "feature/healthcheck",
+                "targetBranch": "main",
+                "author": { "username": "fbraun", "name": "Felix Braun" },
+                "approvedBy": { "nodes": [] },
+                "approvalsRequired": 2,
+                "approvalsLeft": 2,
+                "headPipeline": { "status": "RUNNING", "path": "/kern/backend-api/-/pipelines/9020", "detailedStatus": null },
+                "resolvableDiscussionsCount": 0,
+                "resolvedDiscussionsCount": 0
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
