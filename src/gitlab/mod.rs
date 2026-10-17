@@ -1,6 +1,6 @@
 //! Merge Requests über GitLab und glab: Remotes und Host-Zuordnung (E16),
-//! glab-Runner, GraphQL-Abfragen und Parser, Domänenlogik, später Service und
-//! Checkout.
+//! glab-Runner, GraphQL-Abfragen und Parser, Domänenlogik, Service (Abruf,
+//! Prüfung, Token), später Checkout.
 
 // Vorübergehend bis zur Verdrahtung (Task 10–12): Das Crate ist ein reines
 // Binary, unverdrahteter Code bricht sonst `clippy -D warnings`.
@@ -11,4 +11,5 @@ pub mod graphql;
 pub mod model;
 pub mod remote;
 pub mod secret;
+pub mod service;
 pub mod time;

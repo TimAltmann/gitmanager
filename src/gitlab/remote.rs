@@ -224,6 +224,8 @@ pub struct GlabHost {
     pub user: String,
     /// Abweichender SSH-Host aus der glab-Config
     pub ssh_host: Option<String>,
+    /// `api_protocol` aus der glab-Config (`http`/`https`), falls gesetzt
+    pub api_protocol: Option<String>,
 }
 
 /// Zuordnung eines Remote-Hosts.
@@ -353,7 +355,7 @@ fn norm_host(host: &str) -> String {
 }
 
 /// Hostname ohne `:port` (`[ipv6]` bleibt ganz).
-fn strip_port(host: &str) -> &str {
+pub(super) fn strip_port(host: &str) -> &str {
     match host.rsplit_once(':') {
         Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => h,
         _ => host,
@@ -443,6 +445,7 @@ mod tests {
             key: key.to_string(),
             user: "tim".to_string(),
             ssh_host: ssh_host.map(str::to_string),
+            api_protocol: None,
         }
     }
 
@@ -858,6 +861,7 @@ mod tests {
                 key: "gitlab.example.com".to_string(),
                 user: "  ".to_string(),
                 ssh_host: Some("ssh.example.com".to_string()),
+                api_protocol: None,
             },
         ];
         let cfg = MrConfig {

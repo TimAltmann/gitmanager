@@ -1,0 +1,18 @@
+{
+  "hosts": [
+    {
+      "host": "gitlab.example.com",
+      "state": "success",
+      "user": "taltmann",
+      "error": "",
+      "token_source": "keyring",
+      "git_protocol": "ssh",
+      "api_protocol": "https",
+      "api_endpoint": "https://gitlab.example.com/api/v4/",
+      "graphql_endpoint": "https://gitlab.example.com/api/graphql/",
+      "subfolder": "",
+      "ssh_host": "",
+      "warnings": []
+    }
+  ]
+}

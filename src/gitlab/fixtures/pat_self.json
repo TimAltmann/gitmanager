@@ -1,0 +1,14 @@
+{
+  "id": 4711,
+  "name": "GitManager",
+  "revoked": false,
+  "created_at": "2026-09-01T08:00:00.000Z",
+  "description": "",
+  "scopes": ["read_api"],
+  "user_id": 42,
+  "last_used_at": "2026-10-17T07:55:00.000Z",
+  "last_used_ips": [],
+  "active": true,
+  "granular": false,
+  "expires_at": "2027-03-01"
+}

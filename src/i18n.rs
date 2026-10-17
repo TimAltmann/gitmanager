@@ -568,6 +568,24 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::En, "mr_rev_commented") => "Commented".to_string(),
         (Language::De, "mr_rev_commented") => "Kommentiert".to_string(),
 
+        // ── Merge Requests: Abruf- und Prüffehler, Abfrageteile ─────────
+        (Language::En, "mr_err_scope") => "The token needs read_api.".to_string(),
+        (Language::De, "mr_err_scope") => "Das Token braucht read_api.".to_string(),
+        (Language::En, "mr_err_network") => "{} is not reachable.".to_string(),
+        (Language::De, "mr_err_network") => "{} nicht erreichbar.".to_string(),
+        (Language::En, "mr_err_tls") => "The certificate of {} is not trusted.".to_string(),
+        (Language::De, "mr_err_tls") => "Zertifikat von {} wird nicht vertraut.".to_string(),
+        (Language::En, "mr_err_timeout") => "{} timed out after {} s.".to_string(),
+        (Language::De, "mr_err_timeout") => "Zeitüberschreitung bei {} nach {} s.".to_string(),
+        (Language::En, "mr_err_content_type") => "glab sent the request without a JSON content type.".to_string(),
+        (Language::De, "mr_err_content_type") => "glab hat die Anfrage ohne JSON-Content-Type gesendet.".to_string(),
+        (Language::En, "mr_part_mentions") => "Mentions".to_string(),
+        (Language::De, "mr_part_mentions") => "Erwähnungen".to_string(),
+        (Language::En, "mr_part_reviews") => "Review requests".to_string(),
+        (Language::De, "mr_part_reviews") => "Review-Anfragen".to_string(),
+        (Language::En, "mr_part_uninvolved") => "Other open MRs".to_string(),
+        (Language::De, "mr_part_uninvolved") => "Weitere offene MRs".to_string(),
+
         // ── Relative Zeiten ──────────────────────────────────────────
         (Language::En, "rel_now") => "just now".to_string(),
         (Language::De, "rel_now") => "gerade eben".to_string(),
@@ -944,6 +962,15 @@ mod tests {
             "rel_hour",
             "rel_yesterday",
             "rel_days",
+            // Task 7: Abruf- und Prüffehler, Abfrageteile
+            "mr_err_scope",
+            "mr_err_network",
+            "mr_err_tls",
+            "mr_err_timeout",
+            "mr_err_content_type",
+            "mr_part_mentions",
+            "mr_part_reviews",
+            "mr_part_uninvolved",
         ];
         for key in keys {
             let en = tr(Language::En, key);
@@ -982,6 +1009,13 @@ mod tests {
                 "Std.",
                 "Tagen",
                 "(du)",
+                "nicht",
+                "Zertifikat",
+                "Zeitüberschreitung",
+                "braucht",
+                "Erwähnungen",
+                "Weitere",
+                "Anfrage",
             ] {
                 assert!(
                     !en.contains(german),
@@ -1021,6 +1055,14 @@ mod tests {
         );
         assert_eq!(tr_fmt(Language::De, "rel_hour", &["3"]), "vor 3 Std.");
         assert_eq!(tr_fmt(Language::En, "rel_days", &["4"]), "4 days ago");
+        assert_eq!(
+            tr_fmt(Language::De, "mr_err_timeout", &["gitlab.local", "45"]),
+            "Zeitüberschreitung bei gitlab.local nach 45 s."
+        );
+        assert_eq!(
+            tr_fmt(Language::En, "mr_err_network", &["gitlab.local"]),
+            "gitlab.local is not reachable."
+        );
     }
 
     #[test]
