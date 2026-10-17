@@ -22,6 +22,12 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
+/// Fenstergröße beim Start (ohne gespeicherte Größe: eframe ohne
+/// `persistence`). Mindestens `TOP_BAR_COMPACT_WIDTH` breit, damit
+/// „Aktualisieren“ und „Einstellungen“ beim Start ihren Text zeigen.
+pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1100.0, 680.0];
+const _: () = assert!(DEFAULT_WINDOW_SIZE[0] >= TOP_BAR_COMPACT_WIDTH);
+
 const ICON_GEAR: egui::ImageSource = egui::include_image!("../assets/icons/gear.svg");
 const ICON_REFRESH: egui::ImageSource = egui::include_image!("../assets/icons/refresh.svg");
 const ICON_WARNING: egui::ImageSource = egui::include_image!("../assets/icons/warning.svg");
@@ -138,6 +144,17 @@ pub fn capped_file_count_label(count: usize, truncated: bool) -> String {
         format!("{}+", crate::git::DETAILED_STATUS_CAP)
     } else {
         count.to_string()
+    }
+}
+
+/// Statusleiste der Repo-Liste, solange `scanning` gesetzt ist. Das
+/// Auschecken eines MR (K1) hält `scanning` nur als Ref-Lock (auch während
+/// eines minutenlangen Klons): dann „Auschecken für !{iid} läuft …“ statt
+/// „Scanne nach Repositories…“.
+fn repo_busy_text(lang: Language, scanning: bool, mr_checkout: Option<u64>) -> Option<String> {
+    match mr_checkout {
+        Some(iid) => Some(tr_fmt(lang, "mr_checkout_running", &[&iid.to_string()])),
+        None => scanning.then(|| tr(lang, "scanning_repos")),
     }
 }
 
@@ -560,8 +577,8 @@ impl MyApp {
             }
         }
         app.start_scan();
-        // Initial size matches viewport default (1080x680) – used for collapse logic
-        app.last_window_size = [1080.0, 680.0];
+        // Initial size matches viewport default – used for collapse logic
+        app.last_window_size = DEFAULT_WINDOW_SIZE;
         app
     }
 
@@ -1244,7 +1261,7 @@ impl MyApp {
         };
         for action in actions {
             match action {
-                crate::tray_service::TrayAction::ShowMainWindow => self.show_main_window(ctx),
+                crate::tray_service::TrayAction::ShowMainWindow => self.show_main_from_tray(ctx),
                 crate::tray_service::TrayAction::ShowMergeRequests => self.show_mrs_from_tray(ctx),
                 crate::tray_service::TrayAction::Refresh => self.start_scan(),
                 crate::tray_service::TrayAction::OpenSettings => {
@@ -1996,7 +2013,8 @@ impl MyApp {
                         } else {
                             self.scanning
                         };
-                        let refresh_label = if busy && !mr_view {
+                        // Auschecken hält `scanning` nur als Ref-Lock: kein „Scanne…“
+                        let refresh_label = if busy && !mr_view && self.mr_checkout_busy.is_none() {
                             tr(lang, "scanning")
                         } else {
                             tr(lang, "refresh")
@@ -2150,9 +2168,11 @@ impl MyApp {
                                 .size(11.0)
                                 .color(Color32::from_rgb(60, 120, 60)),
                         );
-                    } else if self.scanning {
+                    } else if let Some(text) =
+                        repo_busy_text(lang, self.scanning, self.mr_checkout_busy)
+                    {
                         ui.label(
-                            RichText::new(tr(lang, "scanning_repos"))
+                            RichText::new(text)
                                 .size(11.0)
                                 .color(Color32::from_rgb(100, 100, 100)),
                         );
@@ -3504,6 +3524,21 @@ mod tests {
         assert!(!app.auto_fetching);
         assert_eq!(app.repos.len(), 1);
         assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn repo_busy_text_names_mr_checkout() {
+        let lang = Language::De;
+        assert_eq!(repo_busy_text(lang, false, None), None);
+        assert_eq!(
+            repo_busy_text(lang, true, None),
+            Some(tr(lang, "scanning_repos"))
+        );
+        // Auschecken hält `scanning` als Ref-Lock: kein „Scanne …“
+        assert_eq!(
+            repo_busy_text(lang, true, Some(5)).as_deref(),
+            Some("Auschecken für !5 läuft …")
+        );
     }
 
     #[test]

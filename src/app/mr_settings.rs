@@ -196,7 +196,9 @@ impl MyApp {
     }
 
     /// Offener Entwurf (Ergebnisse an den Tab statt Statusmeldung).
-    fn open_settings_state(&mut self) -> Option<&mut crate::ui::settings::SettingsState> {
+    pub(super) fn open_settings_state(
+        &mut self,
+    ) -> Option<&mut crate::ui::settings::SettingsState> {
         if self.show_settings {
             self.settings_state.as_mut()
         } else {

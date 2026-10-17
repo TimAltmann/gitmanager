@@ -137,7 +137,7 @@ fn main() -> eframe::Result<()> {
     // M1: --minimized für Autostart (Tray-Start ohne volles Fenster).
     let start_minimized = start_minimized_flag();
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1080.0, 680.0])
+        .with_inner_size(app::DEFAULT_WINDOW_SIZE)
         .with_min_inner_size([920.0, 560.0])
         .with_title("GitManager - Git Repository Manager");
     if start_minimized {

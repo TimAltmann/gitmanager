@@ -9,7 +9,7 @@
 use super::{fetch_error_i18n_key, fetch_error_parts, MainView, MyApp, ScanResult};
 use super::{ICON_CROSS, ICON_WARNING};
 use crate::config::{AfterAction, AppConfig};
-use crate::git::{self, CheckoutError, MrPrep, MrPrepOutcome};
+use crate::git::{self, CheckoutError, MrPrep, MrPrepOutcome, RepoInfo};
 use crate::gitlab::checkout::{find_checked_out, MrCheckoutPlan, MrRefInfo, ProjectRef};
 use crate::gitlab::model::{MergeRequest, MrSnapshot};
 use crate::i18n::{tr, tr_fmt, Language};
@@ -95,16 +95,31 @@ impl MyApp {
         {
             self.config_save_pending = true;
         }
+        // Offenes Einstellungsfenster: auch im Entwurf, sonst setzte dessen
+        // „Speichern“ die Wahl auf den Stand beim Öffnen zurück (wie
+        // `alias_port_host`)
+        if let Some(state) = self.open_settings_state() {
+            state
+                .draft
+                .merge_requests
+                .remember_after_checkout(&choice.after);
+        }
         if self.scanning || self.auto_fetching {
             self.set_status(tr(lang, "mr_checkout_blocked"));
             return;
         }
+        // Ein MR-Wechsel wartet im Dialog auf die Entscheidung: ein zweiter
+        // Wechsel ersetzte oder schlösse diesen Dialog, der erste MR ginge
+        // verloren (ein `mr_switch`)
+        if matches!(choice.kind, MrCheckoutKind::Switch { .. }) && self.mr_switch.is_some() {
+            self.set_status(tr(lang, "mr_switch_waiting"));
+            return;
+        }
         let snapshot = self.mr_snapshot.as_deref();
         let Some(mr) = snapshot.and_then(|s| find_mr(s, &choice.host_key, &choice.mr_id)) else {
-            eprintln!(
-                "MR !{} nicht mehr im Stand – Auschecken übersprungen",
-                choice.iid
-            );
+            // Menü seit dem Öffnen veraltet: ein Refresh hat den MR entfernt
+            let iid = choice.iid.to_string();
+            self.set_status(tr_fmt(lang, "mr_checkout_gone", &[&iid]));
             return;
         };
         let mr = mr.clone();
@@ -412,8 +427,11 @@ impl MyApp {
                 .then(|| tr(lang, "mr_then_explorer")),
             AfterAction::Ide => {
                 // Dieselbe Auflösung wie nach dem Rescan: Zusatz und
-                // gestartete IDE stimmen überein
-                let ide = self.checkout_ide(path, base)?;
+                // gestartete IDE stimmen überein. Ohne IDE im wirksamen
+                // Profil sagt die Meldung das, statt still nichts zu tun.
+                let Some(ide) = self.checkout_ide(path, base) else {
+                    return Some(tr(lang, "mr_then_no_ide"));
+                };
                 self.pending_after_checkout = Some((path.to_path_buf(), AfterAction::Ide));
                 Some(tr_fmt(lang, "mr_then_ide", &[&ide.name]))
             }
@@ -439,53 +457,9 @@ impl MyApp {
         Some((path, ide))
     }
 
-    /// IDE wie auf der Repo-Karte: erste sichtbare IDE des wirksamen
-    /// Profils, Projektdatei = gewählte Solution. Ordner ohne `RepoInfo`:
-    /// in den Suchpfaden wie die künftige Karte (Profil des Ordners, der
-    /// Ordner selbst); außerhalb Profil des Basis-Klons (Repo, zu dem er als
-    /// Worktree gehört, vor dem Rescan `base`), dessen Solution relativ, wenn
-    /// es sie dort gibt; sonst das aktive Profil und der Ordner selbst.
+    /// IDE wie auf der Repo-Karte, siehe [`resolve_ide`].
     fn checkout_ide(&self, path: &Path, base: Option<&Path>) -> Option<IdeLaunch> {
-        let scanned = |p: &Path| self.repos.iter().find(|r| same_dir(&r.path, p));
-        let base_repo = || {
-            self.repos
-                .iter()
-                .find(|r| r.worktrees.iter().any(|w| same_dir(&w.path, path)))
-                .or_else(|| base.and_then(scanned))
-        };
-        let (profile_path, file) = if let Some(repo) = scanned(path) {
-            (repo.path.clone(), repo.selected_solution.clone())
-        } else if self.in_search_roots(path) {
-            (path.to_path_buf(), None)
-        } else if let Some(base) = base_repo() {
-            let file = base
-                .selected_solution
-                .as_ref()
-                .and_then(|s| s.strip_prefix(&base.path).ok())
-                .map(|rel| path.join(rel))
-                .filter(|f| f.is_file());
-            (base.path.clone(), file)
-        } else {
-            (path.to_path_buf(), None)
-        };
-        let profile = self.config.get_effective_profile_for_repo(&profile_path);
-        let ide = profile.visible_ides().into_iter().next()?;
-        Some(IdeLaunch {
-            id: ide.id.clone(),
-            name: ide.display_name.clone(),
-            file: file.unwrap_or_else(|| path.to_path_buf()),
-            profile: profile_path,
-        })
-    }
-
-    /// Liegt `path` unter einem Suchpfad? Dann liefert ihn der Rescan als
-    /// eigene Karte.
-    fn in_search_roots(&self, path: &Path) -> bool {
-        let path = dir_key(path);
-        self.config
-            .roots
-            .iter()
-            .any(|root| path.starts_with(dir_key(root)))
+        resolve_ide(&self.config, &self.repos, path, base)
     }
 
     /// Menü „Bereits ausgecheckt in {Pfad}“ (E5): Repo-Liste oder die
@@ -500,11 +474,15 @@ impl MyApp {
             OpenTarget::Explorer => {
                 self.open_explorer(path);
             }
-            OpenTarget::Ide => {
-                if let Some(ide) = self.checkout_ide(path, None) {
+            OpenTarget::Ide => match self.checkout_ide(path, None) {
+                Some(ide) => {
                     self.open_ide_in(path, &ide.profile, &ide.id, &ide.file);
                 }
-            }
+                None => {
+                    let lang = self.config.language;
+                    self.set_status(tr(lang, "mr_no_ide"));
+                }
+            },
         }
     }
 
@@ -707,6 +685,67 @@ fn diverged_text(lang: Language, branch: &str, ahead: usize, behind: usize) -> S
     )
 }
 
+/// IDE wie auf der Repo-Karte: erste sichtbare IDE des wirksamen
+/// Profils, Projektdatei = gewählte Solution. Ordner ohne `RepoInfo`:
+/// in den Suchpfaden wie die künftige Karte (Profil des Ordners, der
+/// Ordner selbst); außerhalb Profil des Basis-Klons (Repo, zu dem er als
+/// Worktree gehört, vor dem Rescan `base`), dessen Solution relativ, wenn
+/// es sie dort gibt; sonst das aktive Profil und der Ordner selbst.
+fn resolve_ide(
+    config: &AppConfig,
+    repos: &[RepoInfo],
+    path: &Path,
+    base: Option<&Path>,
+) -> Option<IdeLaunch> {
+    let scanned = |p: &Path| repos.iter().find(|r| same_dir(&r.path, p));
+    let base_repo = || {
+        repos
+            .iter()
+            .find(|r| r.worktrees.iter().any(|w| same_dir(&w.path, path)))
+            .or_else(|| base.and_then(scanned))
+    };
+    let (profile_path, file) = if let Some(repo) = scanned(path) {
+        (repo.path.clone(), repo.selected_solution.clone())
+    } else if in_search_roots(config, path) {
+        (path.to_path_buf(), None)
+    } else if let Some(base) = base_repo() {
+        let file = base
+            .selected_solution
+            .as_ref()
+            .and_then(|s| s.strip_prefix(&base.path).ok())
+            .map(|rel| path.join(rel))
+            .filter(|f| f.is_file());
+        (base.path.clone(), file)
+    } else {
+        (path.to_path_buf(), None)
+    };
+    let profile = config.get_effective_profile_for_repo(&profile_path);
+    let ide = profile.visible_ides().into_iter().next()?;
+    Some(IdeLaunch {
+        id: ide.id.clone(),
+        name: ide.display_name.clone(),
+        file: file.unwrap_or_else(|| path.to_path_buf()),
+        profile: profile_path,
+    })
+}
+
+/// Name der IDE, die „In {IDE} öffnen“ der MR-Ansicht für `path` startet
+/// (`open_existing`): dieselbe Auflösung, also auch ein Profil-Override des
+/// Repos; `None` = keine IDE im wirksamen Profil.
+pub(super) fn ide_name_for(config: &AppConfig, repos: &[RepoInfo], path: &Path) -> Option<String> {
+    resolve_ide(config, repos, path, None).map(|ide| ide.name)
+}
+
+/// Liegt `path` unter einem Suchpfad? Dann liefert ihn der Rescan als
+/// eigene Karte.
+fn in_search_roots(config: &AppConfig, path: &Path) -> bool {
+    let path = dir_key(path);
+    config
+        .roots
+        .iter()
+        .any(|root| path.starts_with(dir_key(root)))
+}
+
 /// Meldung mit Zusatz „– {Agent} startet“ usw.
 fn with_then(message: String, then: Option<String>) -> String {
     match then {
@@ -744,7 +783,7 @@ fn dir_key(path: &Path) -> PathBuf {
 mod tests {
     use super::super::tests::test_app;
     use super::*;
-    use crate::git::{RepoInfo, WorktreeHead};
+    use crate::git::WorktreeHead;
     use crate::gitlab::remote::{GlabHost, RemoteInfo};
     use tempfile::tempdir;
 
@@ -1515,6 +1554,121 @@ mod tests {
         assert!(!app.pending_scan);
         assert!(app.error.is_some(), "Fehler bleibt bis zum Scan-Ergebnis");
         settle(&mut app);
+    }
+
+    /// Offenes Einstellungsfenster: die gemerkte „Danach öffnen“-Wahl steht
+    /// auch im Entwurf, dessen „Speichern“ setzt sie nicht zurück.
+    #[test]
+    fn after_choice_reaches_open_settings_draft() {
+        let mut app = app_with(Vec::new());
+        app.show_settings = true;
+        app.settings_state = Some(crate::ui::settings::SettingsState::from_config(&app.config));
+        assert_ne!(
+            app.config.merge_requests.after_checkout_last,
+            AfterAction::Explorer
+        );
+        // Nur merken: während eines Scans startet kein Auschecken
+        app.scanning = true;
+        app.start_mr_checkout(switch(Path::new("/tmp/gm-x/app"), AfterAction::Explorer));
+        let draft = &app.settings_state.as_ref().expect("offen").draft;
+        assert_eq!(
+            draft.merge_requests.after_checkout_last,
+            AfterAction::Explorer
+        );
+        assert_eq!(
+            app.config.merge_requests.after_checkout_last,
+            AfterAction::Explorer
+        );
+        // Geschlossenes Fenster: der alte Entwurf bleibt unberührt
+        app.show_settings = false;
+        app.start_mr_checkout(switch(Path::new("/tmp/gm-x/app"), AfterAction::Shell));
+        let draft = &app.settings_state.as_ref().expect("Zustand").draft;
+        assert_eq!(
+            draft.merge_requests.after_checkout_last,
+            AfterAction::Explorer
+        );
+    }
+
+    /// MR im Menü, aber nicht mehr im Stand (Refresh nach dem Öffnen): eine
+    /// Meldung statt eines stillen Abbruchs.
+    #[test]
+    fn checkout_of_vanished_mr_is_reported() {
+        let mut app = app_with(Vec::new());
+        app.mr_snapshot = Some(Box::default());
+        let target = PathBuf::from("/tmp/gm-gone/app-mr-5");
+        let base = PathBuf::from("/tmp/gm-gone/app");
+        app.start_mr_checkout(worktree(&target, &base, AfterAction::Nothing));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("!5 is no longer in the current list – checkout skipped")
+        );
+        assert!(!app.scanning);
+        assert_eq!(app.mr_checkout_busy, None);
+    }
+
+    /// Ein MR-Wechsel wartet im Dialog (Änderungen im Klon): ein zweiter
+    /// Wechsel startet nicht, sonst ersetzte oder schlösse er den Dialog und
+    /// der erste MR ginge still verloren.
+    #[test]
+    fn second_switch_waits_for_open_mr_switch_dialog() {
+        let dir = tempdir().unwrap();
+        for sub in ["a", "b"] {
+            std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+        }
+        let clone = upstream_and_clone(&dir.path().join("a"));
+        let other = upstream_and_clone(&dir.path().join("b"));
+        let mut info = clone_info(&clone, "main");
+        info.dirty = true;
+        let mut app = app_with(vec![info, clone_info(&other, "main")]);
+        app.start_mr_checkout(switch(&clone, AfterAction::Shell));
+        settle(&mut app);
+        assert!(app.mr_switch.is_some(), "wartet im Dialog");
+        app.start_mr_checkout(switch(&other, AfterAction::Explorer));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("A branch switch is still waiting for your decision – finish that dialog first")
+        );
+        assert!(!app.scanning, "kein zweiter Worker");
+        assert_eq!(
+            app.branch_dialog.as_ref().map(|d| &d.repo_path),
+            Some(&clone)
+        );
+        assert_eq!(app.mr_switch.as_ref().map(|s| &s.clone), Some(&clone));
+        assert_eq!(head_of(&other), "main");
+    }
+
+    /// Ohne IDE im wirksamen Profil sagen „Danach öffnen: IDE“ und „In
+    /// {IDE} öffnen“ das, statt still nichts zu tun; die Beschriftung der
+    /// MR-Ansicht folgt dem Profil-Override des Ordners.
+    #[test]
+    fn missing_ide_is_reported_and_label_follows_override() {
+        let base = PathBuf::from("/tmp/gm-noide/app");
+        let mut app = app_with(vec![clone_info(&base, "main")]);
+        base_with_own_ide(&mut app, &base);
+        assert_eq!(
+            ide_name_for(&app.config, &app.repos, &base).as_deref(),
+            Some("Test IDE")
+        );
+        let target = PathBuf::from("/tmp/gm-noide/other-mr-5");
+        assert_eq!(ide_name_for(&app.config, &app.repos, &target), None);
+        app.open_existing(&target, &OpenTarget::Ide);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("No IDE in this folder's profile")
+        );
+        let kind = MrCheckoutKind::NewClone {
+            path: target.clone(),
+            url: "https://gitlab.example.com/group/app.git".to_string(),
+        };
+        app.on_mr_checkout_ready(choice(kind, AfterAction::Ide), Ok(None));
+        assert_eq!(
+            app.status_message,
+            Some(format!(
+                "!5 cloned to {} – no IDE in the profile, nothing opened",
+                target.display()
+            ))
+        );
+        assert!(app.pending_after_checkout.is_none());
     }
 
     /// Ein MR-Wechsel, dessen Dialog ersetzt oder durch einen anderen

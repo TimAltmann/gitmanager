@@ -552,20 +552,33 @@ pub fn fetch_with_git_cli(
     }
     args.push(remote_name);
     args.extend_from_slice(refspecs);
-    run_git_cli(&args, &format!("fetch '{remote_name}'"))
+    run_git_cli(
+        &args,
+        &format!("fetch '{remote_name}'"),
+        GIT_CLI_FETCH_TIMEOUT,
+    )
 }
 
-/// System-`git` ohne Konsolenfenster. `Ok` nur bei Exit-Code 0, sonst `Err`
+/// Obergrenzen für System-`git`: ein Prompt, den niemand sieht (SSH-
+/// Passphrase ohne Agent auf der versteckten Konsole von
+/// `CREATE_NO_WINDOW`), hielte sonst den Worker und damit den Ref-Lock
+/// (`scanning`, K1) für die ganze Sitzung.
+const GIT_CLI_FETCH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// `worktree add` checkt aus (ggf. mit LFS-Filtern).
+const GIT_CLI_WORKTREE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Ein Klon über eine langsame Leitung darf länger dauern.
+const GIT_CLI_CLONE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Nachlauf für die Pipe-Leser nach dem Exit: ein Enkelprozess (ssh) mit
+/// geerbter Pipe darf den Aufruf nicht festhalten.
+const GIT_CLI_PIPE_GRACE: Duration = Duration::from_secs(1);
+
+/// System-`git` ohne Konsolenfenster und ohne Terminal-Prompt, höchstens
+/// `timeout` lang (danach `kill`). `Ok` nur bei Exit-Code 0, sonst `Err`
 /// mit stderr/stdout (nur fürs Log, siehe [`fetch_with_git_cli`]).
-fn run_git_cli(args: &[&str], what: &str) -> anyhow::Result<()> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(args);
-    // Windows-GUI: kein Konsolen-Flash (CREATE_NO_WINDOW).
-    set_creation_flags(&mut cmd, 0x08000000);
-    let out = cmd
-        .output()
-        .map_err(|e| anyhow::anyhow!("git {what} spawn failed: {e}"))?;
-    if out.status.success() {
+fn run_git_cli(args: &[&str], what: &str, timeout: Duration) -> anyhow::Result<()> {
+    let out = output_with_timeout(&mut git_cli_command(args), timeout)
+        .map_err(|e| anyhow::anyhow!("git {what} {e}"))?;
+    if out.success {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -582,6 +595,83 @@ fn run_git_cli(args: &[&str], what: &str) -> anyhow::Result<()> {
         format!("{stderr} / {stdout}")
     };
     Err(anyhow::anyhow!("git {what} failed: {detail}"))
+}
+
+/// `git <args>` für [`run_git_cli`]: Windows-GUI ohne Konsolen-Flash
+/// (CREATE_NO_WINDOW); `GIT_TERMINAL_PROMPT=0`, weil kein Terminal zu sehen
+/// ist (git fragt sonst Benutzer/Passwort auf der versteckten Konsole ab und
+/// wartet); Credential-Helper wie der Git Credential Manager fragen weiter
+/// per Fenster.
+fn git_cli_command(args: &[&str]) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    set_creation_flags(&mut cmd, 0x08000000);
+    cmd
+}
+
+/// Ergebnis von [`output_with_timeout`].
+struct CliOutput {
+    success: bool,
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Wie `Command::output`, aber höchstens `timeout`: danach wird der Prozess
+/// beendet und geerntet (`Err`). stdout/stderr lesen eigene Threads (kein
+/// Pipe-Stau); nach dem Exit wartet der Aufruf höchstens
+/// `GIT_CLI_PIPE_GRACE` auf sie (Enkelprozess mit geerbter Pipe).
+fn output_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: Duration,
+) -> Result<CliOutput, String> {
+    let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    let stdout = read_pipe_async(child.stdout.take());
+    let stderr = read_pipe_async(child.stderr.take());
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("timed out after {timeout:?}"));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("wait failed: {e}"));
+            }
+        }
+    };
+    Ok(CliOutput {
+        success: status.success(),
+        status,
+        stdout: stdout.recv_timeout(GIT_CLI_PIPE_GRACE).unwrap_or_default(),
+        stderr: stderr.recv_timeout(GIT_CLI_PIPE_GRACE).unwrap_or_default(),
+    })
+}
+
+/// Liest eine Pipe bis EOF in einem eigenen Thread.
+fn read_pipe_async<R: std::io::Read + Send + 'static>(
+    pipe: Option<R>,
+) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        let _ = tx.send(buf);
+    });
+    rx
 }
 
 /// Strukturierter Fetch-Fehler (alle Remotes failed UND partielle Fehlschläge).
@@ -1658,6 +1748,7 @@ fn worktree_add_with_git_cli(
     run_git_cli(
         &["-C", &base, "worktree", "add", "--", &target, local_branch],
         "worktree add",
+        GIT_CLI_WORKTREE_TIMEOUT,
     )
 }
 
@@ -1700,7 +1791,11 @@ pub fn clone_repo(url: &str, target_path: &Path, branch: &str) -> Result<(), Che
 /// CLI-Fallback: `git clone --branch <branch> -- <url> <target>`.
 fn clone_with_git_cli(url: &str, target_path: &Path, branch: &str) -> anyhow::Result<()> {
     let target = target_path.display().to_string();
-    run_git_cli(&["clone", "--branch", branch, "--", url, &target], "clone")
+    run_git_cli(
+        &["clone", "--branch", branch, "--", url, &target],
+        "clone",
+        GIT_CLI_CLONE_TIMEOUT,
+    )
 }
 
 /// Zielordner für Worktree oder Klon: darf fehlen oder leer sein. Ein leerer
@@ -2564,6 +2659,62 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    /// System-`git` fragt nie auf einem (unsichtbaren) Terminal und liest
+    /// kein stdin.
+    #[test]
+    fn git_cli_never_prompts_on_terminal() {
+        let cmd = git_cli_command(&["fetch", "origin"]);
+        assert!(cmd.get_envs().any(|(key, value)| {
+            key == "GIT_TERMINAL_PROMPT" && value == Some(std::ffi::OsStr::new("0"))
+        }));
+        assert_eq!(cmd.get_program(), "git");
+    }
+
+    /// Ein hängender Prozess endet nach dem Timeout (`kill`) mit Fehler,
+    /// statt den Worker samt Ref-Lock für immer zu halten; ein Enkelprozess
+    /// mit geerbter Pipe hält den Aufruf nach dem Exit nicht fest.
+    #[cfg(unix)]
+    #[test]
+    fn git_cli_output_is_bounded() {
+        let sh = |script: &str| {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.args(["-c", script])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            cmd
+        };
+        let start = Instant::now();
+        let err = output_with_timeout(&mut sh("sleep 5"), Duration::from_millis(200))
+            .err()
+            .expect("Timeout");
+        assert!(err.starts_with("timed out after"), "{err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            start.elapsed()
+        );
+
+        let start = Instant::now();
+        let out = output_with_timeout(
+            &mut sh("echo fehler >&2; sleep 5 & exit 3"),
+            Duration::from_secs(20),
+        )
+        .expect("beendet");
+        assert!(!out.success);
+        assert_eq!(out.status.code(), Some(3));
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            start.elapsed()
+        );
+
+        let out = output_with_timeout(&mut sh("echo ok; echo warn >&2"), Duration::from_secs(20))
+            .expect("beendet");
+        assert!(out.success);
+        assert_eq!(out.stdout, b"ok\n");
+        assert_eq!(out.stderr, b"warn\n");
+    }
 
     fn init_repo_with_commit(dir: &Path, branch: &str) -> Repository {
         let repo = Repository::init(dir).unwrap();

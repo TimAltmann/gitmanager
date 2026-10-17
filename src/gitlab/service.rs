@@ -1271,11 +1271,13 @@ fn encode_path(path: &str) -> String {
 
 /// Prüft ein neues Token, bevor es gespeichert wird (E3, E4): Token nur als
 /// Kind-Env `GITLAB_TOKEN` (`EnvValue::Secret`), andere Env-Tokens entfernt,
-/// bei HTTP `GLAB_API_PROTOCOL=http` (E17). `personal_access_tokens/self`,
-/// ACCESS für `project_paths` (Vorschau), REST `/user`, wenn GraphQL das
-/// Token ablehnt. Fehlt dem neuen Token `api`, fragt ein Aufruf mit der
-/// bisherigen Anmeldung, ob glab damit Schreibrechte verlöre. Ungültig,
-/// abgelaufen oder widerrufen → `Err`.
+/// das gewählte Protokoll immer als `GLAB_API_PROTOCOL` (E17: sonst gälte
+/// das `api_protocol` der glab-Config, ggf. `http` trotz Wahl „https“).
+/// `personal_access_tokens/self`, ACCESS für `project_paths` (Vorschau),
+/// REST `/user`, wenn GraphQL das Token ablehnt. Fehlt dem neuen Token `api`,
+/// fragt ein Aufruf mit der bisherigen Anmeldung unter `login_key` (die
+/// Anmeldung, die `save_token` ersetzt), ob glab damit Schreibrechte
+/// verlöre. Ungültig, abgelaufen oder widerrufen → `Err`.
 pub fn verify_token(
     runner: &dyn GlabRunner,
     host: &str,
@@ -1289,7 +1291,7 @@ pub fn verify_token(
         check.rights_glab,
         GlabRights::ReadOnly | GlabRights::Insufficient
     ) {
-        check.downgrade_warning = stored_login_full(runner, host);
+        check.downgrade_warning = stored_login_full(runner, login_key(host));
     }
     Ok(check)
 }
@@ -1310,13 +1312,12 @@ fn check_token(
     paths: &[String],
 ) -> Result<TokenCheck, GlabErrorKind> {
     let prepare = |req: GlabRequest| {
-        let req = req
-            .without_env(&VERIFY_ENV_REMOVE)
-            .with_env("GITLAB_TOKEN", token_env(token));
-        match protocol {
-            Protocol::Https => req,
-            Protocol::Http => req.with_env("GLAB_API_PROTOCOL", EnvValue::Plain("http".into())),
-        }
+        req.without_env(&VERIFY_ENV_REMOVE)
+            .with_env("GITLAB_TOKEN", token_env(token))
+            .with_env(
+                "GLAB_API_PROTOCOL",
+                EnvValue::Plain(protocol.scheme().into()),
+            )
     };
     let info = token_self(runner, host, &prepare)?;
     let access = access_probe(runner, host, paths, &prepare)?;
@@ -1392,8 +1393,10 @@ fn stored_login_full(runner: &dyn GlabRunner, host: &str) -> bool {
 /// Speichert das Token in glab (E3): erst `glab version` (fehlt oder zu alt
 /// → kein Login, glab < 1.111 speichert im Klartext), dann prüfen (ungültig
 /// oder unbestätigt → kein Login, die bestehende Anmeldung bleibt), dann
-/// `glab auth login --hostname H --stdin [--api-host H:P] [--api-protocol
-/// http]` mit dem Token nur auf stdin, ohne Env-Tokens und CI-Variablen.
+/// `glab auth login --hostname H --stdin [--api-host H:P] --api-protocol
+/// https|http` mit dem Token nur auf stdin, ohne Env-Tokens und
+/// CI-Variablen. Das Protokoll steht immer da: gespeichert wird die Wahl des
+/// Formulars, nicht ein altes `api_protocol` der glab-Config.
 /// Ein Schlüssel mit Port meldet sich unter `login_key` an. Erfolg = Exit 0
 /// und die anschließende Prüfung der gespeicherten Anmeldung (ohne
 /// Env-Token) liefert denselben Benutzer; glabs Meldungen („Logged in as“,
@@ -1415,9 +1418,7 @@ pub fn save_token(
     if key != host {
         args.extend(["--api-host", host]);
     }
-    if protocol == Protocol::Http {
-        args.extend(["--api-protocol", "http"]);
-    }
+    args.extend(["--api-protocol", protocol.scheme()]);
     let login = GlabRequest::write(Some(key), args)
         .without_env(&TOKEN_ENV)
         .without_env(&CI_ENV)
@@ -2982,7 +2983,14 @@ mod tests {
         assert!(!calls[2].env.contains_key("GITLAB_TOKEN"));
         assert!(calls[2].request.env_set.is_empty());
         assert!(!format!("{calls:?}").contains(TOKEN));
-        assert_eq!(calls[0].env.get("GLAB_API_PROTOCOL"), None);
+        // Gewähltes https gilt ausdrücklich: ein `api_protocol: http` der
+        // glab-Config schickte das neue Token sonst unverschlüsselt (E17)
+        for call in &calls[..2] {
+            assert_eq!(
+                call.env.get("GLAB_API_PROTOCOL").map(String::as_str),
+                Some("https")
+            );
+        }
     }
 
     #[test]
@@ -3132,6 +3140,38 @@ mod tests {
         assert!(!check.downgrade_warning);
         assert_eq!(check.rights_glab, GlabRights::Full);
         assert_eq!(fake.take_calls().len(), 2);
+    }
+
+    /// Schlüssel mit Port: `save_token` ersetzt die Anmeldung unter dem
+    /// Hostnamen (`login_key`), also fragt die Downgrade-Prüfung genau die.
+    #[test]
+    fn verify_token_downgrade_checks_login_key_of_port_host() {
+        const PORT_HOST: &str = "git.firma.de:8443";
+        let runner = gated();
+        let fake = runner.inner();
+        fake.push(FakeReply::http(200, &pat_self(&["read_api"])));
+        fake.push(gql(&access_user(ME)));
+        // bisherige Anmeldung unter `git.firma.de` (`--api-host` mit Port) hat api
+        fake.push_when(
+            |r| r.host_key.as_deref() == Some("git.firma.de"),
+            FakeReply::http(200, &pat_self(&["api"])),
+        );
+        let check =
+            verify_token(&runner, PORT_HOST, secret(TOKEN), Protocol::Https, &[]).expect("gültig");
+        assert!(check.downgrade_warning);
+        let calls = fake.take_calls();
+        assert_eq!(calls.len(), 3);
+        // Prüfen des neuen Tokens über `GITLAB_HOST=host:port`, die
+        // bisherige Anmeldung über `--hostname host` ohne Env-Token
+        assert_eq!(calls[0].request.host_key.as_deref(), Some(PORT_HOST));
+        let stored = &calls[2];
+        assert!(stored
+            .request
+            .args
+            .windows(2)
+            .any(|w| w == ["--hostname", "git.firma.de"]));
+        assert!(!stored.env.contains_key("GITLAB_TOKEN"));
+        assert!(!stored.env.contains_key("GITLAB_HOST"));
     }
 
     #[test]
@@ -3363,8 +3403,15 @@ mod tests {
                 "git.firma.de",
                 "--stdin",
                 "--api-host",
-                PORT_HOST
+                PORT_HOST,
+                "--api-protocol",
+                "https"
             ])
+        );
+        // Gewähltes https auch beim Prüfen vor dem Login
+        assert_eq!(
+            calls[1].env.get("GLAB_API_PROTOCOL").map(String::as_str),
+            Some("https")
         );
         // die Prüfung danach unter dem gespeicherten Schlüssel
         assert!(calls[4..]

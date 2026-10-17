@@ -503,6 +503,41 @@ fn is_default_branch(branch: &str, target_branch: &str) -> bool {
     branch == target_branch || matches!(branch, "main" | "master")
 }
 
+/// Review-Ordner aus der Einstellung: getrimmt und mit einheitlichen
+/// Trennern (`c:/dev/Reviews/` → `c:\dev\Reviews` unter Windows; Explorer
+/// und die MRU-Schlüssel brauchen `\`). Ein relativer Pfad zählt als nicht
+/// gesetzt: er hinge vom Arbeitsordner des Prozesses ab (Autostart oft
+/// `System32`), der git-CLI-Fallback läge im Basis-Klon.
+pub fn review_root_dir(cfg: &MrConfig) -> Option<PathBuf> {
+    let root = cfg.review_root.as_deref()?.trim();
+    let dir: PathBuf = Path::new(root).components().collect();
+    dir.is_absolute().then_some(dir)
+}
+
+/// Ordnername aus erlaubten Zeichen (GitLab-Pfadregeln `[A-Za-z0-9._-]`);
+/// leer, `.` oder `..` → `repo`. Der Projektpfad kommt ungeprüft vom Server
+/// (GraphQL `fullPath`): ein Segment wie `..\x` oder `C:\x` entkäme sonst
+/// dem gewählten Ordner, `&`/`;` landeten über „Danach öffnen“ in einer
+/// cmd-/wt-Zeile.
+pub fn safe_folder_name(raw: &str) -> String {
+    let name: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .collect();
+    if matches!(name.as_str(), "" | "." | "..") {
+        "repo".to_string()
+    } else {
+        name
+    }
+}
+
+/// `{repo}-mr-{iid}` aus dem letzten Segment des Projektpfads (sicher, siehe
+/// [`safe_folder_name`]).
+pub fn mr_folder_name(project_path: &str, iid: u64) -> String {
+    let project = project_path.rsplit('/').next().unwrap_or_default();
+    format!("{}-mr-{iid}", safe_folder_name(project))
+}
+
 /// Ordner `{repo}-mr-{iid}` im Review-Ordner (MRs von anderen) bzw. neben
 /// dem Basis-Klon (eigene MRs oder ohne Review-Ordner).
 fn worktree_proposal(
@@ -512,21 +547,12 @@ fn worktree_proposal(
     cfg: &MrConfig,
     is_own: bool,
 ) -> WorktreeProposal {
-    let review_root = cfg
-        .review_root
-        .as_deref()
-        .map(str::trim)
-        .filter(|r| !r.is_empty() && !is_own);
+    let review_root = review_root_dir(cfg).filter(|_| !is_own);
     let (parent, in_review_root) = match review_root {
-        Some(root) => (PathBuf::from(root), true),
+        Some(root) => (root, true),
         None => (base.parent().unwrap_or(base).to_path_buf(), false),
     };
-    let project = mr
-        .project_path
-        .rsplit('/')
-        .next()
-        .unwrap_or(mr.project_path);
-    let name = format!("{project}-mr-{}", mr.iid);
+    let name = mr_folder_name(mr.project_path, mr.iid);
     WorktreeProposal {
         path: taken.free_dir(&parent, &name),
         base: base.to_path_buf(),
@@ -844,6 +870,101 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// Relativer Review-Ordner gilt als nicht gesetzt (hinge vom
+    /// Arbeitsordner ab), Trenner werden vereinheitlicht.
+    #[test]
+    fn review_root_is_normalized_and_must_be_absolute() {
+        let cfg = |root: &str| MrConfig {
+            review_root: Some(root.to_string()),
+            ..MrConfig::default()
+        };
+        assert_eq!(
+            review_root_dir(&cfg(" /dev//Reviews/ ")),
+            Some(PathBuf::from("/dev/Reviews"))
+        );
+        assert_eq!(review_root_dir(&cfg("Reviews")), None);
+        assert_eq!(review_root_dir(&cfg("   ")), None);
+        assert_eq!(review_root_dir(&MrConfig::default()), None);
+        let repos = [backend("/dev/backend-api", "main")];
+        let m = menu(
+            &mr(418, "feature/x"),
+            &repos,
+            &cfg("Reviews"),
+            false,
+            &no_mru,
+        );
+        assert_eq!(
+            proposal(&m),
+            &WorktreeProposal {
+                path: PathBuf::from("/dev/Backend-API-mr-418"),
+                base: PathBuf::from("/dev/backend-api"),
+                in_review_root: false,
+            }
+        );
+        let m = menu(
+            &mr(418, "feature/x"),
+            &repos,
+            &cfg("/dev//Reviews/"),
+            false,
+            &no_mru,
+        );
+        assert_eq!(
+            proposal(&m).path.as_os_str(),
+            PathBuf::from("/dev/Reviews/Backend-API-mr-418").as_os_str()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn review_root_uses_backslashes_on_windows() {
+        let cfg = MrConfig {
+            review_root: Some("c:/dev/Reviews/".to_string()),
+            ..MrConfig::default()
+        };
+        assert_eq!(
+            review_root_dir(&cfg).expect("absolut").as_os_str(),
+            "c:\\dev\\Reviews"
+        );
+    }
+
+    /// Ordnernamen aus dem (ungeprüften) Projektpfad bleiben ein einzelner,
+    /// harmloser Ordner.
+    #[test]
+    fn folder_names_from_server_paths_are_safe() {
+        assert_eq!(
+            mr_folder_name("Kern/Backend-API", 418),
+            "Backend-API-mr-418"
+        );
+        assert_eq!(mr_folder_name("a/b.c_d", 1), "b.c_d-mr-1");
+        assert_eq!(mr_folder_name("x/..\\..\\evil", 7), "....evil-mr-7");
+        assert_eq!(mr_folder_name("x/C:\\x", 7), "Cx-mr-7");
+        assert_eq!(mr_folder_name("x/x&calc&rem", 1), "xcalcrem-mr-1");
+        assert_eq!(mr_folder_name("x/a;b c", 1), "abc-mr-1");
+        assert_eq!(mr_folder_name("x/..", 2), "repo-mr-2");
+        assert_eq!(mr_folder_name("", 3), "repo-mr-3");
+        assert_eq!(safe_folder_name("app-mr-5-2"), "app-mr-5-2");
+        assert_eq!(safe_folder_name("."), "repo");
+        // Worktree-Vorschlag mit einem solchen Pfad: direkt im Elternordner
+        let repos = [backend("/dev/backend-api", "main")];
+        let mut hostile = mr(9, "feature/x");
+        hostile.project_path = "kern/..\\..\\x&calc".to_string();
+        let taken = Taken {
+            repos: &repos,
+            candidates: &[],
+            names: &[],
+            exists: &nothing_exists,
+        };
+        let wt = worktree_proposal(
+            &MrRefInfo::from_mr(&hostile),
+            Path::new("/dev/backend-api"),
+            &taken,
+            &review_cfg(),
+            false,
+        );
+        assert_eq!(wt.path, PathBuf::from("/dev/Reviews/....xcalc-mr-9"));
+        assert_eq!(wt.path.parent(), Some(Path::new("/dev/Reviews")));
     }
 
     #[test]

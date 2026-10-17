@@ -8,8 +8,9 @@
 use crate::config::{AfterAction, AfterCheckoutPref, AgentProfile, IdeConfig, MrConfig, Theme};
 use crate::git::RepoInfo;
 use crate::gitlab::checkout::{
-    build_checkout_menu, checkout_brief, BlockReason, CheckoutBrief, CheckoutMenu, CloneOption,
-    CloneState, MenuLookup, MrRefInfo, OpenBranches, UnavailableReason,
+    build_checkout_menu, checkout_brief, mr_folder_name, review_root_dir, safe_folder_name,
+    BlockReason, CheckoutBrief, CheckoutMenu, CloneOption, CloneState, MenuLookup, MrRefInfo,
+    OpenBranches, UnavailableReason,
 };
 use crate::gitlab::glab::{GlabErrorKind, GlabOutput};
 use crate::gitlab::model::{
@@ -209,8 +210,12 @@ pub struct MrViewInput<'a> {
     pub locals: &'a [LocalProject],
     /// Aktive Agenten des Profils („Danach öffnen“, „{Agent} starten“)
     pub agents: &'a [&'a AgentProfile],
-    /// IDE des Profils
+    /// IDE des aktiven Profils (Chip „Danach öffnen“: neue Ordner haben
+    /// kein eigenes Profil)
     pub ide: Option<&'a IdeConfig>,
+    /// Name der IDE, die „In {IDE} öffnen“ für einen Ordner startet: wie die
+    /// Repo-Karte, also mit Profil-Override des Repos; `None` = keine IDE
+    pub ide_for: &'a dyn Fn(&Path) -> Option<String>,
     /// MRU und Pfadprüfung; `exists` nur beim Öffnen des Menüs
     pub lookup: MenuLookup<'a>,
     /// Jetzt (Unix-Sekunden) für relative Zeiten
@@ -419,12 +424,13 @@ pub fn load_more_step(list: &UninvolvedList, limit: usize) -> (usize, bool) {
 }
 
 /// Ordnerdialog-Ergebnis: ein leerer (oder neuer) Ordner ist selbst das
-/// Ziel, sonst `{gewählt}/{name}`.
+/// Ziel, sonst `{gewählt}/{name}`. `name` bleibt ein einzelner Ordner im
+/// gewählten (`safe_folder_name`): Trenner, Laufwerke und `..` fallen weg.
 pub fn choose_target(picked: &Path, name: &str, picked_is_empty: bool) -> PathBuf {
     if picked_is_empty {
         picked.to_path_buf()
     } else {
-        picked.join(name)
+        picked.join(safe_folder_name(name))
     }
 }
 
@@ -473,7 +479,15 @@ pub fn view_card(
             ViewCard::NoRemotes
         });
     }
-    if !locals.is_empty() && locals.iter().all(|p| !p.included) {
+    // Alle lokalen Projekte abgewählt: Karte nur, wenn auch sonst nichts zu
+    // sehen ist. MRs aus Projekten ohne Klon („Auch MRs aus Projekten ohne
+    // lokalen Klon“, E1) zählen im Badge und stehen dann in den Spalten.
+    let nothing_shown = snapshot.is_none_or(|s| {
+        s.mine.is_empty()
+            && s.others.is_empty()
+            && s.uninvolved.as_ref().is_none_or(|u| u.mrs.is_empty())
+    });
+    if nothing_shown && !locals.is_empty() && locals.iter().all(|p| !p.included) {
         return Some(ViewCard::AllDeselected);
     }
     let Some(snap) = snapshot else {
@@ -1594,7 +1608,8 @@ fn checkout_menu_ui(
 }
 
 /// Startordner und Ordnername für „Neuer Klon …“: wie der Worktree-Vorschlag,
-/// sonst Review-Ordner und `{repo}-mr-{iid}`.
+/// sonst Review-Ordner und `{repo}-mr-{iid}` (Name aus sicheren Zeichen, der
+/// Projektpfad kommt ungeprüft vom Server).
 fn clone_target_hint(
     v: &View,
     mr: &MergeRequest,
@@ -1606,9 +1621,8 @@ fn clone_target_hint(
             folder_name(&wt.path),
         );
     }
-    let repo = mr.project_path.rsplit('/').next().unwrap_or("repo");
-    let start = v.input.cfg.review_root.as_ref().map(PathBuf::from);
-    (start, format!("{repo}-mr-{}", mr.iid))
+    let start = review_root_dir(v.input.cfg);
+    (start, mr_folder_name(&mr.project_path, mr.iid))
 }
 
 /// Ordnerdialog (blockiert wie die Ordnerwahl in den Einstellungen).
@@ -1762,10 +1776,12 @@ fn already_menu_ui(ui: &mut Ui, v: &View, path: &Path, actions: &mut MrViewActio
         tr(lang, "mr_open_explorer"),
         OpenTarget::Explorer,
     ));
-    if let Some(ide) = v.input.ide {
+    // Dieselbe Auflösung wie beim Start (`open_existing`): Beschriftung und
+    // gestartete IDE stimmen überein
+    if let Some(ide) = (v.input.ide_for)(path) {
         entries.push((
             ICON_CODE,
-            tr_fmt(lang, "mr_open_ide", &[&ide.display_name]),
+            tr_fmt(lang, "mr_open_ide", &[&ide]),
             OpenTarget::Ide,
         ));
     }
@@ -2432,6 +2448,10 @@ mod tests {
         false
     }
 
+    fn vscode_for(_: &Path) -> Option<String> {
+        Some("VS Code".to_string())
+    }
+
     /// Lokaler Klon vorhanden, auscheckbar
     fn local_brief() -> CheckoutBrief {
         CheckoutBrief {
@@ -2809,6 +2829,11 @@ mod tests {
             choose_target(picked, "api-mr-1", false),
             PathBuf::from("/dev/reviews/x/api-mr-1")
         );
+        // Name mit Trennern, Laufwerk oder `..`: bleibt im gewählten Ordner
+        for name in ["../../x", "..", "/etc/x", "C:\\x", "a\\..\\b"] {
+            let target = choose_target(picked, name, false);
+            assert_eq!(target.parent(), Some(picked), "{name}: {target:?}");
+        }
     }
 
     fn repo_with_remote(path: &str, url: Option<&str>) -> RepoInfo {
@@ -2920,6 +2945,29 @@ mod tests {
                 Some(&snap)
             ),
             Some(ViewCard::AllDeselected)
+        );
+        // … aber ein MR aus einem Projekt ohne Klon ist sichtbar (und zählt
+        // im Badge): Spalten statt Karte
+        let nonlocal = MrSnapshot {
+            others: vec![MergeRequest {
+                host_key: "gitlab.example.com".to_string(),
+                project_path: "other/svc".to_string(),
+                iid: 7,
+                ..MergeRequest::default()
+            }],
+            badge: 1,
+            ..snap.clone()
+        };
+        assert_eq!(
+            view_card(
+                None,
+                false,
+                &gl,
+                &hosts,
+                &[local("kern/api", false)],
+                Some(&nonlocal)
+            ),
+            None
         );
         // Noch kein Stand
         assert_eq!(
@@ -3160,6 +3208,7 @@ mod tests {
                     locals: &locals,
                     agents: &agents,
                     ide: Some(&ide),
+                    ide_for: &vscode_for,
                     lookup: MenuLookup {
                         mru: &mru,
                         exists: &never_exists,
@@ -3214,6 +3263,7 @@ mod tests {
                     locals: &locals,
                     agents: &[],
                     ide: None,
+                    ide_for: &vscode_for,
                     lookup: MenuLookup {
                         mru: &mru,
                         exists: &never_exists,
@@ -3255,6 +3305,7 @@ mod tests {
                 locals: &locals,
                 agents: &[],
                 ide: None,
+                ide_for: &vscode_for,
                 lookup: MenuLookup {
                     mru: &mru,
                     exists: &never_exists,
@@ -3298,6 +3349,7 @@ mod tests {
             locals: &locals,
             agents: &agents,
             ide: Some(&ide),
+            ide_for: &vscode_for,
             lookup: MenuLookup {
                 mru: &mru,
                 exists: &never_exists,
@@ -3351,6 +3403,82 @@ mod tests {
         let portal = &snap.others[1];
         assert_eq!(checkout_button(&brief(portal)), ButtonKind::NotLocal);
         assert!(view.menu(portal, false, &input.lookup).clone_url.is_some());
+    }
+
+    /// „In {IDE} öffnen“ nennt die IDE, die für genau diesen Ordner startet
+    /// (Profil-Override des Repos), und fehlt ohne IDE im wirksamen Profil.
+    #[test]
+    fn already_menu_names_ide_of_the_folder() {
+        use egui::accesskit::Role;
+        let snap = sample_snapshot();
+        let repos = sample_repos();
+        let hosts = sample_hosts(&repos);
+        let cfg = MrConfig::default();
+        let locals = crate::gitlab::remote::local_projects(&repos, &hosts, &cfg);
+        let ide = vscode();
+        let theme = crate::config::Theme::Light;
+        let rider_for = |p: &Path| (p == Path::new("/dev/api-3")).then(|| "Rider".to_string());
+        let input = MrViewInput {
+            lang: Language::De,
+            theme: &theme,
+            cfg: &cfg,
+            snapshot: Some(&snap),
+            uninvolved_loading: false,
+            glab_error: None,
+            discovering: false,
+            repos: &repos,
+            hosts: &hosts,
+            locals: &locals,
+            agents: &[],
+            ide: Some(&ide),
+            ide_for: &rider_for,
+            lookup: MenuLookup {
+                mru: &mru,
+                exists: &never_exists,
+            },
+            now: NOW,
+        };
+        let view = View {
+            input: &input,
+            p: mr_palette(&theme, &egui::Visuals::light()),
+            snap: &snap,
+            open: OpenBranches::from_snapshot(&snap),
+            multi_host: false,
+            has_data: true,
+        };
+        let buttons = |path: &str| {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let mut actions = MrViewActions::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                already_menu_ui(ui, &view, Path::new(path), &mut actions);
+            });
+            let update = output.platform_output.accesskit_update.take();
+            output.drop_without_applying_deltas();
+            update
+                .expect("AccessKit")
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.role() == Role::Button)
+                .filter_map(|(_, n)| n.label().map(str::to_string))
+                .collect::<Vec<_>>()
+        };
+        let with_override = buttons("/dev/api-3");
+        assert!(
+            with_override.iter().any(|b| b == "In Rider öffnen"),
+            "{with_override:?}"
+        );
+        assert!(!with_override.iter().any(|b| b.contains("VS Code")));
+        let without_ide = buttons("/dev/api");
+        assert!(
+            without_ide.iter().any(|b| b == "Shell öffnen"),
+            "{without_ide:?}"
+        );
+        assert_eq!(
+            without_ide.len() + 1,
+            with_override.len(),
+            "{without_ide:?}"
+        );
     }
 
     #[test]

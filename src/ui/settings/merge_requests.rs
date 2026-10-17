@@ -12,6 +12,7 @@ use crate::config::{
     AfterAction, AfterCheckoutPref, AppConfig, HostAlias, IdeConfig, MrConfig, Theme,
 };
 use crate::git::RepoInfo;
+use crate::gitlab::checkout::review_root_dir;
 use crate::gitlab::glab::GlabErrorKind;
 use crate::gitlab::remote::{
     local_projects, project_key, resolve_hosts, GlabHost, HostMap, HostTarget, LocalProject,
@@ -19,8 +20,8 @@ use crate::gitlab::remote::{
 };
 use crate::gitlab::secret::SecretString;
 use crate::gitlab::service::{
-    error_text, is_auth_error, token_create_url, AccessState, GitManagerRights, GlabRights,
-    HostProbe, Protocol, SavedWhere, TokenCheck, TokenKind, TokenSource,
+    error_text, is_auth_error, login_key, token_create_url, AccessState, GitManagerRights,
+    GlabRights, HostProbe, Protocol, SavedWhere, TokenCheck, TokenKind, TokenSource,
 };
 use crate::gitlab::time::format_date;
 use crate::i18n::{tr, tr_fmt, Language};
@@ -1378,16 +1379,29 @@ fn probe_details(ui: &mut Ui, t: &Tab, probe: &HostProbe) {
     }
 }
 
-/// Zeile „glab: Voll / Nur lesen / Unzureichend“ mit dem Hinweis aus E4.
+/// i18n-Schlüssel der glab-Zeile (E4). „Unbekannt“ (feingranulares Token,
+/// `personal_access_tokens/self` fehlt) steht ausdrücklich da: sonst fehlte
+/// das glab-Urteil samt Scope-Hinweis ganz.
+fn glab_rights_key(rights: GlabRights) -> &'static str {
+    match rights {
+        GlabRights::Full => "mrs_glab_full",
+        GlabRights::ReadOnly => "mrs_glab_readonly",
+        GlabRights::Insufficient => "mrs_glab_insufficient",
+        GlabRights::Unknown => "mrs_glab_unknown",
+    }
+}
+
+/// Zeile „glab: Voll / Nur lesen / Unzureichend / Unbekannt“ mit dem
+/// Hinweis aus E4.
 fn glab_rights(ui: &mut Ui, t: &Tab, rights: GlabRights) {
     let p = &t.p;
-    let (key, icon, color) = match rights {
-        GlabRights::Full => ("mrs_glab_full", ICON_CHECK_CIRCLE, p.ok_text),
-        GlabRights::ReadOnly => ("mrs_glab_readonly", ICON_WARNING, p.warn_text),
-        GlabRights::Insufficient => ("mrs_glab_insufficient", ICON_X_CIRCLE, p.fail_text),
-        GlabRights::Unknown => return,
+    let (icon, color) = match rights {
+        GlabRights::Full => (ICON_CHECK_CIRCLE, p.ok_text),
+        GlabRights::ReadOnly => (ICON_WARNING, p.warn_text),
+        GlabRights::Insufficient => (ICON_X_CIRCLE, p.fail_text),
+        GlabRights::Unknown => (ICON_MINUS_CIRCLE, p.text2),
     };
-    status_line(ui, icon, color, &tr(t.lang, key));
+    status_line(ui, icon, color, &tr(t.lang, glab_rights_key(rights)));
     if rights != GlabRights::Full {
         wrapped(ui, &tr(t.lang, "mrs_glab_scopes_hint"), 11.0, p.text2);
     }
@@ -1433,9 +1447,10 @@ fn token_form(
         let text = tr_fmt(lang, "mrs_http_warning", &[&form.host]);
         status_line(ui, ICON_WARNING, p.warn_text, &text);
     }
+    // Ersetzt wird die Anmeldung unter `login_key` (`host:port` → `host`)
     wrapped(
         ui,
-        &tr_fmt(lang, "mrs_token_note", &[&form.host]),
+        &tr_fmt(lang, "mrs_token_note", &[login_key(&form.host)]),
         11.0,
         p.text2,
     );
@@ -1908,7 +1923,15 @@ fn checkout_section(ui: &mut Ui, t: &Tab, draft: &mut AppConfig) {
                 }
             });
             ui.end_row();
-            if let Some(root) = draft.merge_requests.review_root.clone() {
+            let relative = draft.merge_requests.review_root.is_some()
+                && review_root_dir(&draft.merge_requests).is_none();
+            if relative {
+                // Relativer Pfad: gilt als nicht gesetzt (siehe `review_root_dir`)
+                ui.label("");
+                let text = tr(lang, "mrs_review_root_relative");
+                status_line(ui, ICON_WARNING, p.warn_text, &text);
+                ui.end_row();
+            } else if let Some(root) = draft.merge_requests.review_root.clone() {
                 ui.label("");
                 let hit = review_root_hit(&root, &draft.roots, draft.max_depth).cloned();
                 ui.vertical(|ui| match hit {
@@ -3011,5 +3034,32 @@ mod tests {
         );
         forget_token_fields(&ctx, None);
         assert!(TextEditState::load(&ctx, active).is_none());
+    }
+
+    /// Jedes glab-Urteil hat eine Zeile, auch „unbekannt“ (feingranulares
+    /// Token, GitLab ohne `personal_access_tokens/self`).
+    #[test]
+    fn glab_rights_line_for_every_verdict() {
+        let keys: Vec<&str> = [
+            GlabRights::Full,
+            GlabRights::ReadOnly,
+            GlabRights::Insufficient,
+            GlabRights::Unknown,
+        ]
+        .into_iter()
+        .map(glab_rights_key)
+        .collect();
+        assert_eq!(
+            keys,
+            [
+                "mrs_glab_full",
+                "mrs_glab_readonly",
+                "mrs_glab_insufficient",
+                "mrs_glab_unknown"
+            ]
+        );
+        for lang in [Language::De, Language::En] {
+            assert!(tr(lang, "mrs_glab_unknown").starts_with("glab: "));
+        }
     }
 }

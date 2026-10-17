@@ -41,7 +41,7 @@ pub(super) const TOP_BAR_COMPACT_WIDTH: f32 = 1100.0;
 /// Unter dieser Fensterbreite entfallen zusätzlich die Beschriftungen
 /// „Profil:“, „AI:“ und „Sprache“ (dann Tooltip der Combos), damit die
 /// Top-Leiste beim Mindestfenster (920 px) passt; das Standardfenster
-/// (1080 px) behält sie.
+/// (`DEFAULT_WINDOW_SIZE`, 1100 px) behält sie samt Button-Texten.
 pub(super) const TOP_BAR_CAPTIONS_WIDTH: f32 = 1000.0;
 
 /// Ergebnis der MR-Hintergrundarbeit (Kanal `mr_tx`/`mr_rx`).
@@ -478,6 +478,15 @@ impl MyApp {
         self.refresh_mr_if_due();
     }
 
+    /// Tray „Hauptfenster“ (auch Doppelklick aufs Icon): Hauptfenster mit
+    /// der Repo-Liste. Die MR-Ansicht hat ihren eigenen Tray-Button (E21);
+    /// sonst täten beide Buttons nach einem Besuch der MR-Ansicht dasselbe.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(super) fn show_main_from_tray(&mut self, ctx: &egui::Context) {
+        self.set_main_view(MainView::Repos);
+        self.show_main_window(ctx);
+    }
+
     /// Wechselt die Hauptansicht; der erste Wechsel in die MR-Ansicht lädt.
     pub(super) fn set_main_view(&mut self, view: MainView) {
         if self.main_view == view {
@@ -582,6 +591,8 @@ impl MyApp {
             let config = &self.config;
             let mru = |p: &Path| crate::ui::tray_popup::mru_timestamp(config, p);
             let exists = |p: &Path| p.exists();
+            let repos = &self.repos;
+            let ide_for = |p: &Path| super::mr_checkout::ide_name_for(config, repos, p);
             let agents = config.get_active_agents();
             let input = MrViewInput {
                 lang: config.language,
@@ -601,6 +612,7 @@ impl MyApp {
                     .visible_ides()
                     .into_iter()
                     .next(),
+                ide_for: &ide_for,
                 lookup: MenuLookup {
                     mru: &mru,
                     exists: &exists,
@@ -1059,6 +1071,19 @@ mod tests {
         settle(&mut app);
         assert_eq!(glab.inner().take_calls().len(), 1);
         assert!(app.error.is_none());
+    }
+
+    /// E21: Tray „Hauptfenster“ zeigt die Repo-Liste, auch wenn zuletzt die
+    /// MR-Ansicht offen war.
+    #[test]
+    fn tray_main_window_shows_repo_list() {
+        let mut app = test_app();
+        let ctx = egui::Context::default();
+        app.main_view = MainView::MergeRequests;
+        app.window_visible = false;
+        app.show_main_from_tray(&ctx);
+        assert_eq!(app.main_view, MainView::Repos);
+        assert!(app.window_visible);
     }
 
     #[test]
@@ -1810,9 +1835,9 @@ mod tests {
     }
 
     /// Mindestfenster (920 px, nur Icons, ohne Beschriftungen), ab
-    /// `TOP_BAR_CAPTIONS_WIDTH` mit Beschriftungen, Standardfenster (1080 px)
-    /// und ab `TOP_BAR_COMPACT_WIDTH` mit Button-Texten: in Zeile 1 überlappt
-    /// nichts, alles bleibt im Fenster.
+    /// `TOP_BAR_CAPTIONS_WIDTH` mit Beschriftungen, 1080 px und ab
+    /// `TOP_BAR_COMPACT_WIDTH` (Standardfenster) mit Button-Texten: in
+    /// Zeile 1 überlappt nichts, alles bleibt im Fenster.
     #[test]
     fn top_bar_fits_at_min_width() {
         for width in [920.0, TOP_BAR_CAPTIONS_WIDTH, 1080.0, TOP_BAR_COMPACT_WIDTH] {
