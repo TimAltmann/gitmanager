@@ -1,3 +1,4 @@
+use crate::gitlab::remote::RemoteInfo;
 use git2::{BranchType, Repository, StatusOptions};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -80,6 +81,15 @@ pub struct RepoInfo {
     pub ahead: usize,
     /// Commits hinterher (Upstream vor lokal). Scan-only, Default 0.
     pub behind: usize,
+    /// Remotes (origin zuerst, dann alphabetisch), URLs ohne Zugangsdaten.
+    /// Scan-only, Default leer.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub remotes: Vec<RemoteInfo>,
+    /// Gemeinsames Git-Verzeichnis (`commondir`): bei verknüpften Worktrees
+    /// das des Haupt-Repos. Kanonisch, damit Worktree-Geschwister per `==`
+    /// gruppiert werden können. Scan-only, Default `<path>/.git`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub common_dir: PathBuf,
 }
 
 impl RepoInfo {
@@ -88,6 +98,7 @@ impl RepoInfo {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.display().to_string());
+        let common_dir = path.join(".git");
         Self {
             path,
             name,
@@ -101,6 +112,8 @@ impl RepoInfo {
             custom_errors: HashMap::new(),
             ahead: 0,
             behind: 0,
+            remotes: Vec::new(),
+            common_dir,
         }
     }
 
@@ -1289,7 +1302,52 @@ pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
     let mut info = RepoInfo::new(path, branch, dirty, is_detached).with_branches(branches);
     info.ahead = ahead;
     info.behind = behind;
+    info.remotes = read_remotes(&repo);
+    info.common_dir = canonical_key_path(repo.commondir());
     Some(info)
+}
+
+/// Kanonischer Pfad als Vergleichsschlüssel (`RepoInfo.common_dir`). libgit2
+/// löst unter Windows weder Symlinks, Junctions und `subst`-Laufwerke noch
+/// die Groß-/Kleinschreibung auf (nur `GetFullPathNameW`): Haupt-Repo (Pfad
+/// aus dem Suchpfad) und Worktree (`gitdir:` von git aufgelöst) lieferten
+/// sonst verschiedene Werte. Ohne `\\?\`-Präfix und ohne abschließenden
+/// Separator; nicht auflösbar → der Pfad selbst.
+fn canonical_key_path(path: &Path) -> PathBuf {
+    let Ok(canon) = path.canonicalize() else {
+        return path.components().collect();
+    };
+    #[cfg(windows)]
+    {
+        if let Some(rest) = canon.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+            if let Some(unc) = rest.strip_prefix(r"UNC\") {
+                return PathBuf::from(format!(r"\\{unc}"));
+            }
+            // Nur Laufwerkspfade (`C:\…`), `Volume{…}` bleibt verbatim
+            if rest.as_bytes().get(1) == Some(&b':') {
+                return PathBuf::from(rest);
+            }
+        }
+    }
+    canon
+}
+
+/// Remotes für die Merge-Request-Zuordnung: origin zuerst, dann
+/// alphabetisch. Zugangsdaten in der URL entfernt `RemoteInfo::new` sofort.
+fn read_remotes(repo: &Repository) -> Vec<RemoteInfo> {
+    let Ok(names) = repo.remotes() else {
+        return Vec::new();
+    };
+    let mut remotes: Vec<RemoteInfo> = names
+        .iter()
+        .filter_map(|n| n.ok().flatten())
+        .filter_map(|name| {
+            let remote = repo.find_remote(name).ok()?;
+            Some(RemoteInfo::new(name, remote.url().ok()?))
+        })
+        .collect();
+    remotes.sort_by(|a, b| (a.name != "origin", &a.name).cmp(&(b.name != "origin", &b.name)));
+    remotes
 }
 
 // --- IDE & Agent Launch Helpers ---
@@ -2055,6 +2113,8 @@ mod tests {
         assert!(info.branches.is_empty());
         assert!(info.solutions.is_empty());
         assert!(info.selected_solution.is_none());
+        assert!(info.remotes.is_empty());
+        assert_eq!(info.common_dir, path.join(".git"));
         // fallback when no file_name
         let root = PathBuf::from("/");
         let info2 = RepoInfo::new(root.clone(), "main".to_string(), false, false);
@@ -2699,6 +2759,107 @@ mod tests {
         init_repo_with_commit(dir.path(), "main");
         let info = get_repo_info(dir.path().to_path_buf()).unwrap();
         assert_eq!((info.ahead, info.behind), (0, 0));
+    }
+
+    #[test]
+    fn get_repo_info_fills_remotes_origin_first() {
+        use crate::gitlab::remote::{RemoteRef, RemoteScheme};
+        let dir = tempdir().unwrap();
+        let repo = init_repo_with_commit(dir.path(), "main");
+        repo.remote(
+            "upstream",
+            "https://gitlab.example.com/kern/backend-api.git",
+        )
+        .unwrap();
+        repo.remote("origin", "git@gitlab.example.com:kern/backend-api.git")
+            .unwrap();
+        repo.remote(
+            "a-fork",
+            "https://oauth2:glpat-SECRET123@gitlab.example.com/tim/backend-api.git",
+        )
+        .unwrap();
+        repo.remote("backup", "/srv/git/backend-api.git").unwrap();
+        let info = get_repo_info(dir.path().to_path_buf()).unwrap();
+        let names: Vec<&str> = info.remotes.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["origin", "a-fork", "backup", "upstream"]);
+        assert_eq!(
+            info.remotes[0].parsed,
+            Some(RemoteRef {
+                scheme: RemoteScheme::Ssh,
+                host: "gitlab.example.com".to_string(),
+                port: None,
+                full_path: "kern/backend-api".to_string(),
+            })
+        );
+        assert_eq!(
+            info.remotes[0].url_redacted,
+            "git@gitlab.example.com:kern/backend-api.git"
+        );
+        // Token aus der Remote-URL landet nicht im RepoInfo
+        assert_eq!(
+            info.remotes[1].url_redacted,
+            "https://gitlab.example.com/tim/backend-api.git"
+        );
+        assert!(!format!("{info:?}").contains("SECRET123"));
+        assert_eq!(info.remotes[2].parsed, None);
+        assert_eq!(
+            info.remotes[3].parsed.as_ref().map(|r| r.scheme),
+            Some(RemoteScheme::Https)
+        );
+    }
+
+    #[test]
+    fn get_repo_info_common_dir_shared_with_worktree() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let wt = base.path().join("wt");
+        git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "feature/x"]);
+        let main_info = get_repo_info(c1.clone()).unwrap();
+        let wt_info = get_repo_info(wt.clone()).unwrap();
+        assert_eq!(wt_info.branch, "feature/x");
+        assert_eq!(main_info.common_dir, wt_info.common_dir);
+        assert_eq!(main_info.common_dir, canon(&c1.join(".git")));
+        // Ohne abschließenden Separator (Vergleich als Schlüssel)
+        assert!(!main_info
+            .common_dir
+            .to_string_lossy()
+            .ends_with(std::path::MAIN_SEPARATOR));
+        // Haupt-Repo über einen Symlink gescannt → derselbe Schlüssel
+        #[cfg(unix)]
+        {
+            let link = base.path().join("link");
+            std::os::unix::fs::symlink(&c1, &link).unwrap();
+            let link_info = get_repo_info(link).unwrap();
+            assert_eq!(link_info.common_dir, wt_info.common_dir);
+        }
+        // Worktree liest dieselben Remotes wie das Haupt-Repo
+        assert_eq!(main_info.remotes, wt_info.remotes);
+        assert_eq!(main_info.remotes[0].name, "origin");
+        // Eigenständiges Repo hat sein eigenes common_dir
+        let other = base.path().join("other");
+        fs::create_dir(&other).unwrap();
+        init_repo_with_commit(&other, "main");
+        let other_info = get_repo_info(other.clone()).unwrap();
+        assert_ne!(other_info.common_dir, main_info.common_dir);
+        assert!(other_info.remotes.is_empty());
+    }
+
+    #[test]
+    fn canonical_key_path_resolves_dots_links_and_separator() {
+        let base = tempdir().unwrap();
+        let real = base.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let dotted = base.path().join("real").join("..").join("real").join("");
+        assert_eq!(canonical_key_path(&dotted), canon(&real));
+        #[cfg(unix)]
+        {
+            let link = base.path().join("link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert_eq!(canonical_key_path(&link), canonical_key_path(&real));
+        }
+        // Nicht auflösbar → Pfad selbst, ohne abschließenden Separator
+        let missing = base.path().join("missing");
+        assert_eq!(canonical_key_path(&missing.join("")), missing);
     }
 
     #[test]

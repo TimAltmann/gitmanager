@@ -5,6 +5,7 @@ mod autostart;
 mod config;
 mod config_parser;
 mod git;
+mod gitlab;
 mod i18n;
 mod scanner;
 mod tray;
