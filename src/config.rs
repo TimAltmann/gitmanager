@@ -1,13 +1,14 @@
 use crate::i18n::Language;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // --- Default helpers ---
 fn default_config_version() -> u32 {
-    14
+    15
 }
 fn default_sort_mode() -> RepoSortMode {
     RepoSortMode::LastUsed
@@ -76,6 +77,190 @@ impl Default for TrayIconConfig {
             icon_theme: TrayIconTheme::Dark,
         }
     }
+}
+
+// --- Merge Requests (v15) ---
+fn default_glab_program() -> String {
+    "glab".to_string()
+}
+
+/// Mockup K1: vorbelegt mit dem aktiven Standard-Agent (gleiche Quelle wie
+/// `default_active_agents()`, also Claude Code).
+fn default_after_checkout_last() -> AfterAction {
+    default_active_agents()
+        .into_iter()
+        .next()
+        .map_or(AfterAction::Nothing, AfterAction::Agent)
+}
+
+/// Liest einen Wert tolerant: Ein unbekannter Wert (JSON-Handedit oder eine
+/// neuere Version nach Downgrade) fällt auf `fallback` zurück, statt das ganze
+/// JSON ungültig zu machen – `load()` würde sonst die komplette Config verwerfen.
+fn de_lenient<'de, D, T>(d: D, fallback: fn() -> T) -> std::result::Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or_else(|_| fallback()))
+}
+
+fn de_after_checkout_default<'de, D: Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<AfterCheckoutPref, D::Error> {
+    de_lenient(d, AfterCheckoutPref::default)
+}
+
+fn de_after_checkout_last<'de, D: Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<AfterAction, D::Error> {
+    de_lenient(d, default_after_checkout_last)
+}
+
+/// Zuordnung „SSH-/Remote-Host gehört zu glab-Host“ (E16), z. B. wenn der
+/// SSH-Host vom Web-Host abweicht und glab ihn nicht als `ssh_host` kennt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct HostAlias {
+    /// Host aus der Remote-URL (SSH- oder Remote-Host)
+    pub from: String,
+    /// glab-Host-Schlüssel (`host` oder `host:port`)
+    pub to: String,
+}
+
+/// API-Protokoll je GitLab-Host (E17), aus dem Remote-Schema vorbelegt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct HostProtocol {
+    pub host: String,
+    /// "http" oder "https" – andere Werte entfernt `MrConfig::normalize`
+    pub protocol: String,
+}
+
+/// Was nach dem Auschecken eines MR-Branches geöffnet wird („Danach öffnen“, E5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterAction {
+    /// KI-Agent mit dieser ID (`AgentProfile::id`)
+    Agent(String),
+    Shell,
+    Explorer,
+    Ide,
+    Nothing,
+}
+
+/// Vorbelegung von „Danach öffnen“: zuletzt im Menü gewählt oder fest eingestellt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterCheckoutPref {
+    #[default]
+    LastUsed,
+    Fixed(AfterAction),
+}
+
+/// Einstellungen der Merge-Request-Ansicht (v15). Fehlende Felder fallen
+/// über `#[serde(default)]` einzeln auf `MrConfig::default()` zurück.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MrConfig {
+    /// glab-Programm (Name im PATH oder voller Pfad)
+    pub glab_program: String,
+    /// Automatisches Neuladen in Minuten, 0 = aus, max. 60
+    pub refresh_interval_min: u64,
+    /// Startwert des Chips „Alle offenen“ (E13)
+    pub show_uninvolved_default: bool,
+    /// Approvals von Bots nicht mitzählen (Sortierung „Meine“, E11)
+    pub ignore_bot_approvals: bool,
+    /// Auch MRs aus Projekten ohne lokalen Klon anzeigen (E1)
+    pub include_nonlocal: bool,
+    /// Abgewählte Projekte als `host/full/path` (E2), klein, sortiert, dedupliziert
+    pub excluded_projects: Vec<String>,
+    /// Manuell hinzugefügte GitLab-Hosts (`host` oder `host:port`, E16)
+    pub extra_hosts: Vec<String>,
+    pub host_aliases: Vec<HostAlias>,
+    pub api_protocols: Vec<HostProtocol>,
+    /// Ordner für Reviews (MRs von anderen); None → neben dem Basis-Klon
+    pub review_root: Option<String>,
+    #[serde(deserialize_with = "de_after_checkout_default")]
+    pub after_checkout_default: AfterCheckoutPref,
+    /// Zuletzt im Checkout-Menü gewählte Aktion. `Agent(id)` kann auf einen
+    /// inzwischen gelöschten oder inaktiven Agent zeigen – das Checkout-Menü
+    /// muss dann zurückfallen (z. B. erster aktiver Agent oder `Nothing`).
+    /// Gilt ebenso für `after_checkout_default = Fixed(Agent(id))`.
+    #[serde(deserialize_with = "de_after_checkout_last")]
+    pub after_checkout_last: AfterAction,
+}
+
+impl Default for MrConfig {
+    fn default() -> Self {
+        Self {
+            glab_program: default_glab_program(),
+            refresh_interval_min: 3,
+            show_uninvolved_default: false,
+            ignore_bot_approvals: true,
+            include_nonlocal: true,
+            excluded_projects: Vec::new(),
+            extra_hosts: Vec::new(),
+            host_aliases: Vec::new(),
+            api_protocols: Vec::new(),
+            review_root: None,
+            after_checkout_default: AfterCheckoutPref::LastUsed,
+            after_checkout_last: default_after_checkout_last(),
+        }
+    }
+}
+
+impl MrConfig {
+    /// Bereinigt Werte aus JSON-Handedit bzw. Einstellungs-Entwurf.
+    /// Gibt `true` zurück, wenn sich etwas geändert hat (dann speichern).
+    pub fn normalize(&mut self) -> bool {
+        let before = self.clone();
+        let program = self.glab_program.trim();
+        self.glab_program = if program.is_empty() {
+            default_glab_program()
+        } else {
+            program.to_string()
+        };
+        self.refresh_interval_min = self.refresh_interval_min.min(60);
+        normalize_key_list(&mut self.excluded_projects);
+        normalize_key_list(&mut self.extra_hosts);
+        // Hosts case-insensitiv; bei doppeltem Schlüssel gewinnt der erste Eintrag
+        // (stabile Sortierung, dedup behält das erste Element).
+        for a in &mut self.host_aliases {
+            a.from = a.from.trim().to_lowercase();
+            a.to = a.to.trim().to_lowercase();
+        }
+        self.host_aliases
+            .retain(|a| !a.from.is_empty() && !a.to.is_empty());
+        self.host_aliases.sort_by(|a, b| a.from.cmp(&b.from));
+        self.host_aliases.dedup_by(|a, b| a.from == b.from);
+        for p in &mut self.api_protocols {
+            p.host = p.host.trim().to_lowercase();
+            p.protocol = p.protocol.trim().to_lowercase();
+        }
+        self.api_protocols
+            .retain(|p| !p.host.is_empty() && (p.protocol == "http" || p.protocol == "https"));
+        self.api_protocols.sort_by(|a, b| a.host.cmp(&b.host));
+        self.api_protocols.dedup_by(|a, b| a.host == b.host);
+        // Pfad nur trimmen (Groß-/Kleinschreibung bleibt), leer = nicht gesetzt
+        self.review_root = self
+            .review_root
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(str::to_string);
+        *self != before
+    }
+}
+
+/// Trimmen, kleinschreiben, leere entfernen, sortieren, deduplizieren.
+fn normalize_key_list(list: &mut Vec<String>) {
+    for s in list.iter_mut() {
+        *s = s.trim().to_lowercase();
+    }
+    list.retain(|s| !s.is_empty());
+    list.sort();
+    list.dedup();
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -676,6 +861,11 @@ pub struct AppConfig {
     /// Auto-Fetch Intervall in Minuten (Task 5). 0 = aus. Default 10.
     #[serde(default = "default_auto_fetch_interval")]
     pub auto_fetch_interval_min: u64,
+
+    /// Merge-Request-Einstellungen (v15). Ältere Versionen ignorieren das Feld
+    /// und verwerfen es beim nächsten Speichern.
+    #[serde(default)]
+    pub merge_requests: MrConfig,
 }
 
 impl Default for AppConfig {
@@ -708,6 +898,7 @@ impl Default for AppConfig {
             autostart: false,
             main_sort_mode: default_sort_mode(),
             auto_fetch_interval_min: default_auto_fetch_interval(),
+            merge_requests: MrConfig::default(),
         }
     }
 }
@@ -1104,6 +1295,11 @@ impl AppConfig {
             // Alte Configs ohne Feld erhalten automatisch Dark = bisheriges Weiß-Icon.
             cfg.config_version = 14;
         }
+        if cfg.config_version < 15 {
+            // v15: merge_requests (MrConfig) eingeführt (Defaults via serde).
+            // Alte Configs ohne Feld erhalten automatisch die Defaults — hier nur Version bump.
+            cfg.config_version = 15;
+        }
         // M5: auch laufende Configs clampen (JSON-Handedit mit 1000 o.ä.).
         // K1/K2/N2: alle numerischen Clamps gleich behandeln — bei tatsächlicher
         // Änderung einmalig speichern (statt drei Zwischen-Saves / stiller Clamps).
@@ -1123,10 +1319,13 @@ impl AppConfig {
         } else {
             cfg.tray_icons.max_display.clamp(5, 50)
         };
+        // MR-Einstellungen normalisieren (Intervall, glab-Programm, Listen) — zählt mit.
+        let mr_changed = cfg.merge_requests.normalize();
         let clamp_changed = clamped_fetch != cfg.auto_fetch_interval_min
             || clamped_branch != cfg.branch_display_limit
             || clamped_tray != cfg.tray_branch_limit
-            || clamped_max != cfg.tray_icons.max_display;
+            || clamped_max != cfg.tray_icons.max_display
+            || mr_changed;
         cfg.auto_fetch_interval_min = clamped_fetch;
         cfg.branch_display_limit = clamped_branch;
         cfg.tray_branch_limit = clamped_tray;
@@ -2112,7 +2311,7 @@ mod tests {
     fn config_default_has_valid_state() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.max_depth, 2);
-        assert_eq!(cfg.config_version, 14);
+        assert_eq!(cfg.config_version, 15);
         assert_eq!(cfg.active_profile_id, "dotnet");
         assert!(!cfg.profiles.is_empty());
         assert_eq!(cfg.agents.len(), 6);
@@ -2389,7 +2588,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded.roots.len(), 2);
         assert_eq!(loaded.max_depth, 3);
-        assert_eq!(loaded.config_version, 14);
+        assert_eq!(loaded.config_version, 15);
     }
 
     #[test]
@@ -3035,7 +3234,7 @@ mod tests {
     fn sort_mode_default_is_last_used() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.main_sort_mode, RepoSortMode::LastUsed);
-        assert_eq!(cfg.config_version, 14);
+        assert_eq!(cfg.config_version, 15);
     }
 
     #[test]
@@ -3095,5 +3294,329 @@ mod tests {
         let json_old = r#"{"roots":[],"max_depth":2,"config_version":13}"#;
         let old: AppConfig = serde_json::from_str(json_old).unwrap();
         assert_eq!(old.tray_icons.icon_theme, TrayIconTheme::Dark);
+    }
+
+    // --- Merge Requests (v15) ---
+    #[test]
+    fn mr_config_defaults() {
+        let mr = MrConfig::default();
+        assert_eq!(mr.glab_program, "glab");
+        assert_eq!(mr.refresh_interval_min, 3);
+        assert!(!mr.show_uninvolved_default);
+        assert!(mr.ignore_bot_approvals);
+        assert!(mr.include_nonlocal);
+        assert!(mr.excluded_projects.is_empty());
+        assert!(mr.extra_hosts.is_empty());
+        assert!(mr.host_aliases.is_empty());
+        assert!(mr.api_protocols.is_empty());
+        assert_eq!(mr.review_root, None);
+        assert_eq!(mr.after_checkout_default, AfterCheckoutPref::LastUsed);
+        // Mockup K1: Vorbelegung = aktiver Standard-Agent (Claude Code)
+        assert_eq!(
+            mr.after_checkout_last,
+            AfterAction::Agent("claude".to_string())
+        );
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.merge_requests, mr);
+        assert_eq!(cfg.config_version, 15);
+    }
+
+    #[test]
+    fn mr_config_v14_json_without_field_uses_defaults() {
+        // v14 config ohne merge_requests-Feld -> serde default
+        let json = r#"{"roots":[],"max_depth":2,"config_version":14}"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.merge_requests, MrConfig::default());
+        assert_eq!(cfg.config_version, 14);
+    }
+
+    #[test]
+    fn mr_config_empty_object_uses_defaults() {
+        let json = r#"{"roots":[],"max_depth":2,"config_version":15,"merge_requests":{}}"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        let mr = &cfg.merge_requests;
+        assert_eq!(mr.glab_program, "glab");
+        assert_eq!(mr.refresh_interval_min, 3);
+        assert!(mr.ignore_bot_approvals);
+        assert!(mr.include_nonlocal);
+        assert_eq!(*mr, MrConfig::default());
+        // Teilweise gesetzt: Rest bleibt Default, 0 (aus) bleibt 0
+        let json_part = r#"{"roots":[],"max_depth":2,"merge_requests":{"refresh_interval_min":0,"host_aliases":[{"from":"ssh.example.com"}]}}"#;
+        let part: AppConfig = serde_json::from_str(json_part).unwrap();
+        assert_eq!(part.merge_requests.refresh_interval_min, 0);
+        assert_eq!(part.merge_requests.glab_program, "glab");
+        assert_eq!(part.merge_requests.host_aliases[0].to, "");
+    }
+
+    #[test]
+    fn mr_config_unknown_after_checkout_keeps_rest_of_config() {
+        // Unbekannte Enum-Werte (Handedit, neuere Version) fallen einzeln auf den
+        // Default zurück — Roots und übrige MR-Felder bleiben erhalten.
+        let json = r#"{"roots":["C:\\Dev"],"max_depth":3,"config_version":15,
+            "merge_requests":{"refresh_interval_min":7,
+            "after_checkout_default":{"fixed":"terminal"},
+            "after_checkout_last":"bogus"}}"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.roots, vec![PathBuf::from(r"C:\Dev")]);
+        assert_eq!(cfg.max_depth, 3);
+        assert_eq!(cfg.merge_requests.refresh_interval_min, 7);
+        assert_eq!(
+            cfg.merge_requests.after_checkout_default,
+            AfterCheckoutPref::LastUsed
+        );
+        assert_eq!(
+            cfg.merge_requests.after_checkout_last,
+            MrConfig::default().after_checkout_last
+        );
+        // null bzw. falscher Typ ebenso
+        let json_null = r#"{"roots":[],"max_depth":2,"merge_requests":{"after_checkout_default":null,"after_checkout_last":{"agent":42}}}"#;
+        let n: AppConfig = serde_json::from_str(json_null).unwrap();
+        assert_eq!(n.merge_requests, MrConfig::default());
+        // Gültige Werte gehen weiterhin durch
+        let json_ok = r#"{"roots":[],"max_depth":2,"merge_requests":{"after_checkout_default":{"fixed":"ide"},"after_checkout_last":{"agent":"codex"}}}"#;
+        let ok: AppConfig = serde_json::from_str(json_ok).unwrap();
+        assert_eq!(
+            ok.merge_requests.after_checkout_default,
+            AfterCheckoutPref::Fixed(AfterAction::Ide)
+        );
+        assert_eq!(
+            ok.merge_requests.after_checkout_last,
+            AfterAction::Agent("codex".to_string())
+        );
+    }
+
+    #[test]
+    fn mr_config_serde_roundtrip() {
+        let mr = MrConfig {
+            glab_program: r"C:\Tools\glab.exe".to_string(),
+            refresh_interval_min: 15,
+            show_uninvolved_default: true,
+            ignore_bot_approvals: false,
+            include_nonlocal: false,
+            excluded_projects: vec!["gitlab.example.com/group/app".to_string()],
+            extra_hosts: vec!["gitlab.local:8443".to_string()],
+            host_aliases: vec![HostAlias {
+                from: "ssh.gitlab.local".to_string(),
+                to: "gitlab.local:8443".to_string(),
+            }],
+            api_protocols: vec![HostProtocol {
+                host: "gitlab.local:8443".to_string(),
+                protocol: "http".to_string(),
+            }],
+            review_root: Some(r"C:\Dev\Reviews".to_string()),
+            after_checkout_default: AfterCheckoutPref::Fixed(AfterAction::Shell),
+            after_checkout_last: AfterAction::Agent("codex".to_string()),
+        };
+        let json = serde_json::to_string(&mr).unwrap();
+        let de: MrConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(de, mr);
+        // JSON-Form der Enums (snake_case, extern getaggt)
+        assert!(json.contains(r#""after_checkout_default":{"fixed":"shell"}"#));
+        assert!(json.contains(r#""after_checkout_last":{"agent":"codex"}"#));
+        assert!(json.contains(r#""protocol":"http""#));
+        for action in [
+            AfterAction::Agent("claude".to_string()),
+            AfterAction::Shell,
+            AfterAction::Explorer,
+            AfterAction::Ide,
+            AfterAction::Nothing,
+        ] {
+            let pref = AfterCheckoutPref::Fixed(action);
+            let s = serde_json::to_string(&pref).unwrap();
+            let back: AfterCheckoutPref = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, pref);
+        }
+        assert_eq!(
+            serde_json::to_string(&AfterCheckoutPref::LastUsed).unwrap(),
+            r#""last_used""#
+        );
+        // Über AppConfig
+        let cfg = AppConfig {
+            merge_requests: mr.clone(),
+            ..Default::default()
+        };
+        let cfg_json = serde_json::to_string(&cfg).unwrap();
+        let cfg_de: AppConfig = serde_json::from_str(&cfg_json).unwrap();
+        assert_eq!(cfg_de.merge_requests, mr);
+    }
+
+    #[test]
+    fn mr_config_normalize_clamps_interval_and_program() {
+        let mut mr = MrConfig {
+            refresh_interval_min: 61,
+            glab_program: String::new(),
+            ..Default::default()
+        };
+        assert!(mr.normalize());
+        assert_eq!(mr.refresh_interval_min, 60);
+        assert_eq!(mr.glab_program, "glab");
+
+        let mut big = MrConfig {
+            refresh_interval_min: 1000,
+            glab_program: "   ".to_string(),
+            ..Default::default()
+        };
+        assert!(big.normalize());
+        assert_eq!(big.refresh_interval_min, 60);
+        assert_eq!(big.glab_program, "glab");
+
+        // 0 = aus und 60 bleiben unverändert
+        for v in [0, 60] {
+            let mut ok = MrConfig {
+                refresh_interval_min: v,
+                ..Default::default()
+            };
+            assert!(!ok.normalize());
+            assert_eq!(ok.refresh_interval_min, v);
+        }
+
+        // Programmpfad wird nur getrimmt, nicht kleingeschrieben
+        let mut path = MrConfig {
+            glab_program: r"  C:\Tools\GLab.exe ".to_string(),
+            ..Default::default()
+        };
+        assert!(path.normalize());
+        assert_eq!(path.glab_program, r"C:\Tools\GLab.exe");
+    }
+
+    #[test]
+    fn mr_config_normalize_lists_lowercase_sorted_dedup() {
+        let mut mr = MrConfig {
+            excluded_projects: vec![
+                "GitLab.example.com/Group/B".to_string(),
+                "gitlab.example.com/group/a".to_string(),
+                " gitlab.example.com/group/b ".to_string(),
+                "".to_string(),
+                "  ".to_string(),
+            ],
+            extra_hosts: vec![
+                "Gitlab.Local:8443".to_string(),
+                "gitlab.local:8443".to_string(),
+                "a.example.com".to_string(),
+                " ".to_string(),
+            ],
+            host_aliases: vec![
+                HostAlias {
+                    from: "SSH.Gitlab.Local".to_string(),
+                    to: "Gitlab.Local:8443".to_string(),
+                },
+                HostAlias {
+                    from: "a-ssh.example.com".to_string(),
+                    to: "a.example.com".to_string(),
+                },
+                // doppeltes `from`: der erste Eintrag gewinnt
+                HostAlias {
+                    from: "ssh.gitlab.local".to_string(),
+                    to: "other.example.com".to_string(),
+                },
+                // unvollständig -> entfernt
+                HostAlias {
+                    from: "x.example.com".to_string(),
+                    to: " ".to_string(),
+                },
+                HostAlias {
+                    from: "".to_string(),
+                    to: "a.example.com".to_string(),
+                },
+            ],
+            api_protocols: vec![
+                HostProtocol {
+                    host: "Gitlab.Local:8443".to_string(),
+                    protocol: "HTTP".to_string(),
+                },
+                HostProtocol {
+                    host: "a.example.com".to_string(),
+                    protocol: " https ".to_string(),
+                },
+                // doppelter Host: der erste Eintrag gewinnt
+                HostProtocol {
+                    host: "gitlab.local:8443".to_string(),
+                    protocol: "https".to_string(),
+                },
+                // ungültiges Protokoll bzw. leerer Host -> entfernt
+                HostProtocol {
+                    host: "b.example.com".to_string(),
+                    protocol: "ftp".to_string(),
+                },
+                HostProtocol {
+                    host: " ".to_string(),
+                    protocol: "http".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(mr.normalize());
+        assert_eq!(
+            mr.excluded_projects,
+            vec![
+                "gitlab.example.com/group/a".to_string(),
+                "gitlab.example.com/group/b".to_string(),
+            ]
+        );
+        assert_eq!(
+            mr.extra_hosts,
+            vec!["a.example.com".to_string(), "gitlab.local:8443".to_string()]
+        );
+        assert_eq!(
+            mr.host_aliases,
+            vec![
+                HostAlias {
+                    from: "a-ssh.example.com".to_string(),
+                    to: "a.example.com".to_string(),
+                },
+                HostAlias {
+                    from: "ssh.gitlab.local".to_string(),
+                    to: "gitlab.local:8443".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            mr.api_protocols,
+            vec![
+                HostProtocol {
+                    host: "a.example.com".to_string(),
+                    protocol: "https".to_string(),
+                },
+                HostProtocol {
+                    host: "gitlab.local:8443".to_string(),
+                    protocol: "http".to_string(),
+                },
+            ]
+        );
+        // Zweiter Lauf ändert nichts mehr
+        assert!(!mr.normalize());
+    }
+
+    #[test]
+    fn mr_config_normalize_review_root() {
+        let mut blank = MrConfig {
+            review_root: Some("   ".to_string()),
+            ..Default::default()
+        };
+        assert!(blank.normalize());
+        assert_eq!(blank.review_root, None);
+
+        let mut padded = MrConfig {
+            review_root: Some(r" C:\Dev\Reviews ".to_string()),
+            ..Default::default()
+        };
+        assert!(padded.normalize());
+        assert_eq!(padded.review_root, Some(r"C:\Dev\Reviews".to_string()));
+    }
+
+    #[test]
+    fn mr_config_normalize_returns_false_when_unchanged() {
+        let mut mr = MrConfig::default();
+        assert!(!mr.normalize());
+        assert_eq!(mr, MrConfig::default());
+        let mut sorted = MrConfig {
+            excluded_projects: vec!["a.example.com/x".to_string(), "b.example.com/y".to_string()],
+            extra_hosts: vec!["gitlab.local".to_string()],
+            review_root: Some(r"C:\Dev\Reviews".to_string()),
+            ..Default::default()
+        };
+        let before = sorted.clone();
+        assert!(!sorted.normalize());
+        assert_eq!(sorted, before);
     }
 }
