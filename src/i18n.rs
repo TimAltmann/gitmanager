@@ -794,6 +794,20 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::En, "mr_fetch_aborted") => "Loading merge requests was aborted (internal error)".to_string(),
         (Language::De, "mr_fetch_aborted") => "Abruf der Merge Requests abgebrochen (interner Fehler)".to_string(),
 
+        // ── Merge Requests: Tray-Fußzeile (E21) ───────────────────────
+        (Language::En, "tray_main_window") => "Main window".to_string(),
+        (Language::De, "tray_main_window") => "Hauptfenster".to_string(),
+        (Language::En, "tray_mrs") => "Merge Requests".to_string(),
+        (Language::De, "tray_mrs") => "Merge Requests".to_string(),
+        (Language::En, "tray_mrs_tt_one") => "Merge requests – 1 review waiting for you".to_string(),
+        (Language::De, "tray_mrs_tt_one") => "Merge Requests – 1 Review wartet auf dich".to_string(),
+        (Language::En, "tray_mrs_tt_many") => "Merge requests – {} reviews waiting for you".to_string(),
+        (Language::De, "tray_mrs_tt_many") => "Merge Requests – {} Reviews warten auf dich".to_string(),
+        (Language::En, "tray_mrs_tt_none") => "Open main window with merge requests".to_string(),
+        (Language::De, "tray_mrs_tt_none") => "Hauptfenster mit Merge Requests öffnen".to_string(),
+        (Language::En, "tray_quit") => "Quit".to_string(),
+        (Language::De, "tray_quit") => "Beenden".to_string(),
+
         // ── Relative Zeiten ──────────────────────────────────────────
         (Language::En, "rel_now") => "just now".to_string(),
         (Language::De, "rel_now") => "gerade eben".to_string(),
@@ -1281,6 +1295,13 @@ mod tests {
             "mr_status_line",
             "mr_refreshing",
             "mr_fetch_aborted",
+            // Task 10b (E21): Tray-Fußzeile
+            "tray_main_window",
+            "tray_mrs",
+            "tray_mrs_tt_one",
+            "tray_mrs_tt_many",
+            "tray_mrs_tt_none",
+            "tray_quit",
         ];
         for key in keys {
             let en = tr(Language::En, key);

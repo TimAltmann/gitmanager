@@ -1,7 +1,8 @@
 use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt, Language};
-use egui::{Color32, RichText, Vec2};
+use crate::ui::theme::mr_palette;
+use egui::{AtomLayoutResponse, Color32, RichText, Vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -20,6 +21,9 @@ const ICON_AIDER: egui::ImageSource = egui::include_image!("../../assets/icons/a
 const ICON_REFRESH: egui::ImageSource = egui::include_image!("../../assets/icons/refresh.svg");
 const ICON_GEAR: egui::ImageSource = egui::include_image!("../../assets/icons/gear.svg");
 const ICON_CROSS: egui::ImageSource = egui::include_image!("../../assets/icons/cross.svg");
+// Phosphor Regular wie in der MR-Ansicht (weiß, `tint` färbt ein)
+const ICON_PULL_REQUEST: egui::ImageSource =
+    egui::include_image!("../../assets/icons/mr/git-pull-request.svg");
 
 fn ide_icon_for(ide_id: &str) -> egui::ImageSource<'static> {
     match ide_id {
@@ -123,6 +127,8 @@ pub struct TrayPopupActions {
     pub shell_open: Option<std::path::PathBuf>,
     pub refresh: bool,
     pub open_main: bool,
+    /// E21: Hauptfenster direkt in der MR-Ansicht öffnen
+    pub open_mrs: bool,
     pub open_settings: bool,
     pub quit: bool,
     pub close_popup: bool,
@@ -200,10 +206,11 @@ pub fn truncate_label(s: &str, max_chars: usize) -> String {
 /// Entscheidet, ob das Tray-Popup nach den Actions geschlossen wird.
 /// Branch-/Solution-Wechsel und Refresh halten das Popup bewusst offen,
 /// damit mehrere Wechsel hintereinander möglich sind; alles andere
-/// (explizites Close, Main/Settings/Quit, externe Launches) schließt.
+/// (explizites Close, Main/MRs/Settings/Quit, externe Launches) schließt.
 pub fn should_close_tray_popup(a: &TrayPopupActions) -> bool {
     a.close_popup
         || a.open_main
+        || a.open_mrs
         || a.open_settings
         || a.quit
         || a.ide_open.is_some()
@@ -212,10 +219,159 @@ pub fn should_close_tray_popup(a: &TrayPopupActions) -> bool {
         || a.shell_open.is_some()
 }
 
+/// E21: Aktion eines Buttons der Tray-Fußzeile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FooterAction {
+    OpenMain,
+    OpenMrs,
+    Quit,
+}
+
+/// E21: Button der Tray-Fußzeile (rein, ohne egui testbar).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FooterButton {
+    pub action: FooterAction,
+    pub label: String,
+    /// Zahl wartender Reviews (E9); `None` = kein Badge
+    pub badge: Option<String>,
+    pub tooltip: Option<String>,
+    /// AccessKit-Name: mit Badge der Tooltip (enthält die Zahl), sonst das
+    /// Label
+    pub access_name: String,
+}
+
+/// E21: Fußzeile „Hauptfenster“ · „Merge Requests“ · „Beenden“. `badge`
+/// kommt aus `MrSnapshot.badge` (`None` bei 0 oder nach Anmeldefehler);
+/// 0 zählt wie `None`. Tooltip mit Einzahl/Mehrzahl wie beim Umschalter.
+pub fn tray_footer_buttons(lang: Language, badge: Option<usize>) -> [FooterButton; 3] {
+    let badge = badge.filter(|n| *n > 0);
+    let mrs_tooltip = match badge {
+        Some(1) => tr(lang, "tray_mrs_tt_one"),
+        Some(n) => tr_fmt(lang, "tray_mrs_tt_many", &[&n.to_string()]),
+        None => tr(lang, "tray_mrs_tt_none"),
+    };
+    let mrs_label = tr(lang, "tray_mrs");
+    // Die Badge-Pill ist Painter-Grafik → Zahl über den Tooltip-Text
+    let mrs_access = match badge {
+        Some(_) => mrs_tooltip.clone(),
+        None => mrs_label.clone(),
+    };
+    let main_label = tr(lang, "tray_main_window");
+    let quit_label = tr(lang, "tray_quit");
+    [
+        FooterButton {
+            action: FooterAction::OpenMain,
+            access_name: main_label.clone(),
+            label: main_label,
+            badge: None,
+            tooltip: None,
+        },
+        FooterButton {
+            action: FooterAction::OpenMrs,
+            label: mrs_label,
+            badge: badge.map(|n| n.to_string()),
+            tooltip: Some(mrs_tooltip),
+            access_name: mrs_access,
+        },
+        FooterButton {
+            action: FooterAction::Quit,
+            access_name: quit_label.clone(),
+            label: quit_label,
+            badge: None,
+            tooltip: None,
+        },
+    ]
+}
+
+/// Breite des Popup-Viewports (`tray_service`).
+pub const POPUP_WIDTH: f32 = 360.0;
+
+// E21: Maße der Fußzeile. Knapp gewählt, damit „Merge Requests“ (11 px)
+// mit Badge in ⅓ der Breite passt (Popup 360 px, nutzbar 324 px).
+/// Abstand zwischen den drei Buttons
+const FOOTER_SPACING: f32 = 4.0;
+/// Innenabstand links/rechts im Button
+const FOOTER_PAD_X: f32 = 3.0;
+/// Abstand Icon/Badge zum Text
+const FOOTER_GAP: f32 = 3.0;
+const FOOTER_ICON: f32 = 12.0;
+const FOOTER_BADGE_FONT: f32 = 9.0;
+const FOOTER_BADGE_H: f32 = 14.0;
+/// Farbe „Beenden“ (bisherige rote Schrift)
+const COLOR_QUIT: Color32 = Color32::from_rgb(160, 40, 40);
+
+/// Breite der Badge-Pill bei Textbreite `text_w` (einstellig rund).
+fn footer_badge_width(text_w: f32) -> f32 {
+    (text_w + 6.0).max(FOOTER_BADGE_H)
+}
+
+/// Button in fester Größe; zu langer Text wird gekürzt statt die Zeile zu
+/// sprengen (voller Text im Tooltip bzw. AccessKit-Namen).
+fn footer_button(ui: &mut egui::Ui, size: Vec2, button: egui::Button<'_>) -> AtomLayoutResponse {
+    ui.allocate_ui_with_layout(
+        size,
+        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+        |ui| button.min_size(size).gap(FOOTER_GAP).truncate().atom_ui(ui),
+    )
+    .inner
+}
+
+/// Button „Merge Requests“: git-pull-request-Icon, mit wartenden Reviews
+/// stattdessen die Badge-Pill hinter dem Text (wie der Umschalter); Icon,
+/// Text und Badge zusammen passen nicht in ⅓ der Breite.
+fn footer_mrs_button(
+    ui: &mut egui::Ui,
+    size: Vec2,
+    b: &FooterButton,
+    theme: &crate::config::Theme,
+) -> egui::Response {
+    let p = mr_palette(theme, ui.visuals());
+    let text = RichText::new(&b.label).size(11.0);
+    let badge_id = egui::Id::new("tray_mrs_badge");
+    let galley = b.badge.as_ref().map(|n| {
+        ui.painter().layout_no_wrap(
+            n.clone(),
+            egui::FontId::proportional(FOOTER_BADGE_FONT),
+            p.badge_text,
+        )
+    });
+    let atoms = match &galley {
+        Some(galley) => {
+            let mut atoms = egui::Atoms::new(text);
+            let width = footer_badge_width(galley.size().x);
+            atoms.push_right(egui::Atom::custom(
+                badge_id,
+                egui::vec2(width, FOOTER_BADGE_H),
+            ));
+            atoms
+        }
+        None => {
+            let icon = egui::Image::new(ICON_PULL_REQUEST)
+                .fit_to_exact_size(Vec2::splat(FOOTER_ICON))
+                .tint(ui.visuals().text_color());
+            egui::Atoms::new((icon, text))
+        }
+    };
+    let out = footer_button(ui, size, egui::Button::new(atoms));
+    // Badge per Painter; Zahl steht zusätzlich im AccessKit-Namen
+    if let (Some(galley), Some(rect)) = (galley, out.rect(badge_id)) {
+        let painter = ui.painter();
+        painter.rect_filled(rect, FOOTER_BADGE_H / 2.0, p.badge);
+        let pos = egui::Align2::CENTER_CENTER
+            .anchor_size(rect.center(), galley.size())
+            .min;
+        painter.galley(pos, galley, p.badge_text);
+    }
+    out.response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &b.access_name));
+    out.response
+}
+
 /// Shows the tray popup UI inside the given viewport Ui.
 /// Returns actions triggered by the user.
 /// `notice` (#3) zeigt optional ein Badge (wartender Branch-Dialog/Fehler);
-/// Klick öffnet das Hauptfenster.
+/// Klick öffnet das Hauptfenster. `mr_badge` (E21): wartende Reviews am
+/// Button „Merge Requests“.
 pub fn show_tray_popup_ui(
     ui: &mut egui::Ui,
     repos: &[&RepoInfo],
@@ -223,6 +379,7 @@ pub fn show_tray_popup_ui(
     actions: &mut TrayPopupActions,
     notice: Option<&str>,
     branch_filters: &mut HashMap<PathBuf, String>,
+    mr_badge: Option<usize>,
 ) {
     let lang = config.language;
 
@@ -286,7 +443,8 @@ pub fn show_tray_popup_ui(
             });
         });
 
-    // Footer with main/quit
+    // E21: Fußzeile mit drei gleich breiten Buttons (Hauptfenster / Merge
+    // Requests / Beenden)
     egui::Panel::bottom("tray_footer")
         .frame(
             egui::Frame::new()
@@ -295,30 +453,34 @@ pub fn show_tray_popup_ui(
         )
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui
-                    .add_sized(
-                        [ui.available_width() * 0.48, 22.0],
-                        egui::Button::new(RichText::new(" Hauptfenster").size(11.0)),
-                    )
-                    .clicked()
-                {
-                    actions.open_main = true;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_sized(
-                            [ui.available_width(), 22.0],
-                            egui::Button::new(
-                                RichText::new(" Beenden")
-                                    .size(11.0)
-                                    .color(Color32::from_rgb(160, 40, 40)),
-                            ),
-                        )
-                        .clicked()
-                    {
-                        actions.quit = true;
+                ui.spacing_mut().item_spacing.x = FOOTER_SPACING;
+                ui.spacing_mut().button_padding.x = FOOTER_PAD_X;
+                let width = ((ui.available_width() - 2.0 * FOOTER_SPACING) / 3.0).max(0.0);
+                let size = egui::vec2(width, 22.0);
+                for b in tray_footer_buttons(lang, mr_badge) {
+                    let response = match b.action {
+                        FooterAction::OpenMrs => footer_mrs_button(ui, size, &b, &config.theme),
+                        FooterAction::OpenMain => {
+                            let text = RichText::new(&b.label).size(11.0);
+                            footer_button(ui, size, egui::Button::new(text)).response
+                        }
+                        FooterAction::Quit => {
+                            let text = RichText::new(&b.label).size(11.0).color(COLOR_QUIT);
+                            footer_button(ui, size, egui::Button::new(text)).response
+                        }
+                    };
+                    let response = match &b.tooltip {
+                        Some(tooltip) => response.on_hover_text(tooltip),
+                        None => response,
+                    };
+                    if response.clicked() {
+                        match b.action {
+                            FooterAction::OpenMain => actions.open_main = true,
+                            FooterAction::OpenMrs => actions.open_mrs = true,
+                            FooterAction::Quit => actions.quit = true,
+                        }
                     }
-                });
+                }
             });
         });
 
@@ -1053,6 +1215,211 @@ mod tests {
             std::path::PathBuf::from("/tmp/r/a.sln"),
         ));
         assert!(should_close_tray_popup(&a));
+
+        // E21: „Merge Requests“ öffnet das Hauptfenster → Popup schließt.
+        let mut a = TrayPopupActions::default();
+        a.open_mrs = true;
+        assert!(should_close_tray_popup(&a));
+    }
+
+    #[test]
+    fn tray_footer_buttons_order_badge_and_tooltips() {
+        // E21: Hauptfenster / Merge Requests / Beenden, Badge nur mit Zahl.
+        use crate::i18n::Language;
+        let de = tray_footer_buttons(Language::De, None);
+        let actions: Vec<FooterAction> = de.iter().map(|b| b.action).collect();
+        assert_eq!(
+            actions,
+            [
+                FooterAction::OpenMain,
+                FooterAction::OpenMrs,
+                FooterAction::Quit
+            ]
+        );
+        let labels: Vec<&str> = de.iter().map(|b| b.label.as_str()).collect();
+        assert_eq!(labels, ["Hauptfenster", "Merge Requests", "Beenden"]);
+        assert!(de.iter().all(|b| b.badge.is_none()));
+        assert_eq!(
+            de[1].tooltip.as_deref(),
+            Some("Hauptfenster mit Merge Requests öffnen")
+        );
+        assert!(de[0].tooltip.is_none() && de[2].tooltip.is_none());
+        // AccessKit-Namen: ohne Badge die Labels
+        let names: Vec<&str> = de.iter().map(|b| b.access_name.as_str()).collect();
+        assert_eq!(names, ["Hauptfenster", "Merge Requests", "Beenden"]);
+
+        let one = tray_footer_buttons(Language::De, Some(1));
+        assert_eq!(one[1].badge.as_deref(), Some("1"));
+        assert_eq!(
+            one[1].tooltip.as_deref(),
+            Some("Merge Requests – 1 Review wartet auf dich")
+        );
+        let many = tray_footer_buttons(Language::De, Some(3));
+        assert_eq!(many[1].badge.as_deref(), Some("3"));
+        assert_eq!(
+            many[1].tooltip.as_deref(),
+            Some("Merge Requests – 3 Reviews warten auf dich")
+        );
+        assert!(many[0].badge.is_none() && many[2].badge.is_none());
+        // Mit Badge trägt der AccessKit-Name die Zahl (Pill ist nur Grafik)
+        let names: Vec<&str> = many.iter().map(|b| b.access_name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Hauptfenster",
+                "Merge Requests – 3 Reviews warten auf dich",
+                "Beenden"
+            ]
+        );
+
+        let en = tray_footer_buttons(Language::En, Some(12));
+        let labels: Vec<&str> = en.iter().map(|b| b.label.as_str()).collect();
+        assert_eq!(labels, ["Main window", "Merge Requests", "Quit"]);
+        assert_eq!(en[1].badge.as_deref(), Some("12"));
+        assert_eq!(
+            en[1].tooltip.as_deref(),
+            Some("Merge requests – 12 reviews waiting for you")
+        );
+        assert_eq!(
+            en[1].access_name,
+            "Merge requests – 12 reviews waiting for you"
+        );
+        assert_eq!(en[0].access_name, "Main window");
+        assert_eq!(
+            tray_footer_buttons(Language::En, Some(1))[1]
+                .tooltip
+                .as_deref(),
+            Some("Merge requests – 1 review waiting for you")
+        );
+        assert_eq!(
+            tray_footer_buttons(Language::En, None)[1]
+                .tooltip
+                .as_deref(),
+            Some("Open main window with merge requests")
+        );
+        // 0 zählt wie kein Badge (E9).
+        let zero = tray_footer_buttons(Language::De, Some(0));
+        assert!(zero[1].badge.is_none());
+        assert_eq!(zero[1].tooltip, de[1].tooltip);
+        assert_eq!(zero[1].access_name, "Merge Requests");
+    }
+
+    /// Fußzeilen-Buttons im gerenderten Popup (AccessKit: Name, Rechteck).
+    fn footer_widgets(
+        lang: crate::i18n::Language,
+        badge: Option<usize>,
+    ) -> Vec<(String, egui::Rect)> {
+        use egui::accesskit::Role;
+        let ctx = egui::Context::default();
+        let mut config = AppConfig::default();
+        config.language = lang;
+        crate::ui::theme::apply_theme(&ctx, &config.theme);
+        egui_extras::install_image_loaders(&ctx);
+        ctx.enable_accesskit();
+        let mut widgets = Vec::new();
+        // Mehrere Durchläufe: egui misst im ersten
+        for _ in 0..3 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(POPUP_WIDTH, POPUP_MIN_H),
+                )),
+                ..egui::RawInput::default()
+            };
+            let output = ctx.run_ui(raw, |ui| {
+                // Wie im Tray-Viewport: äußeres CentralPanel um das Popup
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let mut actions = TrayPopupActions::default();
+                    let mut filters = HashMap::new();
+                    show_tray_popup_ui(ui, &[], &config, &mut actions, None, &mut filters, badge);
+                });
+            });
+            if let Some(update) = &output.platform_output.accesskit_update {
+                widgets = update
+                    .nodes
+                    .iter()
+                    .filter(|(_, n)| n.role() == Role::Button)
+                    .filter_map(|(_, n)| {
+                        let b = n.bounds()?;
+                        let name = n.label().unwrap_or_default().to_string();
+                        let rect = egui::Rect::from_min_max(
+                            egui::pos2(b.x0 as f32, b.y0 as f32),
+                            egui::pos2(b.x1 as f32, b.y1 as f32),
+                        );
+                        Some((name, rect))
+                    })
+                    .collect();
+            }
+            output.drop_without_applying_deltas();
+        }
+        // Fußzeile = unterste Zeile
+        let bottom = widgets
+            .iter()
+            .map(|(_, r)| r.center().y)
+            .fold(0.0, f32::max);
+        widgets.retain(|(_, r)| (r.center().y - bottom).abs() < 2.0);
+        widgets.sort_by(|a, b| a.1.left().total_cmp(&b.1.left()));
+        widgets
+    }
+
+    /// Breite von `t` in `size` px (Standard-Schrift).
+    fn text_w(t: &str, size: f32) -> f32 {
+        let ctx = egui::Context::default();
+        let mut w = 0.0;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            w = ui
+                .painter()
+                .layout_no_wrap(
+                    t.to_string(),
+                    egui::FontId::proportional(size),
+                    Color32::WHITE,
+                )
+                .size()
+                .x;
+        });
+        output.drop_without_applying_deltas();
+        w
+    }
+
+    #[test]
+    fn tray_footer_three_equal_buttons_fit_popup() {
+        // E21: drei gleich breite Buttons (Höhe 22) nebeneinander, ohne
+        // Überlappung im 360-px-Popup; Badge-Zahl im AccessKit-Namen.
+        use crate::i18n::Language;
+        for lang in [Language::De, Language::En] {
+            for badge in [None, Some(1), Some(12)] {
+                let case = format!("{lang:?} {badge:?}");
+                let row = footer_widgets(lang, badge);
+                let names: Vec<&str> = row.iter().map(|(n, _)| n.as_str()).collect();
+                let expected = tray_footer_buttons(lang, badge);
+                let access: Vec<&str> = expected.iter().map(|b| b.access_name.as_str()).collect();
+                assert_eq!(names, access, "{case}");
+                let w0 = row[0].1.width();
+                for (name, r) in &row {
+                    assert!((r.width() - w0).abs() < 0.5, "{case}: {name} {r:?} ≠ {w0}");
+                    assert!((r.height() - 22.0).abs() < 0.5, "{case}: {name} {r:?}");
+                    assert!(
+                        r.left() >= 0.0 && r.right() <= POPUP_WIDTH,
+                        "{case}: {name} {r:?}"
+                    );
+                }
+                for pair in row.windows(2) {
+                    assert!(pair[0].1.right() <= pair[1].1.left(), "{case}: {pair:?}");
+                }
+                // Inhalt passt ohne Kürzen: Text 11 px plus Icon bzw. Badge
+                let lead = match &expected[1].badge {
+                    Some(n) => footer_badge_width(text_w(n, FOOTER_BADGE_FONT)),
+                    None => FOOTER_ICON,
+                };
+                let needed =
+                    2.0 * FOOTER_PAD_X + lead + FOOTER_GAP + text_w(&expected[1].label, 11.0);
+                assert!(
+                    needed <= row[1].1.width(),
+                    "{case}: {needed} > {:?}",
+                    row[1].1
+                );
+            }
+        }
     }
 
     #[test]

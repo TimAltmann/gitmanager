@@ -17,6 +17,8 @@ mod imp {
     #[derive(Debug)]
     pub enum TrayAction {
         ShowMainWindow,
+        /// E21: Hauptfenster direkt in der MR-Ansicht
+        ShowMergeRequests,
         Refresh,
         OpenSettings,
         Quit,
@@ -49,6 +51,9 @@ mod imp {
         /// #3: Badge-Text fürs Popup (wartender Branch-Dialog/Fehler im
         /// Hauptfenster). Wird vom Main-Thread bei jedem Sync gesetzt.
         pub notice: Option<String>,
+        /// E21: wartende Reviews am Button „Merge Requests“ (aus
+        /// `MrSnapshot.badge`, `None` bei 0 oder nach Anmeldefehler).
+        pub mr_badge: Option<usize>,
         /// Task 6: pro-Repo Branch-Filter für die Tray-Dropdown-Suche
         /// (KEIN globales Suchfeld). Wird bei Close geleert.
         pub branch_filters: HashMap<PathBuf, String>,
@@ -66,6 +71,7 @@ mod imp {
                 last_toggle_at: None,
                 action_tx,
                 notice: None,
+                mr_badge: None,
                 branch_filters: HashMap::new(),
             }
         }
@@ -302,10 +308,11 @@ mod imp {
             let guard = lock_shared(shared);
             (guard.repos.clone(), guard.config.clone())
         };
-        // #3: Badge-Text (ein String-Clone nur bei gesetzter Notice).
-        let notice: Option<String> = {
+        // #3: Badge-Text (ein String-Clone nur bei gesetzter Notice),
+        // E21: Badge am Button „Merge Requests“.
+        let (notice, mr_badge): (Option<String>, Option<usize>) = {
             let guard = lock_shared(shared);
-            guard.notice.clone()
+            (guard.notice.clone(), guard.mr_badge)
         };
         // Task 6: Filter-State aus TrayShared laden (kein Lock während des
         // Renders halten) — nach dem Frame zurückschreiben bzw. bei Close leeren.
@@ -319,7 +326,7 @@ mod imp {
         // Kein Cache nötig: teuer waren die Deep-Clones, nicht der Sort.
         let tray_limit = config_arc.tray_icons.max_display.clamp(5, 50);
         let repos_visible = tray_popup::sorted_visible_refs(&repos_arc, &config_arc, tray_limit);
-        let popup_width: f32 = 360.0;
+        let popup_width: f32 = tray_popup::POPUP_WIDTH;
         let popup_height: f32 =
             tray_popup::popup_height_for_visible(&repos_visible, notice.as_deref());
         let popup_size = Vec2::new(popup_width, popup_height);
@@ -393,6 +400,7 @@ mod imp {
                         &mut tray_actions,
                         notice.as_deref(),
                         &mut branch_filters,
+                        mr_badge,
                     );
                 });
                 if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -443,6 +451,7 @@ mod imp {
         // #10: Sender unter kurzem Lock klonen, dann ohne gehaltenen Lock senden —
         // der Main-Thread verwirft bei WouldBlock sonst den ganzen Sync.
         let needs_root_repaint = tray_actions.open_main
+            || tray_actions.open_mrs
             || tray_actions.open_settings
             || tray_actions.quit
             || tray_actions.refresh
@@ -461,6 +470,9 @@ mod imp {
         }
         if tray_actions.open_main {
             let _ = action_tx.send(TrayAction::ShowMainWindow);
+        }
+        if tray_actions.open_mrs {
+            let _ = action_tx.send(TrayAction::ShowMergeRequests);
         }
         if tray_actions.quit {
             let _ = action_tx.send(TrayAction::Quit);

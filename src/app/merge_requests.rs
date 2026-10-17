@@ -346,7 +346,11 @@ impl MyApp {
         self.mr_last_refresh = Some(Instant::now());
         match data.glab_error {
             Some(kind) => self.set_glab_missing(kind),
-            None => self.mr_snapshot = Some(Box::new(data.snapshot)),
+            None => {
+                self.mr_snapshot = Some(Box::new(data.snapshot));
+                // E21: Badge im Tray beim nächsten Sync aktualisieren
+                self.mark_tray_dirty();
+            }
         }
         self.run_pending_mr_refresh();
     }
@@ -361,7 +365,11 @@ impl MyApp {
         if epoch == self.mr_auth_epoch {
             if let Some(snap) = self.mr_snapshot.as_deref_mut() {
                 match page {
-                    Ok(page) => merge_more_page(snap, page),
+                    Ok(page) => {
+                        merge_more_page(snap, page);
+                        // Review-Anfragen der Seite ändern das Badge (E21)
+                        self.mark_tray_dirty();
+                    }
                     Err(kind) => note_more_error(snap, host_key, kind),
                 }
             }
@@ -441,6 +449,15 @@ impl MyApp {
         }
         // Weckt `logic()` für die nächste Prüfung
         ctx.request_repaint_after(Duration::from_secs(60));
+    }
+
+    /// Tray-Button „Merge Requests“ (E21): Hauptfenster direkt in der
+    /// MR-Ansicht; neu geladen wird ohne Stand oder nach dem Intervall.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(super) fn show_mrs_from_tray(&mut self, ctx: &egui::Context) {
+        self.main_view = MainView::MergeRequests;
+        self.show_main_window(ctx);
+        self.refresh_mr_if_due();
     }
 
     /// Wechselt die Hauptansicht; der erste Wechsel in die MR-Ansicht lädt.
@@ -636,8 +653,8 @@ fn discovery_candidates(repos: &[RepoInfo], cfg: &MrConfig) -> Vec<String> {
 }
 
 /// Badge (E9): wartende Reviews; ausgeblendet bei 0, ohne Stand und nach
-/// einem Anmeldefehler.
-fn mr_badge(snapshot: Option<&MrSnapshot>) -> Option<usize> {
+/// einem Anmeldefehler. Auch für den Tray-Button (E21).
+pub(super) fn mr_badge(snapshot: Option<&MrSnapshot>) -> Option<usize> {
     let snap = snapshot?;
     let auth_failed = snap
         .per_host
@@ -934,6 +951,75 @@ mod tests {
         assert!(!app.mr_loading);
         assert_eq!(app.mr_snapshot.as_deref().map(|s| s.badge), Some(2));
         assert!(app.mr_last_refresh.is_some(), "Ende des Abrufs gemerkt");
+        assert!(app.error.is_none());
+    }
+
+    /// Neuer Stand (auch nachgeladene Seiten) → Tray-Badge beim nächsten
+    /// Sync aktualisieren (E21).
+    #[test]
+    fn new_snapshot_marks_tray_dirty() {
+        let mut app = test_app();
+        app.mr_loading = true;
+        app.mr_tx.send(loaded(0, 2)).expect("send");
+        app.poll_mr(&egui::Context::default());
+        assert!(app.tray_dirty);
+        app.tray_dirty = false;
+        app.mr_snapshot = Some(Box::new(MrSnapshot {
+            uninvolved: Some(UninvolvedList::default()),
+            per_host: vec![host_status(HOST)],
+            ..MrSnapshot::default()
+        }));
+        app.mr_more_pending = 1;
+        app.mr_tx
+            .send(MrResult::MorePage {
+                epoch: 0,
+                host_key: HOST.to_string(),
+                page: Ok(UninvolvedPage {
+                    host_key: HOST.to_string(),
+                    ..UninvolvedPage::default()
+                }),
+            })
+            .expect("send");
+        app.poll_mr(&egui::Context::default());
+        assert!(app.tray_dirty);
+        assert_eq!(mr_badge(app.mr_snapshot.as_deref()), None);
+    }
+
+    /// E21: Tray-Button „Merge Requests“ zeigt das Hauptfenster in der
+    /// MR-Ansicht; neu geladen wird nur ohne Stand oder nach dem Intervall.
+    #[test]
+    fn tray_show_mrs_switches_view_and_refreshes_only_when_due() {
+        let (mut app, glab) = fake_app();
+        with_extra_host(&mut app);
+        let ctx = egui::Context::default();
+        app.mr_snapshot = Some(Box::default());
+        app.mr_last_refresh = Some(Instant::now());
+        app.window_visible = false;
+        app.show_mrs_from_tray(&ctx);
+        assert_eq!(app.main_view, MainView::MergeRequests);
+        assert!(app.window_visible);
+        assert!(!app.mr_loading, "innerhalb des Intervalls kein Abruf");
+        assert!(glab.inner().take_calls().is_empty());
+        // Intervall (3 min) abgelaufen → Refresh
+        app.main_view = MainView::Repos;
+        app.window_visible = false;
+        app.mr_last_refresh = Instant::now().checked_sub(Duration::from_secs(4 * 60));
+        glab.inner().push(not_installed());
+        app.show_mrs_from_tray(&ctx);
+        assert_eq!(app.main_view, MainView::MergeRequests);
+        assert!(app.window_visible);
+        assert!(app.mr_loading);
+        settle(&mut app);
+        assert_eq!(glab.inner().take_calls().len(), 1);
+        // Ohne Stand lädt der erste Wechsel, auch im Intervall
+        let (mut app, glab) = fake_app();
+        with_extra_host(&mut app);
+        app.mr_last_refresh = Some(Instant::now());
+        glab.inner().push(not_installed());
+        app.show_mrs_from_tray(&ctx);
+        assert!(app.mr_loading);
+        settle(&mut app);
+        assert_eq!(glab.inner().take_calls().len(), 1);
         assert!(app.error.is_none());
     }
 

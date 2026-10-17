@@ -1108,6 +1108,8 @@ impl MyApp {
             let config = self.config.clone();
             // #3: Badge-Text (wartender Branch-Dialog/Fehler) gleich mit syncen.
             let notice = self.tray_notice();
+            // E21: Badge am Tray-Button „Merge Requests“ (letzter Stand).
+            let mr_badge = merge_requests::mr_badge(self.mr_snapshot.as_deref());
             // Poison-tolerant: recover from poisoned mutex instead of staling forever.
             let locked = match shared.try_lock() {
                 Ok(g) => Some(g),
@@ -1117,6 +1119,7 @@ impl MyApp {
             if let Some(mut guard) = locked {
                 guard.update_data(repos, config);
                 guard.notice = notice;
+                guard.mr_badge = mr_badge;
                 // Erfolgreich: dirty zurücksetzen.
                 self.tray_dirty = false;
                 self.last_tray_sync = Some(std::time::Instant::now());
@@ -1172,6 +1175,7 @@ impl MyApp {
         for action in actions {
             match action {
                 crate::tray_service::TrayAction::ShowMainWindow => self.show_main_window(ctx),
+                crate::tray_service::TrayAction::ShowMergeRequests => self.show_mrs_from_tray(ctx),
                 crate::tray_service::TrayAction::Refresh => self.start_scan(),
                 crate::tray_service::TrayAction::OpenSettings => {
                     self.show_settings = true;
