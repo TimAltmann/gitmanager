@@ -129,6 +129,8 @@ pub struct TrayPopupActions {
     pub open_main: bool,
     /// E21: Hauptfenster direkt in der MR-Ansicht öffnen
     pub open_mrs: bool,
+    /// `git fetch --all` für dieses Repo (Popup bleibt offen)
+    pub fetch_repo: Option<std::path::PathBuf>,
     pub open_settings: bool,
     pub quit: bool,
     pub close_popup: bool,
@@ -201,6 +203,47 @@ pub fn truncate_label(s: &str, max_chars: usize) -> String {
     }
     let head: String = s.chars().take(max_chars.saturating_sub(1)).collect();
     format!("{head}…")
+}
+
+/// Fetch-Zustand für die Fetch-Buttons im Tray (vom Hauptfenster gesynct).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrayFetching {
+    /// Scan oder Fetch läuft: Fetch-Buttons gesperrt
+    pub busy: bool,
+    /// Repo des laufenden manuellen Fetch (Spinner statt Button)
+    pub repo: Option<PathBuf>,
+}
+
+/// Zustand, den das Hauptfenster dem Tray-Popup mitgibt.
+#[derive(Clone, Copy)]
+pub struct TrayStatus<'a> {
+    /// #3: wartender Branch-Dialog/Fehler im Hauptfenster
+    pub notice: Option<&'a str>,
+    /// E21: wartende Reviews am Button „Merge Requests“
+    pub mr_badge: Option<usize>,
+    pub fetching: &'a TrayFetching,
+}
+
+/// Darstellung des Fetch-Buttons einer Repo-Zeile im Tray.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayFetchButton {
+    /// Klickbar
+    Ready,
+    /// Anderer Scan/Fetch läuft
+    Disabled,
+    /// Fetch für dieses Repo läuft (Spinner)
+    Running,
+}
+
+/// Zustand des Fetch-Buttons für `repo`.
+pub fn tray_fetch_button(fetching: &TrayFetching, repo: &std::path::Path) -> TrayFetchButton {
+    if fetching.repo.as_deref() == Some(repo) {
+        TrayFetchButton::Running
+    } else if fetching.busy {
+        TrayFetchButton::Disabled
+    } else {
+        TrayFetchButton::Ready
+    }
 }
 
 /// Entscheidet, ob das Tray-Popup nach den Actions geschlossen wird.
@@ -377,11 +420,15 @@ pub fn show_tray_popup_ui(
     repos: &[&RepoInfo],
     config: &AppConfig,
     actions: &mut TrayPopupActions,
-    notice: Option<&str>,
+    status: &TrayStatus<'_>,
     branch_filters: &mut HashMap<PathBuf, String>,
-    mr_badge: Option<usize>,
 ) {
     let lang = config.language;
+    let TrayStatus {
+        notice,
+        mr_badge,
+        fetching,
+    } = *status;
 
     // Header: Title + count + actions
     egui::Panel::top("tray_header")
@@ -571,6 +618,7 @@ pub fn show_tray_popup_ui(
                                 profile_agents: agents,
                                 active_agents: &active_agents,
                                 branch_filters,
+                                fetching,
                             },
                         );
                         ui.add_space(4.0);
@@ -585,6 +633,49 @@ pub fn show_tray_popup_ui(
     // Close on clicking outside? Handled via viewport close_requested
 }
 
+/// Breite für den Fetch-Button neben dem Branch-Dropdown (Button + Abstand).
+const TRAY_FETCH_SPACE: f32 = 30.0;
+
+/// Fetch-Button einer Repo-Zeile: wie im Branch-Popup des Hauptfensters
+/// (`git fetch --all`), Spinner während des Fetch für dieses Repo.
+fn tray_fetch_button_ui(
+    ui: &mut egui::Ui,
+    repo: &RepoInfo,
+    fetching: &TrayFetching,
+    actions: &mut TrayPopupActions,
+    lang: crate::i18n::Language,
+) {
+    let tooltip = tr(lang, "branch_refresh_tooltip");
+    match tray_fetch_button(fetching, &repo.path) {
+        TrayFetchButton::Running => {
+            ui.add(egui::Spinner::new().size(14.0))
+                .on_hover_text(&tooltip);
+        }
+        state => {
+            let button = egui::Button::image(
+                egui::Image::new(ICON_REFRESH)
+                    .fit_to_exact_size(Vec2::splat(12.0))
+                    .tint(ui.visuals().text_color()),
+            )
+            .small();
+            let response = ui
+                .add_enabled(state == TrayFetchButton::Ready, button)
+                .on_hover_text(&tooltip)
+                .on_disabled_hover_text(&tooltip);
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    state == TrayFetchButton::Ready,
+                    &tooltip,
+                )
+            });
+            if response.clicked() {
+                actions.fetch_repo = Some(repo.path.clone());
+            }
+        }
+    }
+}
+
 // Task 6 fix (Finding 4): Params als Struct statt 8 Einzel-Args —
 // entfernt `#[allow(clippy::too_many_arguments)]`, kein Lint-Maskieren.
 // `actions` + `branch_filters` bleiben `&mut` (kein Split nötig,
@@ -597,6 +688,7 @@ pub struct TrayRepoRowParams<'a> {
     pub profile_agents: &'a [&'a crate::config::AgentProfile],
     pub active_agents: &'a [&'a crate::config::AgentProfile],
     pub branch_filters: &'a mut HashMap<PathBuf, String>,
+    pub fetching: &'a TrayFetching,
 }
 
 fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
@@ -608,6 +700,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
         profile_agents,
         active_agents,
         branch_filters,
+        fetching,
     } = p;
     let lang = config.language;
     let visuals = ui.visuals().clone();
@@ -651,8 +744,8 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
 
             ui.add_space(4.0);
 
-            // Row 2: Branch dropdown full width on own line
-            {
+            // Row 2: Branch-Dropdown, rechts daneben Fetch (git fetch --all)
+            ui.horizontal(|ui| {
                 let branches = &repo.branches;
                 let limit = tray_branch_limit(config.tray_branch_limit);
                 if !branches.is_empty() {
@@ -663,7 +756,8 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                     let mut filter_text =
                         branch_filters.get(&repo.path).cloned().unwrap_or_default();
                     let current = truncate_label(&repo.branch, TRAY_LABEL_MAX_CHARS);
-                    let combo_width = ui.available_width();
+                    // Platz für den Fetch-Button rechts daneben
+                    let combo_width = (ui.available_width() - TRAY_FETCH_SPACE).max(80.0);
                     // F3#8: Borrow statt Clone als Salt (wird sofort gehasht;
                     // Pfad lebt in `repos`, Eindeutigkeit bleibt Pfad-basiert).
                     egui::ComboBox::from_id_salt(("tray_branch", repo.path.as_os_str()))
@@ -754,7 +848,8 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                     )
                     .on_hover_text(&repo.branch);
                 }
-            }
+                tray_fetch_button_ui(ui, repo, fetching, actions, lang);
+            });
 
             ui.add_space(4.0);
 
@@ -1180,6 +1275,29 @@ mod tests {
     }
 
     #[test]
+    fn tray_fetch_button_states() {
+        let a = std::path::Path::new("/repos/a");
+        let idle = TrayFetching::default();
+        assert_eq!(tray_fetch_button(&idle, a), TrayFetchButton::Ready);
+        // Fetch für a läuft: Spinner bei a, gesperrt bei b
+        let running = TrayFetching {
+            busy: true,
+            repo: Some(a.to_path_buf()),
+        };
+        assert_eq!(tray_fetch_button(&running, a), TrayFetchButton::Running);
+        assert_eq!(
+            tray_fetch_button(&running, std::path::Path::new("/repos/b")),
+            TrayFetchButton::Disabled
+        );
+        // Scan oder Auto-Fetch ohne Repo: alle gesperrt
+        let busy = TrayFetching {
+            busy: true,
+            repo: None,
+        };
+        assert_eq!(tray_fetch_button(&busy, a), TrayFetchButton::Disabled);
+    }
+
+    #[test]
     fn branch_and_solution_keep_popup_open() {
         // Gewünscht: Branch-/Solution-Wechsel und Refresh schließen NICHT,
         // alles andere (Close, Main/Settings/Quit, externe Launches) schon.
@@ -1198,6 +1316,11 @@ mod tests {
 
         let mut a = TrayPopupActions::default();
         a.refresh = true;
+        assert!(!should_close_tray_popup(&a));
+
+        // Fetch im Tray: Popup bleibt offen (Branches danach wählen)
+        let mut a = TrayPopupActions::default();
+        a.fetch_repo = Some(std::path::PathBuf::from("/tmp/r"));
         assert!(!should_close_tray_popup(&a));
 
         let mut a = TrayPopupActions::default();
@@ -1331,7 +1454,13 @@ mod tests {
                 egui::CentralPanel::default().show(ui, |ui| {
                     let mut actions = TrayPopupActions::default();
                     let mut filters = HashMap::new();
-                    show_tray_popup_ui(ui, &[], &config, &mut actions, None, &mut filters, badge);
+                    let fetching = TrayFetching::default();
+                    let status = TrayStatus {
+                        notice: None,
+                        mr_badge: badge,
+                        fetching: &fetching,
+                    };
+                    show_tray_popup_ui(ui, &[], &config, &mut actions, &status, &mut filters);
                 });
             });
             if let Some(update) = &output.platform_output.accesskit_update {

@@ -509,6 +509,8 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "auto_fetch_off") => "Deaktiviert".to_string(),
         (Language::En, "auto_fetch_running") => "Auto-fetch running, try again shortly".to_string(),
         (Language::De, "auto_fetch_running") => "Auto-Fetch läuft, bitte kurz warten".to_string(),
+        (Language::En, "fetch_busy") => "A scan or fetch is already running, try again shortly".to_string(),
+        (Language::De, "fetch_busy") => "Scan oder Fetch läuft bereits, bitte kurz warten".to_string(),
 
         // ── Tray icon theme (Dark/Light) ─────────────────────────────
         (Language::En, "tray_icon_theme_title") => "Tray icon style".to_string(),
@@ -1721,6 +1723,7 @@ mod tests {
             "mrs_alias_of",
             "mrs_alias_remove",
             "mrs_extra_redundant",
+            "fetch_busy",
             "mrs_glab_pending",
         ];
         // Vollständigkeit: Liste ohne Dubletten, und jeder MR-Schlüssel aus

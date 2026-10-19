@@ -28,6 +28,8 @@ mod imp {
         AgentOpen(PathBuf, String),
         ExplorerOpen(PathBuf),
         ShellOpen(PathBuf),
+        /// `git fetch --all` für ein Repo (Fetch-Button im Tray)
+        FetchRepo(PathBuf),
     }
 
     /// Shared state between main app and tray service viewport
@@ -54,6 +56,8 @@ mod imp {
         /// E21: wartende Reviews am Button „Merge Requests“ (aus
         /// `MrSnapshot.badge`, `None` bei 0 oder nach Anmeldefehler).
         pub mr_badge: Option<usize>,
+        /// Fetch-Buttons: gesperrt während Scan/Fetch, Spinner am laufenden Repo
+        pub fetching: tray_popup::TrayFetching,
         /// Task 6: pro-Repo Branch-Filter für die Tray-Dropdown-Suche
         /// (KEIN globales Suchfeld). Wird bei Close geleert.
         pub branch_filters: HashMap<PathBuf, String>,
@@ -72,6 +76,7 @@ mod imp {
                 action_tx,
                 notice: None,
                 mr_badge: None,
+                fetching: tray_popup::TrayFetching::default(),
                 branch_filters: HashMap::new(),
             }
         }
@@ -310,9 +315,13 @@ mod imp {
         };
         // #3: Badge-Text (ein String-Clone nur bei gesetzter Notice),
         // E21: Badge am Button „Merge Requests“.
-        let (notice, mr_badge): (Option<String>, Option<usize>) = {
+        let (notice, mr_badge, fetching): (
+            Option<String>,
+            Option<usize>,
+            tray_popup::TrayFetching,
+        ) = {
             let guard = lock_shared(shared);
-            (guard.notice.clone(), guard.mr_badge)
+            (guard.notice.clone(), guard.mr_badge, guard.fetching.clone())
         };
         // Task 6: Filter-State aus TrayShared laden (kein Lock während des
         // Renders halten) — nach dem Frame zurückschreiben bzw. bei Close leeren.
@@ -398,9 +407,12 @@ mod imp {
                         &repos_visible,
                         &config_arc,
                         &mut tray_actions,
-                        notice.as_deref(),
+                        &tray_popup::TrayStatus {
+                            notice: notice.as_deref(),
+                            mr_badge,
+                            fetching: &fetching,
+                        },
                         &mut branch_filters,
-                        mr_badge,
                     );
                 });
                 if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -494,6 +506,9 @@ mod imp {
         }
         if let Some(path) = tray_actions.shell_open {
             let _ = action_tx.send(TrayAction::ShellOpen(path));
+        }
+        if let Some(path) = tray_actions.fetch_repo {
+            let _ = action_tx.send(TrayAction::FetchRepo(path));
         }
         if tray_actions.open_settings {
             let _ = action_tx.send(TrayAction::OpenSettings);

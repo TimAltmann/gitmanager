@@ -355,6 +355,8 @@ pub struct MyApp {
     mr_glab_error: Option<GlabErrorKind>,
     /// K1: Auschecken läuft für diesen MR (`iid`); hält `scanning` als Ref-Lock
     mr_checkout_busy: Option<u64>,
+    /// Repo, für das gerade ein manueller Fetch läuft (Spinner im Tray)
+    fetching_repo: Option<PathBuf>,
     /// K1: Wechsel eines bestehenden Klons wartet auf `execute_branch_switch`
     mr_switch: Option<MrSwitch>,
     /// K1: „Danach öffnen“ mit der IDE wartet auf den Rescan
@@ -466,6 +468,7 @@ impl MyApp {
             mr_glab_missing: false,
             mr_glab_error: None,
             mr_checkout_busy: None,
+            fetching_repo: None,
             mr_switch: None,
             pending_after_checkout: None,
             mr_notice: None,
@@ -661,6 +664,7 @@ impl MyApp {
                     // eines noch laufenden manuellen Laufs nicht löschen.
                     if !is_auto {
                         self.scanning = false;
+                        self.fetching_repo = None;
                     }
                     // I1: nur Auto-FetchDone löscht auto_fetching — manueller
                     // Fetch (is_auto=false) lässt einen laufenden Auto-Fetch in Ruhe.
@@ -711,6 +715,7 @@ impl MyApp {
                     // sofortiges Back-to-Back mit Panic-Loop).
                     self.scanning = false;
                     self.mr_checkout_busy = None;
+                    self.fetching_repo = None;
                     self.auto_fetching = false;
                     self.last_auto_fetch = Some(std::time::Instant::now());
                     // F1#F2: gemerkten Refresh auch nach Abort nachholen
@@ -1197,6 +1202,11 @@ impl MyApp {
             let notice = self.tray_notice();
             // E21: Badge am Tray-Button „Merge Requests“ (letzter Stand).
             let mr_badge = merge_requests::mr_badge(self.mr_snapshot.as_deref());
+            // Fetch-Buttons im Tray: gesperrt während Scan/Fetch, Spinner am Repo
+            let fetching = crate::ui::tray_popup::TrayFetching {
+                busy: self.scanning || self.auto_fetching,
+                repo: self.fetching_repo.clone(),
+            };
             // Poison-tolerant: recover from poisoned mutex instead of staling forever.
             let locked = match shared.try_lock() {
                 Ok(g) => Some(g),
@@ -1207,6 +1217,7 @@ impl MyApp {
                 guard.update_data(repos, config);
                 guard.notice = notice;
                 guard.mr_badge = mr_badge;
+                guard.fetching = fetching;
                 // Erfolgreich: dirty zurücksetzen.
                 self.tray_dirty = false;
                 self.last_tray_sync = Some(std::time::Instant::now());
@@ -1264,6 +1275,7 @@ impl MyApp {
                 crate::tray_service::TrayAction::ShowMainWindow => self.show_main_from_tray(ctx),
                 crate::tray_service::TrayAction::ShowMergeRequests => self.show_mrs_from_tray(ctx),
                 crate::tray_service::TrayAction::Refresh => self.start_scan(),
+                crate::tray_service::TrayAction::FetchRepo(path) => self.start_repo_fetch(path),
                 crate::tray_service::TrayAction::OpenSettings => {
                     self.show_settings = true;
                     self.settings_state = Some(SettingsState::from_config(&self.config));
@@ -1460,6 +1472,77 @@ impl MyApp {
 
     #[cfg(not(target_os = "windows"))]
     fn sync_tray_service(&mut self) {}
+
+    /// Manueller `git fetch --all` für ein Repo (Branch-Popup im Hauptfenster,
+    /// Fetch-Button im Tray): im Hintergrund, danach Rescan (`FetchDone`).
+    fn start_repo_fetch(&mut self, repo_path: PathBuf) {
+        let lang = self.config.language;
+        // L2: wie start_scan — kein manueller Fetch während
+        // Auto-Fetch läuft (Ref-Race); Request verwerfen + Hinweis.
+        if self.auto_fetching {
+            self.status_message = Some(tr(lang, "auto_fetch_running"));
+            self.status_message_time = Some(std::time::Instant::now());
+            return;
+        }
+        // Ein Scan/Fetch läuft schon (Tray-Stand kann veraltet sein): kein
+        // zweiter Fetch auf dieselben Refs
+        if self.scanning {
+            self.status_message = Some(tr(lang, "fetch_busy"));
+            self.status_message_time = Some(std::time::Instant::now());
+            return;
+        }
+        let path_clone = repo_path.clone();
+        let cfg = self.config.clone();
+        let tx = self.scan_tx.clone();
+        self.scanning = true;
+        // Manueller Fetch = frische Refs: Auto-Timer zurücksetzen,
+        // damit der periodische Fetch nicht Sekunden später doppelt läuft.
+        self.last_auto_fetch = Some(std::time::Instant::now());
+        self.status_message = Some(tr_fmt(
+            lang,
+            "fetching_branches",
+            &[&repo_path.display().to_string()],
+        ));
+        self.status_message_time = Some(std::time::Instant::now());
+        std::thread::spawn(move || {
+            // H3: Panic vor send darf `scanning` nicht hängen
+            // lassen — FetchAborted resettet Flags ohne Listen-Wipe.
+            let msg = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let fetch_res = crate::git::fetch_all(&path_clone);
+                let (fetch_error, fetch_partial, fetch_is_fetch_error) = match fetch_res {
+                    Ok(()) => (None, false, false),
+                    Err(e) => {
+                        let (msg, partial, is_fetch) = fetch_error_parts(&e);
+                        eprintln!("Fetch fehlgeschlagen für {}: {msg}", path_clone.display());
+                        (Some(msg), partial, is_fetch)
+                    }
+                };
+                let repos = crate::scanner::scan_repos(&cfg);
+                (fetch_error, fetch_partial, fetch_is_fetch_error, repos)
+            })) {
+                Ok((fetch_error, fetch_partial, fetch_is_fetch_error, repos)) => {
+                    ScanResult::FetchDone {
+                        repos,
+                        fetch_error,
+                        fetch_partial,
+                        fetch_is_fetch_error,
+                        is_auto: false,
+                    }
+                }
+                Err(_) => {
+                    eprintln!("Manueller Fetch-Thread abgestürzt (panic vor send)");
+                    ScanResult::FetchAborted {
+                        reason_key: "fetch_aborted",
+                    }
+                }
+            };
+            let _ = tx.send(msg);
+        });
+        self.fetching_repo = Some(repo_path);
+        // Spinner/gesperrte Fetch-Buttons auch im Tray
+        self.mark_tray_dirty();
+        self.sync_tray_service();
+    }
 
     fn record_usage(&mut self, repo_path: &Path, usage_type: UsageType) {
         let key = crate::config::AppConfig::repo_state_key(repo_path);
@@ -2653,66 +2736,8 @@ impl eframe::App for MyApp {
                         self.start_scan();
                     }
                 }
-                // L2: wie start_scan — kein manueller Fetch während
-                // Auto-Fetch läuft (Ref-Race); Request verwerfen + Hinweis.
-                if self.auto_fetching && actions.fetch_branches.is_some() {
-                    self.status_message = Some(tr(lang, "auto_fetch_running"));
-                    self.status_message_time = Some(std::time::Instant::now());
-                    actions.fetch_branches = None;
-                }
                 if let Some(repo_path) = actions.fetch_branches {
-                    let path_clone = repo_path.clone();
-                    let cfg = self.config.clone();
-                    let tx = self.scan_tx.clone();
-                    self.scanning = true;
-                    // Manueller Fetch = frische Refs: Auto-Timer zurücksetzen,
-                    // damit der periodische Fetch nicht Sekunden später doppelt läuft.
-                    self.last_auto_fetch = Some(std::time::Instant::now());
-                    self.status_message = Some(tr_fmt(
-                        lang,
-                        "fetching_branches",
-                        &[&repo_path.display().to_string()],
-                    ));
-                    self.status_message_time = Some(std::time::Instant::now());
-                    std::thread::spawn(move || {
-                        // H3: Panic vor send darf `scanning` nicht hängen
-                        // lassen — FetchAborted resettet Flags ohne Listen-Wipe.
-                        let msg =
-                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                let fetch_res = crate::git::fetch_all(&path_clone);
-                                let (fetch_error, fetch_partial, fetch_is_fetch_error) =
-                                    match fetch_res {
-                                        Ok(()) => (None, false, false),
-                                        Err(e) => {
-                                            let (msg, partial, is_fetch) = fetch_error_parts(&e);
-                                            eprintln!(
-                                                "Fetch fehlgeschlagen für {}: {msg}",
-                                                path_clone.display()
-                                            );
-                                            (Some(msg), partial, is_fetch)
-                                        }
-                                    };
-                                let repos = crate::scanner::scan_repos(&cfg);
-                                (fetch_error, fetch_partial, fetch_is_fetch_error, repos)
-                            })) {
-                                Ok((fetch_error, fetch_partial, fetch_is_fetch_error, repos)) => {
-                                    ScanResult::FetchDone {
-                                        repos,
-                                        fetch_error,
-                                        fetch_partial,
-                                        fetch_is_fetch_error,
-                                        is_auto: false,
-                                    }
-                                }
-                                Err(_) => {
-                                    eprintln!("Manueller Fetch-Thread abgestürzt (panic vor send)");
-                                    ScanResult::FetchAborted {
-                                        reason_key: "fetch_aborted",
-                                    }
-                                }
-                            };
-                        let _ = tx.send(msg);
-                    });
+                    self.start_repo_fetch(repo_path);
                 }
                 if let Some(repo_path) = actions.explorer_open {
                     self.open_explorer(&repo_path);
@@ -2970,6 +2995,7 @@ mod tests {
             mr_glab_missing: false,
             mr_glab_error: None,
             mr_checkout_busy: None,
+            fetching_repo: None,
             mr_switch: None,
             pending_after_checkout: None,
             mr_notice: None,
@@ -3297,6 +3323,54 @@ mod tests {
             app.auto_fetching,
             "manual FetchDone must not clear auto flag"
         );
+    }
+
+    #[test]
+    fn repo_fetch_from_tray_refused_while_busy() {
+        // Tray-Stand kann veraltet sein: kein zweiter Fetch auf dieselben Refs
+        let mut app = test_app();
+        app.scanning = true;
+        app.start_repo_fetch(PathBuf::from("/repos/a"));
+        assert_eq!(app.fetching_repo, None);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some(tr(app.config.language, "fetch_busy").as_str())
+        );
+        let mut app = test_app();
+        app.auto_fetching = true;
+        app.start_repo_fetch(PathBuf::from("/repos/a"));
+        assert!(!app.scanning);
+        assert_eq!(app.fetching_repo, None);
+    }
+
+    #[test]
+    fn repo_fetch_marks_repo_until_fetch_done() {
+        let mut app = test_app();
+        let dir = tempfile::tempdir().unwrap();
+        app.start_repo_fetch(dir.path().to_path_buf());
+        assert!(app.scanning);
+        assert_eq!(app.fetching_repo.as_deref(), Some(dir.path()));
+        // Auto-FetchDone lässt den manuellen Fetch in Ruhe
+        app.scan_tx
+            .send(ScanResult::FetchDone {
+                repos: vec![],
+                fetch_error: None,
+                fetch_partial: false,
+                fetch_is_fetch_error: false,
+                is_auto: true,
+            })
+            .unwrap();
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(app.fetching_repo.is_some());
+        // Ende des manuellen Fetch (Worker oder Abbruch) gibt das Repo frei
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.fetching_repo.is_some() && std::time::Instant::now() < until {
+            app.poll_scan(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(app.fetching_repo, None);
+        assert!(!app.scanning);
     }
 
     #[test]
