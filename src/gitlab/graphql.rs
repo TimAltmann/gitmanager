@@ -27,6 +27,16 @@ pub const MENTIONS_MAX_PAGES: usize = 3;
 /// Versuche je Abfrage beim Schema-Fallback; GitLab meldet höchstens 5
 /// Fehler je Antwort.
 pub const MAX_ATTEMPTS: usize = 4;
+/// Wiederholungen, wenn ein ausgelasteter Server die Abfrage mit „Timeout on
+/// …“ ohne Daten ablehnt (z. B. „Timeout on validation of query“).
+pub const TIMEOUT_RETRIES: usize = 2;
+/// Pause vor der n-ten Wiederholung nach einem Server-Timeout.
+fn timeout_backoff(retry: usize) -> std::time::Duration {
+    if cfg!(test) {
+        return std::time::Duration::ZERO;
+    }
+    std::time::Duration::from_secs(2 * retry as u64)
+}
 /// GitLab-Grenze für den Abfragetext; nur in Tests geprüft.
 #[cfg_attr(not(test), allow(dead_code))]
 pub const MAX_QUERY_CHARS: usize = 10_000;
@@ -798,6 +808,7 @@ pub fn run_query_with(
     }
     let mut learned = Vec::new();
     let mut attempt = 1;
+    let mut timeouts = 0;
     let (out, json) = loop {
         let out = match runner.run(prepare(graphql_request(host_key, &query))) {
             Ok(out) => out,
@@ -808,6 +819,11 @@ pub fn run_query_with(
             }
         };
         let json = out.json();
+        if timeouts < TIMEOUT_RETRIES && json.as_ref().is_some_and(is_server_timeout) {
+            timeouts += 1;
+            std::thread::sleep(timeout_backoff(timeouts));
+            continue;
+        }
         if attempt < MAX_ATTEMPTS {
             let mut changed = false;
             for err in json.as_ref().map(schema_errors).unwrap_or_default() {
@@ -835,6 +851,15 @@ pub fn run_query_with(
     }
     schema.removed.extend(learned);
     result
+}
+
+/// Antwort ohne Daten, deren Fehler alle Zeitüberschreitungen des Servers
+/// sind („Timeout on validation of query“, „Timeout on …“): bei Last
+/// vorübergehend, eine Wiederholung lohnt.
+fn is_server_timeout(json: &Value) -> bool {
+    let has_data = json.get("data").is_some_and(|d| !d.is_null());
+    let messages = graphql_messages(json);
+    !has_data && !messages.is_empty() && messages.iter().all(|m| m.starts_with("Timeout on "))
 }
 
 /// `data` aus der Antwort; ohne `data` oder ab HTTP 400 die Fehlerart.
@@ -1870,6 +1895,43 @@ mod tests {
             run_query(&runner, HOST, &mut schema, dashboard()),
             Err(GlabErrorKind::MissingContentType)
         );
+    }
+
+    #[test]
+    fn run_query_retries_server_timeouts() {
+        // Ausgelasteter Server: „Timeout on validation of query“ ohne Daten →
+        // dieselbe Abfrage wird wiederholt (gitlab.firma.example)
+        let timeout = r#"{"errors":[{"message":"Timeout on validation of query"}]}"#;
+        let runner = gated();
+        let mut schema = HostSchema::default();
+        runner.inner().push(reply(timeout));
+        runner.inner().push(reply(CURRENT_USER_NULL));
+        let got = run_query(&runner, HOST, &mut schema, dashboard()).expect("zweiter Versuch");
+        assert!(got.errors.is_empty());
+        let calls = runner.inner().take_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].request.args, calls[1].request.args);
+
+        // Bleibt der Server zu langsam: nach TIMEOUT_RETRIES Wiederholungen
+        // die Meldung des Servers
+        for _ in 0..=TIMEOUT_RETRIES {
+            runner.inner().push(reply(timeout));
+        }
+        assert_eq!(
+            run_query(&runner, HOST, &mut schema, dashboard()),
+            Err(GlabErrorKind::GraphQl(strings(&[
+                "Timeout on validation of query"
+            ])))
+        );
+        assert_eq!(runner.inner().take_calls().len(), TIMEOUT_RETRIES + 1);
+        assert_eq!(runner.inner().pending(), 0);
+
+        // Teilerfolg mit Timeout eines Feldes: Daten da, keine Wiederholung
+        let partial = r#"{"data":{"currentUser":{"username":"taltmann","todos":null}},"errors":[{"message":"Timeout on CurrentUser.todos","path":["currentUser","todos"]}]}"#;
+        runner.inner().push(reply(partial));
+        let got = run_query(&runner, HOST, &mut schema, mentions(None)).expect("Teilerfolg");
+        assert_eq!(got.errors, strings(&["Timeout on CurrentUser.todos"]));
+        assert_eq!(runner.inner().take_calls().len(), 1);
     }
 
     #[test]
