@@ -852,6 +852,9 @@ fn others_body(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrV
             EmptyKind::NoMatch => empty_block(ui, v, &tr(lang, "mr_filter_no_match"), None),
         }
     }
+    if v.has_data {
+        todos_hidden_hint(ui, v);
+    }
     if v.snap.hidden_by_selection > 0 {
         hidden_hint(ui, v, actions);
     }
@@ -875,6 +878,37 @@ fn hidden_hint(ui: &mut Ui, v: &View, actions: &mut MrViewActions) {
             {
                 actions.open_settings_mr_tab = true;
             }
+        });
+}
+
+/// Hinweiszeile, wenn GitLab die To-dos verbirgt (Token ohne „Todo: Read“):
+/// Erwähnungen in Kommentaren fehlen dann.
+fn todos_hidden_hint(ui: &mut Ui, v: &View) {
+    let lang = v.lang();
+    let hosts: Vec<&str> = v
+        .snap
+        .per_host
+        .iter()
+        .filter(|h| h.error.is_none() && h.todos_hidden)
+        .map(|h| h.host_key.as_str())
+        .collect();
+    if hosts.is_empty() {
+        return;
+    }
+    let mut text = tr(lang, "mr_todos_hidden");
+    if v.multi_host {
+        text = format!("{} · {text}", hosts.join(", "));
+    }
+    divider(ui, v);
+    Frame::new()
+        .inner_margin(Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.add(icon_image(ICON_WARNING, 12.0, v.p.text2));
+                ui.add(Label::new(RichText::new(text).size(11.0).color(v.p.text2)).wrap())
+                    .on_hover_text(tr(lang, "mr_todos_hidden_tt"));
+            });
         });
 }
 
