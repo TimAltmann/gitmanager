@@ -193,7 +193,7 @@ pub struct MergeRequest {
     /// Nur EE
     pub approvals_left: Option<u32>,
     pub pipeline: PipelineState,
-    /// `headPipeline.path`, sonst `detailedStatus.detailsPath` (E7)
+    /// `headPipeline.path` (E7)
     pub pipeline_path: Option<String>,
     pub threads_open: u32,
     pub threads_resolved: u32,
@@ -288,7 +288,7 @@ impl MergeRequest {
             approvals_required,
             approvals_left,
             pipeline,
-            pipeline_path: head_pipeline.and_then(|p| p.path.or(p.details_path)),
+            pipeline_path: head_pipeline.and_then(|p| p.path),
             threads_open: resolvable_discussions.unwrap_or(0).saturating_sub(resolved),
             threads_resolved: resolved,
             detailed_merge_status,
@@ -1121,8 +1121,7 @@ mod tests {
             let path = format!("/{project}/-/pipelines/{}", 9000 + self.0.iid.unwrap_or(0));
             self.0.head_pipeline = Some(PipelineNode {
                 status: Some(status.to_string()),
-                path: Some(path.clone()),
-                details_path: Some(path),
+                path: Some(path),
             });
             self
         }
@@ -2047,8 +2046,7 @@ mod tests {
             web_path: Some("/g/sub/p/-/merge_requests/5".to_string()),
             head_pipeline: Some(PipelineNode {
                 status: Some("MANUAL".to_string()),
-                path: None,
-                details_path: Some("/g/sub/p/-/pipelines/3".to_string()),
+                path: Some("/g/sub/p/-/pipelines/3".to_string()),
             }),
             resolvable_discussions: Some(5),
             resolved_discussions: Some(2),
@@ -2336,19 +2334,18 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_url_missing_pipeline_or_details_fallback() {
+    fn pipeline_url_missing_pipeline_or_path() {
         let mr = Mr::new(1, "g/p", ME, "2026-10-17T09:00:00Z").mr();
         assert_eq!(mr.pipeline, PipelineState::NoPipeline);
         assert_eq!(pipeline_url(&mr), None);
+        // Status ohne Pfad: angezeigt, aber nicht klickbar
         let mut node = Mr::new(1, "g/p", ME, "2026-10-17T09:00:00Z")
             .pipeline("FAILED")
             .node();
         node.head_pipeline.as_mut().unwrap().path = None;
-        node.head_pipeline.as_mut().unwrap().details_path = Some("/g/p/-/pipelines/8".to_string());
-        assert_eq!(
-            pipeline_url(&Mr(node).mr()).as_deref(),
-            Some("https://gitlab.example.com/g/p/-/pipelines/8")
-        );
+        let mr = Mr(node).mr();
+        assert_eq!(mr.pipeline, PipelineState::Failed);
+        assert_eq!(pipeline_url(&mr), None);
     }
 
     #[test]

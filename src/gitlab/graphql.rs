@@ -422,14 +422,9 @@ fn mr_fragment() -> Fragment {
     let approver = Field::object("nodes", &["UserCore"], scalars("username name bot"));
     items.push(Field::object("approvedBy", &["UserCoreConnection"], vec![approver.into()]).into());
     items.extend(scalars("approvalsRequired approvalsLeft"));
-    let status = Field::object(
-        "detailedStatus",
-        &["DetailedStatus"],
-        scalars("detailsPath"),
-    );
-    let mut pipeline = scalars("status path");
-    pipeline.push(status.into());
-    items.push(Field::object("headPipeline", &["Pipeline"], pipeline).into());
+    // Kein `detailedStatus`: manche Server liefern es leer, obwohl es
+    // Pflichtfeld ist, und dann fällt die ganze `headPipeline` weg.
+    items.push(Field::object("headPipeline", &["Pipeline"], scalars("status path")).into());
     items.extend(scalars(
         "resolvableDiscussionsCount resolvedDiscussionsCount detailedMergeStatus",
     ));
@@ -885,7 +880,6 @@ pub struct PipelineNode {
     /// `PipelineStatusEnum` (`SUCCESS`, `RUNNING`, …)
     pub status: Option<String>,
     pub path: Option<String>,
-    pub details_path: Option<String>,
 }
 
 /// MR aus dem Fragment `Mr`; jedes Feld kann fehlen (Schema-Fallback,
@@ -1076,7 +1070,6 @@ fn parse_mr(v: &Value) -> Option<MrNode> {
         head_pipeline: pipeline.map(|p| PipelineNode {
             status: text(p, "status"),
             path: text(p, "path"),
-            details_path: p.get("detailedStatus").and_then(|d| text(d, "detailsPath")),
         }),
         resolvable_discussions: number(v, "resolvableDiscussionsCount"),
         resolved_discussions: number(v, "resolvedDiscussionsCount"),
@@ -1392,7 +1385,6 @@ mod tests {
             head_pipeline: Some(PipelineNode {
                 status: Some("SUCCESS".to_string()),
                 path: Some("/kern/backend-api/-/pipelines/9001".to_string()),
-                details_path: Some("/kern/backend-api/-/pipelines/9001".to_string()),
             }),
             resolvable_discussions: Some(3),
             resolved_discussions: Some(3),
@@ -1583,7 +1575,6 @@ mod tests {
         assert_eq!(mr.project_path.as_deref(), Some("kern/backend-api"));
         let pipeline = mr.head_pipeline.as_ref().expect("Pipeline");
         assert_eq!(pipeline.status.as_deref(), Some("RUNNING"));
-        assert_eq!(pipeline.details_path, None);
         assert_eq!(mr.source_branch_exists, None);
     }
 
@@ -2029,7 +2020,7 @@ mod tests {
     fn dashboard_text_contains_mr_fragment() {
         let text = dashboard().text();
         assert!(text.starts_with("query GmDashboard { metadata { version enterprise } currentUser { username name authored: authoredMergeRequests(state: opened, first: 50, sort: UPDATED_DESC) { pageInfo { hasNextPage endCursor } nodes { ...Mr } } reviewing: reviewRequestedMergeRequests("), "{text}");
-        let fragment = "fragment Mr on MergeRequest { id iid title draft webUrl webPath updatedAt sourceBranch targetBranch sourceBranchExists diffHeadSha project { fullPath } sourceProject { fullPath } author { username name } approvedBy { nodes { username name bot } } approvalsRequired approvalsLeft headPipeline { status path detailedStatus { detailsPath } } resolvableDiscussionsCount resolvedDiscussionsCount detailedMergeStatus reviewers { nodes { username name mergeRequestInteraction { reviewState } } } }";
+        let fragment = "fragment Mr on MergeRequest { id iid title draft webUrl webPath updatedAt sourceBranch targetBranch sourceBranchExists diffHeadSha project { fullPath } sourceProject { fullPath } author { username name } approvedBy { nodes { username name bot } } approvalsRequired approvalsLeft headPipeline { status path } resolvableDiscussionsCount resolvedDiscussionsCount detailedMergeStatus reviewers { nodes { username name mergeRequestInteraction { reviewState } } } }";
         assert!(text.ends_with(fragment), "{text}");
         assert_eq!(text.matches("...Mr").count(), 2);
         assert_eq!(text.matches("fragment Mr").count(), 1);
@@ -2096,7 +2087,6 @@ mod tests {
         for field in ["status", "path"] {
             assert!(query.reduce(&removed("Pipeline", field)));
         }
-        assert!(query.reduce(&removed("DetailedStatus", "detailsPath")));
         assert!(!query.text().contains("headPipeline"));
         // gleicher Fehler noch einmal: keine Änderung
         assert!(!query.reduce(&removed("Pipeline", "status")));

@@ -683,10 +683,20 @@ fn note(partial: &mut Vec<(MrPart, GlabErrorKind)>, part: MrPart, kind: GlabErro
 
 /// Teilerfolg (`data` neben `errors`, z. B. ein Feld `null`): die Daten
 /// bleiben, die Meldungen gehen als Teilfehler in den Host-Status.
-fn note_graphql(partial: &mut Vec<(MrPart, GlabErrorKind)>, part: MrPart, errors: Vec<String>) {
+fn note_graphql(partial: &mut Vec<(MrPart, GlabErrorKind)>, part: MrPart, mut errors: Vec<String>) {
+    // Ein leer geliefertes Pflichtfeld trifft nur einzelne Knoten (GraphQL
+    // setzt den nächsten nullbaren Elternknoten auf null); die Daten sind
+    // da, also kein Banner „… konnten nicht geladen werden“.
+    errors.retain(|m| !is_null_violation(m));
     if !errors.is_empty() {
         note(partial, part, GlabErrorKind::GraphQl(errors));
     }
+}
+
+/// „Cannot return null for non-nullable field Typ.feld“ (Serverdaten, kein
+/// Abfrage- oder Rechteproblem).
+fn is_null_violation(message: &str) -> bool {
+    message.starts_with("Cannot return null for non-nullable field")
 }
 
 /// Kennt der Server `not: {authorUsername}` nicht (Schema-Fallback), zählt
@@ -2005,6 +2015,49 @@ mod tests {
         assert_eq!(ops(&fake.take_calls()), vec!["version", "GmDashboard"]);
         assert_eq!(got.snapshot.per_host[0].error, Some(GlabErrorKind::Timeout));
         assert!(got.snapshot.per_host[0].partial.is_empty());
+    }
+
+    #[test]
+    fn fetch_snapshot_ignores_null_violations_with_data() {
+        // Server liefert ein Pflichtfeld leer (z. B. `Pipeline.detailedStatus`
+        // bei gitlab.firma.example): die Daten sind da, also kein Banner
+        // „… konnten nicht geladen werden“. Echte Teilfehler bleiben.
+        let mut dashboard: Value = serde_json::from_str(DASHBOARD_EE).expect("Fixture");
+        dashboard["errors"] = json!([
+            {
+                "message": "Cannot return null for non-nullable field Pipeline.detailedStatus",
+                "path": ["currentUser", "authored", "nodes", 0, "headPipeline", "detailedStatus"]
+            },
+            { "message": "Review-Anfragen nicht verfügbar", "path": ["currentUser"] }
+        ]);
+        let runner = gated();
+        let fake = runner.inner();
+        fake.push(version_reply("1.123.0"));
+        fake.push(gql(&dashboard.to_string()));
+        let mut mentions: Value = serde_json::from_str(&mentions_last_page()).expect("Fixture");
+        mentions["errors"] = json!([{
+            "message": "Cannot return null for non-nullable field Pipeline.detailedStatus",
+            "path": ["currentUser", "todos", "nodes", 1, "targetEntity", "headPipeline"]
+        }]);
+        fake.push(gql(&mentions.to_string()));
+        let got = fetch_snapshot(
+            &runner,
+            &host_map(&[HOST]),
+            &[],
+            &MrConfig::default(),
+            false,
+        );
+        assert_eq!(fake.pending(), 0);
+        let status = &got.snapshot.per_host[0];
+        assert_eq!(status.error, None);
+        assert_eq!(
+            status.partial,
+            vec![(
+                MrPart::Dashboard,
+                GlabErrorKind::GraphQl(strings(&["Review-Anfragen nicht verfügbar"]))
+            )]
+        );
+        assert_eq!(iids(&got.snapshot.mine), vec![87, 305, 412]);
     }
 
     #[test]
