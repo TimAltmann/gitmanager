@@ -462,8 +462,8 @@ pub struct HostStatus {
     pub error: Option<GlabErrorKind>,
     /// Teilfehler; die übrigen Daten des Hosts bleiben gültig
     pub partial: Vec<(MrPart, GlabErrorKind)>,
-    /// GitLab verbirgt die To-dos (Token ohne „Todo: Read“): Erwähnungen in
-    /// Kommentaren fehlen, die in Beschreibungen kommen aus der Suche
+    /// GitLab verbirgt die To-dos vor dem Token (feingranular ohne „Todo:
+    /// Read“): Erwähnungen fehlen ganz
     pub todos_hidden: bool,
 }
 
@@ -473,8 +473,7 @@ pub struct HostRaw {
     pub host_key: String,
     /// `None`, wenn das Dashboard nicht geladen werden konnte
     pub dashboard: Option<Dashboard>,
-    /// Offene Erwähnungen aller geladenen Seiten und der Suche in den
-    /// Beschreibungen (dieselbe MR auch mehrfach)
+    /// Offene Erwähnungen aller geladenen Seiten
     pub mentions: Vec<MentionNode>,
     /// `None` = „Nicht beteiligt“ nicht abgefragt oder fehlgeschlagen
     pub uninvolved: Option<Vec<ProjectMrs>>,

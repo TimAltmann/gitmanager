@@ -401,6 +401,8 @@ pub fn host_chip(probe: &HostProbe) -> (&'static str, Vec<String>) {
     match &probe.error {
         Some(kind) => error_chip(kind),
         None => match probe.rights_gitmanager {
+            // Ansicht geht, aber ohne Erwähnungen
+            GitManagerRights::Ok if probe.todos_hidden => ("mrs_state_limited", Vec::new()),
             GitManagerRights::Ok => ("mrs_state_ready", Vec::new()),
             GitManagerRights::Missing => ("mrs_state_rights_missing", Vec::new()),
             GitManagerRights::Unknown => ("mr_err_unknown", Vec::new()),
@@ -441,7 +443,8 @@ fn chip_tone(key: &str) -> Tone {
     match key {
         "mrs_state_ready" => Tone::Ok,
         "mrs_state_checking" => Tone::Neutral,
-        "mrs_state_unreachable"
+        "mrs_state_limited"
+        | "mrs_state_unreachable"
         | "mrs_state_tls"
         | "mr_glab_too_old"
         | "mr_err_content_type"
@@ -1389,6 +1392,7 @@ fn probe_details(ui: &mut Ui, t: &Tab, probe: &HostProbe) {
             &tr(lang, "mrs_rights_gitmanager_ok"),
         );
     }
+    todos_hidden_line(ui, t, probe.todos_hidden);
     glab_rights(ui, t, probe.rights_glab);
     if !probe.scopes.is_empty() {
         ui.horizontal_wrapped(|ui| {
@@ -1404,6 +1408,20 @@ fn probe_details(ui: &mut Ui, t: &Tab, probe: &HostProbe) {
                 chip(ui, scope, fill, None, color);
             }
         });
+    }
+}
+
+/// Warnung, wenn GitLab die To-dos vor dem Token verbirgt: Erwähnungen
+/// fehlen dann in der Ansicht.
+fn todos_hidden_line(ui: &mut Ui, t: &Tab, hidden: bool) {
+    if hidden {
+        status_line(
+            ui,
+            ICON_WARNING,
+            t.p.warn_text,
+            &tr(t.lang, "mrs_todos_hidden"),
+        );
+        wrapped(ui, &tr(t.lang, "mr_todos_hidden_fix"), 11.0, t.p.text2);
     }
 }
 
@@ -1609,6 +1627,7 @@ fn preview(ui: &mut Ui, t: &Tab, check: &TokenCheck) {
         GitManagerRights::Unknown => ("mr_err_unknown", ICON_WARNING, p.warn_text),
     };
     status_line(ui, icon, color, &format!("GitManager: {}", tr(lang, key)));
+    todos_hidden_line(ui, t, check.todos_hidden);
     glab_rights(ui, t, check.rights_glab);
     if check.downgrade_warning {
         status_line(
@@ -2311,8 +2330,14 @@ mod tests {
     #[test]
     fn host_chip_states() {
         use GitManagerRights::{Missing, Ok, Unknown};
+        let limited = HostProbe {
+            todos_hidden: true,
+            ..probe(None, Ok)
+        };
         let cases = [
             (probe(None, Ok), "mrs_state_ready"),
+            // Erwähnungen fehlen: gelb statt grün
+            (limited, "mrs_state_limited"),
             (probe(None, Missing), "mrs_state_rights_missing"),
             (
                 probe(Some(GlabErrorKind::InsufficientScope), Unknown),

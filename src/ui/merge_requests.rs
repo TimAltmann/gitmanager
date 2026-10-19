@@ -836,6 +836,7 @@ fn others_body(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrV
             (MrPart::Mentions, "mr_part_mentions"),
         ],
     );
+    todos_hidden_banner(ui, v, actions);
     for mr in filter_others(&v.snap.others, &chips) {
         show_row(ui, v, mr, RowKind::Other, actions);
     }
@@ -851,9 +852,6 @@ fn others_body(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrV
             ),
             EmptyKind::NoMatch => empty_block(ui, v, &tr(lang, "mr_filter_no_match"), None),
         }
-    }
-    if v.has_data {
-        todos_hidden_hint(ui, v);
     }
     if v.snap.hidden_by_selection > 0 {
         hidden_hint(ui, v, actions);
@@ -881,10 +879,12 @@ fn hidden_hint(ui: &mut Ui, v: &View, actions: &mut MrViewActions) {
         });
 }
 
-/// Hinweiszeile, wenn GitLab die To-dos verbirgt (Token ohne „Todo: Read“):
-/// Erwähnungen in Kommentaren fehlen dann.
-fn todos_hidden_hint(ui: &mut Ui, v: &View) {
+/// Warnbanner oben in „Von anderen“, wenn GitLab die To-dos vor dem Token
+/// verbirgt (feingranular ohne „Todo: Read“): alle Erwähnungen fehlen.
+/// Der Link öffnet die Einstellungen mit der Token-Prüfung.
+fn todos_hidden_banner(ui: &mut Ui, v: &View, actions: &mut MrViewActions) {
     let lang = v.lang();
+    let p = &v.p;
     let hosts: Vec<&str> = v
         .snap
         .per_host
@@ -899,16 +899,32 @@ fn todos_hidden_hint(ui: &mut Ui, v: &View) {
     if v.multi_host {
         text = format!("{} · {text}", hosts.join(", "));
     }
-    divider(ui, v);
     Frame::new()
-        .inner_margin(Margin::symmetric(12, 8))
+        .inner_margin(Margin::symmetric(12, 6))
         .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.add(icon_image(ICON_WARNING, 12.0, v.p.text2));
-                ui.add(Label::new(RichText::new(text).size(11.0).color(v.p.text2)).wrap())
-                    .on_hover_text(tr(lang, "mr_todos_hidden_tt"));
-            });
+            Frame::new()
+                .stroke(Stroke::new(1.0, p.warn_text))
+                .corner_radius(6)
+                .inner_margin(Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.add(icon_image(ICON_WARNING, 14.0, p.warn_icon));
+                        ui.label(RichText::new(text).size(12.0).color(p.warn_text));
+                    });
+                    ui.add(
+                        Label::new(
+                            RichText::new(tr(lang, "mr_todos_hidden_fix"))
+                                .size(11.0)
+                                .color(p.text2),
+                        )
+                        .wrap(),
+                    );
+                    if link_button(ui, &tr(lang, "mr_open_settings"), 11.0, p.title).clicked() {
+                        actions.open_settings_mr_tab = true;
+                    }
+                });
         });
 }
 

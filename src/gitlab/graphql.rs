@@ -24,8 +24,6 @@ pub const UNINVOLVED_PAGE_CHUNK: usize = 3;
 pub const ACCESS_CHUNK: usize = 50;
 /// Erwähnungen: höchstens so viele Seiten (erledigte To-dos häufen sich).
 pub const MENTIONS_MAX_PAGES: usize = 3;
-/// Suchtreffer je Projekt bei Erwähnungen in der Beschreibung.
-pub const DESCRIPTION_MENTIONS_PAGE_SIZE: usize = 20;
 /// Versuche je Abfrage beim Schema-Fallback; GitLab meldet höchstens 5
 /// Fehler je Antwort.
 pub const MAX_ATTEMPTS: usize = 4;
@@ -556,44 +554,6 @@ pub fn mentions(after: Option<&str>) -> Query {
     .fragment(mr_fragment())
 }
 
-/// `DESCRIPTION_MENTIONS`: offene MRs der Projekte, in deren Beschreibung
-/// `@me` steht, je Abfrage höchstens `UNINVOLVED_CHUNK` Pfade. Ergänzt die
-/// To-dos, die feingranulare Tokens ohne „Todo: Read“ leer liefern. Die
-/// Suche ist unscharf (auch `@me2`, `x@me.de`); `parse_description_mentions`
-/// prüft die Beschreibung selbst. Ohne Pfade keine Abfrage.
-pub fn description_mentions(paths: &[String], me: &str) -> Vec<Query> {
-    unique_paths(paths)
-        .chunks(UNINVOLVED_CHUNK)
-        .map(|chunk| {
-            let mut mr = scalars("description");
-            mr.push(Item::Spread(MR_FRAGMENT));
-            let mr_nodes = Field::object("nodes", &["MergeRequest"], mr);
-            let mrs = Field::object(
-                "mergeRequests",
-                &["MergeRequestConnection"],
-                vec![mr_nodes.into()],
-            )
-            .arg("state", "opened")
-            // Ohne `search` (alter Server) die neuesten offenen MRs; der
-            // Client prüft ohnehin jede Beschreibung
-            .opt_arg("search", "$search")
-            .opt_arg("in", "[DESCRIPTION]")
-            .opt_arg("sort", "UPDATED_DESC")
-            .arg("first", DESCRIPTION_MENTIONS_PAGE_SIZE);
-            let mut project = scalars("fullPath");
-            project.push(mrs.into());
-            let nodes = Field::object("nodes", &["Project"], project);
-            let projects = Field::object("projects", &["ProjectConnection"], vec![nodes.into()])
-                .arg("fullPaths", "$paths")
-                .arg("first", chunk.len());
-            Query::new("GmDescriptionMentions", vec![projects.into()])
-                .var("paths", "[String!]", Some(Value::from(chunk.to_vec())))
-                .var("search", "String", Some(Value::from(format!("@{me}"))))
-                .fragment(mr_fragment())
-        })
-        .collect()
-}
-
 /// `UNINVOLVED`: offene MRs anderer in den Projekten, je Abfrage höchstens
 /// `UNINVOLVED_CHUNK` Pfade. Ohne Pfade keine Abfrage.
 pub fn uninvolved(paths: &[String], me: &str) -> Vec<Query> {
@@ -643,13 +603,20 @@ pub fn uninvolved_page(pages: &[(String, String)], me: &str) -> Vec<Query> {
         .collect()
 }
 
-/// `ACCESS`: Benutzer, Server-Version und Zugriff je Projekt, höchstens
+/// `ACCESS`: Benutzer (samt Probe, ob GitLab die To-dos verbirgt),
+/// Server-Version und Zugriff je Projekt, höchstens
 /// `ACCESS_CHUNK` Pfade je Abfrage. Ohne Pfade eine Abfrage ohne
 /// `projects` (leeres `fullPaths` hieße „alle Projekte“).
 pub fn access(paths: &[String]) -> Vec<Query> {
     let build = |chunk: Option<&[String]>| {
+        let mut user = scalars("username name bot");
+        let todo = Field::object("nodes", &["Todo"], scalars("id"));
+        let todos = Field::object("todos", &["TodoConnection"], vec![page_info(), todo.into()])
+            .opt_arg("state", "[pending, done]")
+            .arg("first", 1);
+        user.push(todos.into());
         let mut root: Vec<Item> = vec![
-            Field::object("currentUser", CURRENT_USER, scalars("username name bot")).into(),
+            Field::object("currentUser", CURRENT_USER, user).into(),
             Field::object("metadata", &["Metadata"], scalars("version enterprise")).into(),
         ];
         let Some(chunk) = chunk else {
@@ -1016,8 +983,7 @@ pub struct Mentions {
     /// Nur offene MRs; je Erwähnung ein Eintrag
     pub items: Vec<MentionNode>,
     pub page: Option<PageInfo>,
-    /// Leere Seite, obwohl weitere folgen: GitLab blendet To-dos aus, die
-    /// das Token nicht lesen darf (feingranular ohne „Todo: Read“)
+    /// GitLab verbirgt die To-dos vor dem Token (siehe `todos_hidden`)
     pub hidden: bool,
 }
 
@@ -1061,6 +1027,8 @@ pub struct Access {
     pub enterprise: Option<bool>,
     pub me: Option<UserNode>,
     pub projects: Vec<ProjectNode>,
+    /// GitLab verbirgt die To-dos vor dem Token (Erwähnungen fehlen)
+    pub todos_hidden: bool,
 }
 
 fn text(v: &Value, key: &str) -> Option<String> {
@@ -1211,68 +1179,20 @@ pub fn parse_mentions(data: &Value) -> Mentions {
             })
         })
         .collect();
-    let page = page(user, "todos");
-    let hidden = nodes(user, "todos").is_some_and(|n| n.is_empty())
-        && page.as_ref().is_some_and(|p| p.has_next_page);
     Mentions {
         me: parse_user(user),
         items,
-        page,
-        hidden,
+        page: page(user, "todos"),
+        hidden: todos_hidden(user),
     }
 }
 
-/// Antwort auf `description_mentions`: nur MRs, deren Beschreibung `me`
-/// wirklich erwähnt; ohne Beschreibung (Feld entfallen) kein Treffer.
-pub fn parse_description_mentions(data: &Value, me: &str) -> Vec<MentionNode> {
-    let mut found = Vec::new();
-    for project in nodes(data, "projects").unwrap_or_default() {
-        let full_path = text(project, "fullPath");
-        for node in nodes(project, "mergeRequests").unwrap_or_default() {
-            let described = node.get("description").and_then(Value::as_str);
-            if !described.is_some_and(|d| mentions_user(d, me)) {
-                continue;
-            }
-            let Some(mut mr) = parse_mr(node) else {
-                continue;
-            };
-            if mr.project_path.is_none() {
-                mr.project_path.clone_from(&full_path);
-            }
-            found.push(MentionNode {
-                kind: Some(MentionKind::Description),
-                mr,
-                ..MentionNode::default()
-            });
-        }
-    }
-    found
-}
-
-/// `@user` als Erwähnung im Text, ohne Groß-/Kleinschreibung: davor kein
-/// Namens- oder Mail-Zeichen, danach kein weiteres Namenszeichen (ein Punkt
-/// am Satzende gehört nicht zum Namen).
-pub fn mentions_user(text: &str, user: &str) -> bool {
-    if user.is_empty() {
-        return false;
-    }
-    let name_char = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
-    let needle = format!("@{}", user.to_ascii_lowercase());
-    // Nur ASCII wird umgewandelt: die Byte-Positionen bleiben gleich
-    let text = text.to_ascii_lowercase();
-    text.match_indices(&needle).any(|(start, m)| {
-        let free_before = text[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !name_char(c) && c != '.' && c != '@');
-        let mut after = text[start + m.len()..].chars();
-        let free_after = match after.next() {
-            None => true,
-            Some('.') => after.next().is_none_or(|c| !name_char(c) && c != '.'),
-            Some(c) => !name_char(c),
-        };
-        free_before && free_after
-    })
+/// Leere Seite `todos`, obwohl weitere folgen: GitLab blendet To-dos aus,
+/// die das Token nicht lesen darf (feingranular ohne „Todo: Read“). Wer
+/// höchstens ein To-do hat, fällt nicht auf.
+fn todos_hidden(user: &Value) -> bool {
+    nodes(user, "todos").is_some_and(|n| n.is_empty())
+        && page(user, "todos").is_some_and(|p| p.has_next_page)
 }
 
 /// Ohne eigene MRs (falls `not` entfallen ist).
@@ -1341,11 +1261,13 @@ pub fn parse_access(data: &Value) -> Access {
             }
         })
         .collect();
+    let user = data.get("currentUser").unwrap_or(&Value::Null);
     Access {
         version,
         enterprise,
-        me: data.get("currentUser").and_then(parse_user),
+        me: parse_user(user),
         projects,
+        todos_hidden: todos_hidden(user),
     }
 }
 
@@ -1674,86 +1596,12 @@ mod tests {
         // wirklich keine To-dos
         assert!(!parse_mentions(&page(serde_json::json!([]), false)).hidden);
         // To-dos da, aber keine zu einem MR
-        let issue = serde_json::json!([{ "id": "t1", "action": "mentioned", "note": null, "targetEntity": {} }]);
+        let issue = serde_json::json!([
+            { "id": "t1", "action": "mentioned", "note": null, "targetEntity": {} }
+        ]);
         let mentions = parse_mentions(&page(issue, true));
         assert!(mentions.items.is_empty());
         assert!(!mentions.hidden);
-    }
-
-    /// MR einer `description_mentions`-Antwort (nur das Nötigste).
-    fn described_mr(iid: u64, description: Option<&str>) -> Value {
-        let mut mr = serde_json::json!({
-            "id": format!("gid://gitlab/MergeRequest/{iid}"),
-            "iid": iid.to_string(),
-            "title": format!("MR {iid}"),
-            "author": { "username": "alehmann", "name": "Anna Lehmann" }
-        });
-        if let Some(description) = description {
-            mr["description"] = Value::from(description);
-        }
-        mr
-    }
-
-    #[test]
-    fn parse_description_mentions_checks_description() {
-        let data = serde_json::json!({ "projects": { "nodes": [
-            { "fullPath": "web/kundenportal", "mergeRequests": { "nodes": [
-                described_mr(1, Some("Bitte schauen, @taltmann.")),
-                described_mr(2, Some("cc @taltmann2 und mail@taltmann.de")),
-                described_mr(3, None)
-            ] } },
-            null,
-            { "fullPath": "kern/backend-api", "mergeRequests": { "nodes": [
-                described_mr(4, Some("Review: @TAltmann"))
-            ] } }
-        ] } });
-        let found = parse_description_mentions(&data, ME);
-        let got: Vec<(Option<u64>, Option<&str>, Option<MentionKind>)> = found
-            .iter()
-            .map(|m| (m.mr.iid, m.mr.project_path.as_deref(), m.kind))
-            .collect();
-        assert_eq!(
-            got,
-            vec![
-                (
-                    Some(1),
-                    Some("web/kundenportal"),
-                    Some(MentionKind::Description)
-                ),
-                (
-                    Some(4),
-                    Some("kern/backend-api"),
-                    Some(MentionKind::Description)
-                ),
-            ]
-        );
-        assert!(found.iter().all(|m| m.todo_id.is_none()));
-    }
-
-    #[test]
-    fn mentions_user_only_whole_names() {
-        for (text, hit) in [
-            ("@taltmann", true),
-            ("cc @taltmann, @jkrueger", true),
-            ("(@taltmann)", true),
-            ("Danke @TAltmann.", true),
-            ("@taltmann: bitte", true),
-            ("Zeile\n@taltmann\n", true),
-            ("@taltmann2 und @taltmann", true),
-            ("@taltmann2", false),
-            ("@taltmann-bot", false),
-            ("@taltmann_x", false),
-            ("@taltmann.dev", false),
-            ("mail@taltmann.de", false),
-            ("@@taltmann", false),
-            ("ä@taltmann", false),
-            ("taltmann", false),
-            ("", false),
-        ] {
-            assert_eq!(mentions_user(text, ME), hit, "{text}");
-        }
-        assert!(mentions_user("Hallo @t.altmann!", "t.altmann"));
-        assert!(!mentions_user("@ irgendwas", ""));
     }
 
     #[test]
@@ -1797,6 +1645,18 @@ mod tests {
         let pipeline = mr.head_pipeline.as_ref().expect("Pipeline");
         assert_eq!(pipeline.status.as_deref(), Some("RUNNING"));
         assert_eq!(mr.source_branch_exists, None);
+    }
+
+    #[test]
+    fn parse_access_detects_hidden_todos() {
+        assert!(!parse_access(&data(ACCESS)).todos_hidden);
+        let hidden = serde_json::json!({ "currentUser": {
+            "username": ME,
+            "todos": { "pageInfo": { "hasNextPage": true }, "nodes": [] }
+        } });
+        let access = parse_access(&hidden);
+        assert!(access.todos_hidden);
+        assert_eq!(access.me.and_then(|m| m.username).as_deref(), Some(ME));
     }
 
     #[test]
@@ -2198,10 +2058,9 @@ mod tests {
             .collect();
         let mut queries = vec![dashboard(), mentions(Some("MTAwMjQ"))];
         queries.extend(uninvolved(&long[..UNINVOLVED_CHUNK], ME));
-        queries.extend(description_mentions(&long[..UNINVOLVED_CHUNK], ME));
         queries.extend(uninvolved_page(&pages, ME));
         queries.extend(access(&long));
-        assert_eq!(queries.len(), 6);
+        assert_eq!(queries.len(), 5);
         for query in &queries {
             let text = compact(&query.text());
             assert!(
@@ -2260,7 +2119,7 @@ mod tests {
         let text = empty[0].text();
         assert!(!text.contains("projects"), "{text}");
         assert!(!text.contains("$paths"), "{text}");
-        assert!(text.contains("currentUser { username name bot }"), "{text}");
+        assert!(text.contains("currentUser { username name bot todos(state: [pending, done], first: 1) { pageInfo { hasNextPage endCursor } nodes { id } } }"), "{text}");
 
         // Folgeseiten: jeder Alias zählt voll zur Komplexität, daher kleine Blöcke
         let pages: Vec<(String, String)> = (0..30)
@@ -2293,37 +2152,6 @@ mod tests {
         let body: Value = serde_json::from_str(&query.body()).expect("JSON");
         assert_eq!(body["query"], text);
         assert_eq!(body["variables"], serde_json::json!({}));
-    }
-
-    #[test]
-    fn description_mentions_text_and_variables() {
-        let paths: Vec<String> = (0..30).map(|i| format!("g/p{i}")).collect();
-        let queries = description_mentions(&paths, ME);
-        assert_eq!(queries.len(), 2);
-        let text = queries[0].text();
-        assert!(text.starts_with("query GmDescriptionMentions($paths: [String!], $search: String) { projects(fullPaths: $paths, first: 25) { nodes { fullPath mergeRequests(state: opened, search: $search, in: [DESCRIPTION], sort: UPDATED_DESC, first: 20) { nodes { description ...Mr } } } } }"), "{text}");
-        assert!(text.contains("fragment Mr on MergeRequest"), "{text}");
-        let body: Value = serde_json::from_str(&queries[1].body()).expect("JSON");
-        assert_eq!(body["variables"]["search"], "@taltmann");
-        assert_eq!(body["variables"]["paths"].as_array().map(Vec::len), Some(5));
-        assert!(description_mentions(&[], ME).is_empty());
-
-        // Server ohne `search`: Variable entfällt, der Client prüft selbst
-        let mut query = queries[0].clone();
-        let search = SchemaError {
-            code: SchemaErrorCode::ArgumentNotAccepted,
-            type_name: "Field".to_string(),
-            name: "search".to_string(),
-            field: Some("mergeRequests".to_string()),
-        };
-        assert!(query.reduce(&search));
-        let text = query.text();
-        assert!(
-            text.starts_with("query GmDescriptionMentions($paths: [String!]) {"),
-            "{text}"
-        );
-        let body: Value = serde_json::from_str(&query.body()).expect("JSON");
-        assert_eq!(body["variables"].get("search"), None);
     }
 
     #[test]

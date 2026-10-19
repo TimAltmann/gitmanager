@@ -9,9 +9,8 @@ use super::glab::{
     StdinBody, CI_ENV, DEFAULT_TIMEOUT, TOKEN_ENV,
 };
 use super::graphql::{
-    self, parse_access, parse_dashboard, parse_description_mentions, parse_mentions,
-    parse_uninvolved, parse_uninvolved_page, run_query, run_query_with, HostSchema, ProjectMrs,
-    ProjectNode, SchemaErrorCode, UserNode,
+    self, parse_access, parse_dashboard, parse_mentions, parse_uninvolved, parse_uninvolved_page,
+    run_query, run_query_with, HostSchema, ProjectMrs, ProjectNode, SchemaErrorCode, UserNode,
 };
 use super::model::{
     build_snapshot, sort_uninvolved, HostRaw, HostStatus, MergeRequest, MrPart, MrSnapshot,
@@ -169,6 +168,9 @@ pub struct HostProbe {
     pub expires_at: Option<i64>,
     pub rights_gitmanager: GitManagerRights,
     pub rights_glab: GlabRights,
+    /// GitLab verbirgt die To-dos (feingranulares Token ohne „Todo: Read“):
+    /// der Ansicht fehlen alle Erwähnungen
+    pub todos_hidden: bool,
     /// In der Reihenfolge der angefragten Pfade
     pub projects: Vec<ProjectAccess>,
 }
@@ -198,6 +200,8 @@ pub struct TokenCheck {
     pub expires_at: Option<i64>,
     pub rights_gitmanager: GitManagerRights,
     pub rights_glab: GlabRights,
+    /// Wie `HostProbe::todos_hidden`
+    pub todos_hidden: bool,
     /// Zugriff auf die angefragten Projekte
     pub access_preview: Vec<ProjectAccess>,
     /// Die bisherige Anmeldung hat `api`, das neue Token nicht (E4)
@@ -464,9 +468,8 @@ fn parse_config_host_keys(text: &str) -> Vec<String> {
 
 // --- Abruf ----------------------------------------------------------------
 
-/// Abruf aller GitLab-Hosts (E16, E20): je Host Dashboard, Erwähnungen
-/// (To-dos, höchstens drei Seiten, dazu die Suche nach `@ich` in den
-/// Beschreibungen), mit `include_uninvolved` auch „Nicht beteiligt“
+/// Abruf aller GitLab-Hosts (E16, E20): je Host Dashboard und Erwähnungen
+/// (höchstens drei Seiten), mit `include_uninvolved` auch „Nicht beteiligt“
 /// für die einbezogenen lokalen Projekte. Hosts laufen parallel, je Host
 /// nacheinander (Gate). Teilfehler stehen in `HostStatus`; nach Anmelde-,
 /// Netz-, TLS- und Timeout-Fehlern geht kein weiterer Aufruf an den Host.
@@ -511,8 +514,7 @@ fn fetch_hosts(
     let jobs: Vec<(String, Vec<String>, HostSchema)> = hosts
         .iter()
         .map(|host| {
-            // E1: „Nicht beteiligt“ und die Suche nach Erwähnungen nur in
-            // einbezogenen lokalen Projekten
+            // E1: „Nicht beteiligt“ nur aus einbezogenen lokalen Projekten
             let paths = locals
                 .iter()
                 .filter(|p| p.included && p.host_key.eq_ignore_ascii_case(host))
@@ -554,8 +556,7 @@ fn fetch_hosts(
         .collect()
 }
 
-/// Ein Host: Dashboard, Erwähnungen (To-dos und Suche), ggf. „Nicht
-/// beteiligt“.
+/// Ein Host: Dashboard, Erwähnungen, ggf. „Nicht beteiligt“.
 fn fetch_host(
     runner: &dyn GlabRunner,
     host: &str,
@@ -628,11 +629,6 @@ fn fetch_host(
             break;
         }
     }
-    // Erwähnungen in Beschreibungen zusätzlich per Suche (doppelte führt
-    // `model` per `id` zusammen)
-    if let (None, Some(me)) = (&dead, raw.status.user.clone()) {
-        dead = fetch_description_mentions(runner, host, &me, paths, schema, &mut raw);
-    }
     if include_uninvolved {
         match (dead, raw.status.user.clone()) {
             (Some(kind), _) => note(&mut raw.status.partial, MrPart::Uninvolved, kind),
@@ -655,36 +651,6 @@ fn fetch_host(
         }
     }
     raw
-}
-
-/// Erwähnungen in der Beschreibung über die Suche in den einbezogenen
-/// Projekten; Fehler als Teilfehler „Erwähnungen“. Liefert die Fehlerart,
-/// nach der kein weiterer Aufruf an den Host geht.
-fn fetch_description_mentions(
-    runner: &dyn GlabRunner,
-    host: &str,
-    me: &str,
-    paths: &[String],
-    schema: &mut HostSchema,
-    raw: &mut HostRaw,
-) -> Option<GlabErrorKind> {
-    for query in graphql::description_mentions(paths, me) {
-        match run_query(runner, host, schema, query) {
-            Ok(got) => {
-                raw.mentions
-                    .extend(parse_description_mentions(&got.data, me));
-                note_graphql(&mut raw.status.partial, MrPart::Mentions, got.errors);
-            }
-            Err(kind) => {
-                let stop = ends_host(&kind).then(|| kind.clone());
-                note(&mut raw.status.partial, MrPart::Mentions, kind);
-                if stop.is_some() {
-                    return stop;
-                }
-            }
-        }
-    }
-    None
 }
 
 /// „Nicht beteiligt“ in Abschnitten zu `UNINVOLVED_CHUNK` Projekten. `None`,
@@ -928,6 +894,7 @@ fn probe_with(
         probe.expires_at = pat.expires_at;
     }
     (probe.rights_gitmanager, probe.rights_glab) = rights_for(&info, access.graphql_ok());
+    probe.todos_hidden = access.todos_hidden;
     (probe.projects, probe.error) = project_access(runner, host, paths, &access, &prepare);
     probe
 }
@@ -1143,6 +1110,8 @@ struct AccessProbe {
     nodes: Option<Vec<ProjectNode>>,
     /// Anmelde- oder anderer nicht beendender Fehler der Abfrage
     error: Option<GlabErrorKind>,
+    /// GitLab verbirgt die To-dos vor dem Token
+    todos_hidden: bool,
 }
 
 impl AccessProbe {
@@ -1199,6 +1168,7 @@ fn run_access(
             probe.me = access.me;
             probe.version = access.version;
         }
+        probe.todos_hidden |= access.todos_hidden;
         nodes.extend(access.projects);
     }
     probe.nodes = Some(nodes);
@@ -1493,6 +1463,7 @@ fn check_token(
         expires_at,
         rights_gitmanager,
         rights_glab,
+        todos_hidden: access.todos_hidden,
         access_preview,
         downgrade_warning: false,
     })
@@ -1643,7 +1614,7 @@ mod tests {
         HttpHead, StdinBody,
     };
     use crate::gitlab::graphql::SchemaError;
-    use crate::gitlab::model::{MrPart, MyReview, Reason};
+    use crate::gitlab::model::{MrPart, MyReview};
     use crate::gitlab::remote::HostTarget;
     use crate::gitlab::time::parse_date;
     use serde_json::{json, Value};
@@ -1670,7 +1641,6 @@ mod tests {
     const PROJECT_REST: &str = include_str!("fixtures/project_rest.json");
 
     const EMPTY_MENTIONS: &str = r#"{"data":{"currentUser":{"username":"taltmann","todos":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}"#;
-    const NO_DESCRIPTION_MENTIONS: &str = r#"{"data":{"projects":{"nodes":[]}}}"#;
     const INVALID_TOKEN_GQL: &str = r#"{"errors":[{"message":"Invalid token"}]}"#;
     const NOT_A_PAT: &str = r#"{"message":"400 Bad request - This endpoint requires token type to be a personal access token"}"#;
     const EXPIRED: &str = r#"{"error":"invalid_token","error_description":"Token is expired. You can either do re-authorization or token refresh."}"#;
@@ -1855,16 +1825,8 @@ mod tests {
         fake.push_when(is_version, version_reply("1.123.0"));
         fake.push_when(query(HOST, "GmDashboard"), gql(DASHBOARD_EE));
         fake.push_when(query(HOST, "GmMentions"), gql(&mentions_last_page()));
-        fake.push_when(
-            query(HOST, "GmDescriptionMentions"),
-            gql(NO_DESCRIPTION_MENTIONS),
-        );
         fake.push_when(query(HOST_B, "GmDashboard"), gql(DASHBOARD_CE));
         fake.push_when(query(HOST_B, "GmMentions"), gql(EMPTY_MENTIONS));
-        fake.push_when(
-            query(HOST_B, "GmDescriptionMentions"),
-            gql(NO_DESCRIPTION_MENTIONS),
-        );
         let locals = [
             local(HOST, "kern/backend-api"),
             local(HOST_B, "tools/gitmanager"),
@@ -1939,105 +1901,15 @@ mod tests {
         assert_eq!(got.raw[0].mentions.len(), 9);
     }
 
-    /// Antwort auf `GmDescriptionMentions` für `web/kundenportal`: MR !95 von
-    /// Anna Lehmann (aus der Fixture) mit dieser Beschreibung.
-    fn description_mentions_reply(description: &str) -> String {
-        let fixture: Value = serde_json::from_str(UNINVOLVED).expect("Fixture");
-        let mut mr = fixture["data"]["projects"]["nodes"][0]["mergeRequests"]["nodes"][0].clone();
-        assert_eq!(mr["iid"], json!("95"));
-        mr["description"] = json!(description);
-        json!({ "data": { "projects": { "nodes": [
-            { "fullPath": "web/kundenportal", "mergeRequests": { "nodes": [mr] } }
-        ] } } })
-        .to_string()
-    }
-
     #[test]
-    fn fetch_snapshot_finds_description_mentions_when_todos_hidden() {
-        // Feingranulares Token ohne „Todo: Read“: leere Seite mit
-        // `hasNextPage`; die Suche in den Projekten findet die Erwähnung
+    fn fetch_snapshot_hidden_todos_marked_without_more_pages() {
+        // Feingranulares Token ohne „Todo: Read“: leere Seite mit `hasNextPage`
         let hidden = r#"{"data":{"currentUser":{"username":"taltmann","todos":{"pageInfo":{"hasNextPage":true,"endCursor":"MTA"},"nodes":[]}}}}"#;
         let runner = gated();
         let fake = runner.inner();
         fake.push(version_reply("1.123.0"));
         fake.push(gql(DASHBOARD_EE));
         fake.push(gql(hidden));
-        fake.push(gql(&description_mentions_reply(
-            "Bitte einmal drüberschauen, @taltmann.",
-        )));
-        let locals = [
-            local(HOST, "web/kundenportal"),
-            LocalProject {
-                included: false,
-                ..local(HOST, "kern/backend-api")
-            },
-        ];
-        let got = fetch_snapshot(
-            &runner,
-            &host_map(&[HOST]),
-            &locals,
-            &MrConfig::default(),
-            false,
-        );
-        let calls = fake.take_calls();
-        // Keine weiteren (ebenso leeren) Seiten der To-dos
-        assert_eq!(
-            ops(&calls),
-            vec![
-                "version",
-                "GmDashboard",
-                "GmMentions",
-                "GmDescriptionMentions"
-            ]
-        );
-        // Nur einbezogene Projekte, gesucht wird nach `@ich`
-        assert_eq!(
-            variables(&calls[3]),
-            json!({ "paths": ["web/kundenportal"], "search": "@taltmann" })
-        );
-        let status = &got.snapshot.per_host[0];
-        assert!(status.todos_hidden);
-        assert_eq!(status.partial, Vec::new());
-        let mr = got
-            .snapshot
-            .others
-            .iter()
-            .find(|m| m.iid == 95)
-            .expect("!95 unter Von anderen");
-        assert_eq!(mr.reasons, vec![Reason::MentionDescription]);
-        // !421 liegt im abgewählten kern/backend-api
-        assert_eq!(iids(&got.snapshot.others), vec![92, 95]);
-    }
-
-    #[test]
-    fn fetch_snapshot_description_search_merges_with_todos() {
-        // !77 kommt als To-do (Beschreibung) und über die Suche: ein Eintrag;
-        // `@taltmann2` ist keine Erwähnung
-        let runner = gated();
-        let fake = runner.inner();
-        fake.push(version_reply("1.123.0"));
-        fake.push(gql(DASHBOARD_EE));
-        fake.push(gql(&mentions_last_page()));
-        let todos =
-            parse_mentions(&serde_json::from_str::<Value>(MENTIONS).expect("Fixture")["data"]);
-        let mr77 = todos
-            .items
-            .iter()
-            .find(|m| m.mr.iid == Some(77))
-            .expect("!77 in der Fixture");
-        let project = mr77.mr.project_path.clone().expect("Projekt");
-        let mut reply: Value =
-            serde_json::from_str(&description_mentions_reply("cc @taltmann2")).expect("JSON");
-        let mut again = reply["data"]["projects"]["nodes"][0]["mergeRequests"]["nodes"][0].clone();
-        again["id"] = json!(mr77.mr.id);
-        again["iid"] = json!("77");
-        again["project"] = json!({ "fullPath": project });
-        again["description"] = json!("@taltmann bitte prüfen");
-        reply["data"]["projects"]["nodes"][0]["mergeRequests"]["nodes"]
-            .as_array_mut()
-            .expect("nodes")
-            .push(again);
-        fake.push(gql(&reply.to_string()));
         let got = fetch_snapshot(
             &runner,
             &host_map(&[HOST]),
@@ -2045,13 +1917,15 @@ mod tests {
             &MrConfig::default(),
             false,
         );
-        assert_eq!(fake.pending(), 0);
-        assert!(!got.snapshot.per_host[0].todos_hidden);
         assert_eq!(
-            got.snapshot.others.iter().filter(|m| m.iid == 77).count(),
-            1
+            ops(&fake.take_calls()),
+            vec!["version", "GmDashboard", "GmMentions"]
         );
-        assert!(!got.snapshot.others.iter().any(|m| m.iid == 95));
+        let status = &got.snapshot.per_host[0];
+        assert!(status.todos_hidden);
+        assert_eq!(status.partial, Vec::new());
+        // Review-Anfragen bleiben
+        assert_eq!(iids(&got.snapshot.others), vec![92, 421]);
     }
 
     #[test]
@@ -2111,7 +1985,6 @@ mod tests {
             403,
             r#"{"error":"insufficient_scope","scope":"api read_api"}"#,
         ));
-        fake.push(gql(NO_DESCRIPTION_MENTIONS));
         fake.push(gql(UNINVOLVED));
         let locals = [
             local(HOST, "kern/backend-api"),
@@ -2126,13 +1999,7 @@ mod tests {
         );
         assert_eq!(
             ops(&fake.take_calls()),
-            vec![
-                "version",
-                "GmDashboard",
-                "GmMentions",
-                "GmDescriptionMentions",
-                "GmUninvolved"
-            ]
+            vec!["version", "GmDashboard", "GmMentions", "GmUninvolved"]
         );
         let status = &got.snapshot.per_host[0];
         assert_eq!(status.error, None);
@@ -2259,7 +2126,6 @@ mod tests {
             "currentUser",
             "Todos teilweise nicht verfügbar",
         )));
-        fake.push(gql(NO_DESCRIPTION_MENTIONS));
         fake.push(gql(&with_errors(
             UNINVOLVED,
             "projects",
@@ -2377,7 +2243,6 @@ mod tests {
         fake.push(gql(DASHBOARD_CE_UNDEFINED));
         fake.push(gql(DASHBOARD_CE));
         fake.push(gql(EMPTY_MENTIONS));
-        fake.push(gql(NO_DESCRIPTION_MENTIONS));
         fake.push(gql(ARGUMENT_NOT_ACCEPTED));
         fake.push(gql(UNINVOLVED));
         let locals = [
@@ -2399,15 +2264,12 @@ mod tests {
                 "GmDashboard",
                 "GmDashboard",
                 "GmMentions",
-                "GmDescriptionMentions",
                 "GmUninvolved",
                 "GmUninvolved"
             ]
         );
         assert!(!query_text(&calls[2]).contains("approvalsLeft"));
-        // Das gelernte Schema gilt auch für die Suche (Fragment `Mr`)
-        assert!(!query_text(&calls[4]).contains("approvalsLeft"));
-        assert!(!query_text(&calls[6]).contains("not:"));
+        assert!(!query_text(&calls[5]).contains("not:"));
         assert_eq!(got.snapshot.per_host[0].partial, Vec::new());
         assert_eq!(iids(&got.snapshot.mine), vec![19]);
         // Ohne `not` zählt `count` auch eigene MRs mit
@@ -2417,7 +2279,6 @@ mod tests {
         fake.push(version_reply("1.123.0"));
         fake.push(gql(DASHBOARD_CE));
         fake.push(gql(EMPTY_MENTIONS));
-        fake.push(gql(NO_DESCRIPTION_MENTIONS));
         fake.push(gql(UNINVOLVED));
         let got = fetch_snapshot(
             &runner,
@@ -2429,16 +2290,10 @@ mod tests {
         let calls = fake.take_calls();
         assert_eq!(
             ops(&calls),
-            vec![
-                "version",
-                "GmDashboard",
-                "GmMentions",
-                "GmDescriptionMentions",
-                "GmUninvolved"
-            ]
+            vec!["version", "GmDashboard", "GmMentions", "GmUninvolved"]
         );
         assert!(!query_text(&calls[1]).contains("approvalsRequired"));
-        assert!(!query_text(&calls[4]).contains("not:"));
+        assert!(!query_text(&calls[3]).contains("not:"));
         assert!(got.raw[0].uninvolved_counts_own);
     }
 
@@ -3012,6 +2867,21 @@ mod tests {
         assert_eq!(probe.token_kind, TokenKind::Granular);
         assert_eq!(probe.rights_gitmanager, GitManagerRights::Ok);
         assert_eq!(probe.rights_glab, GlabRights::Unknown);
+        assert!(!probe.todos_hidden);
+
+        // Ohne „Todo: Read“: leere To-do-Seite mit `hasNextPage`
+        let runner = gated();
+        let mut hidden: Value = serde_json::from_str(ACCESS).expect("Fixture");
+        hidden["data"]["currentUser"]["todos"] =
+            json!({ "pageInfo": { "hasNextPage": true }, "nodes": [] });
+        push_probe(
+            runner.inner(),
+            FakeReply::http(200, &granular.to_string()),
+            gql(&hidden.to_string()),
+        );
+        let probe = probe_as(&runner, HOST, &paths3(), ProbeEnv::Inherit(None));
+        assert_eq!(probe.rights_gitmanager, GitManagerRights::Ok);
+        assert!(probe.todos_hidden);
 
         let runner = gated();
         let mut bot: Value = serde_json::from_str(ACCESS).expect("Fixture");
@@ -3405,6 +3275,7 @@ mod tests {
                 expires_at: parse_date("2027-03-01"),
                 rights_gitmanager: GitManagerRights::Ok,
                 rights_glab: GlabRights::ReadOnly,
+                todos_hidden: false,
                 access_preview: vec![ProjectAccess {
                     full_path: "kern/backend-api".to_string(),
                     state: AccessState::Ok { level: 30 },
