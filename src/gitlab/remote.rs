@@ -243,8 +243,12 @@ pub struct HostMap {
     /// Remote-Host-Schlüssel (`RemoteRef::host_key`) → Zuordnung
     pub remotes: BTreeMap<String, HostTarget>,
     /// GitLab-Hosts, an die Netz-Aufrufe gehen dürfen: zugeordnete
-    /// glab-Hosts ∪ `extra_hosts`, sortiert
+    /// glab-Hosts ∪ `extra_hosts` (ohne überflüssige), sortiert
     pub gitlab_hosts: Vec<String>,
+    /// `extra_hosts`-Einträge, die schon ein angemeldeter glab-Host abdeckt
+    /// (über `ssh_host` oder „gehört zu …“) → abdeckender Host. Bekommen
+    /// keine Netz-Aufrufe; die Einstellungen bieten das Entfernen an.
+    pub redundant_extra: BTreeMap<String, String>,
 }
 
 impl HostMap {
@@ -258,8 +262,9 @@ impl HostMap {
 }
 
 /// Ordnet jedem Remote-Host einen glab-Host zu (E16): exakter Treffer auf
-/// einen angemeldeten Host oder `extra_hosts`, dann `ssh_host` eines
-/// angemeldeten Hosts, dann `host_aliases` („gehört zu …“). `glab_hosts`
+/// einen angemeldeten Host, dann `ssh_host` eines angemeldeten Hosts, dann
+/// `host_aliases` („gehört zu …“), zuletzt `extra_hosts`. Eine glab-Anmeldung
+/// gewinnt so immer gegen einen von Hand eingetragenen Host. `glab_hosts`
 /// darf alle Kandidaten enthalten; angemeldet ist nur, wer einen `user` hat
 /// (sonst gingen Netz-Aufrufe z. B. an github.com). Rein, kein Netz.
 pub fn resolve_hosts<'a>(
@@ -267,54 +272,78 @@ pub fn resolve_hosts<'a>(
     glab_hosts: &[GlabHost],
     cfg: &MrConfig,
 ) -> HostMap {
-    // Angemeldete Hosts (Schlüssel, ssh_host ohne Port), sortiert → bei
-    // gleichem ssh_host gewinnt deterministisch der erste Schlüssel.
+    // Angemeldete Hosts (Schlüssel, ssh_host als reiner Hostname), sortiert
+    // → bei gleichem ssh_host gewinnt deterministisch der erste Schlüssel.
     let mut signed_in: Vec<(String, Option<String>)> = glab_hosts
         .iter()
         .filter(|h| !h.user.trim().is_empty())
         .map(|h| {
-            let ssh = h.ssh_host.as_deref().map(norm_host);
-            (norm_host(&h.key), ssh.map(|s| strip_port(&s).to_string()))
+            let ssh = h.ssh_host.as_deref().map(norm_ssh_host);
+            (norm_host(&h.key), ssh.filter(|s| !s.is_empty()))
         })
         .filter(|(key, _)| !key.is_empty())
         .collect();
     signed_in.sort();
-    let extra: BTreeSet<String> = cfg
-        .extra_hosts
-        .iter()
-        .map(|h| norm_host(h))
-        .filter(|h| !h.is_empty())
-        .collect();
-    // Direkt ansprechbare GitLab-Hosts: angemeldet ∪ ausdrücklich eingetragen
-    let known: BTreeSet<String> = signed_in
-        .iter()
-        .map(|(key, _)| key.clone())
-        .chain(extra.iter().cloned())
-        .collect();
-    let aliases: Vec<(String, String)> = cfg
-        .host_aliases
-        .iter()
-        .map(|a| (norm_host(&a.from), norm_host(&a.to)))
-        .chain(
-            BUILTIN_ALIASES
-                .iter()
-                .map(|(from, to)| (from.to_string(), to.to_string())),
-        )
-        .collect();
+    let hosts = Hosts {
+        signed: signed_in.iter().map(|(key, _)| key.clone()).collect(),
+        extra: cfg
+            .extra_hosts
+            .iter()
+            .map(|h| norm_host(h))
+            .filter(|h| !h.is_empty())
+            .collect(),
+        signed_in,
+        aliases: cfg
+            .host_aliases
+            .iter()
+            .map(|a| (norm_host(&a.from), norm_host(&a.to)))
+            .chain(
+                BUILTIN_ALIASES
+                    .iter()
+                    .map(|(from, to)| (from.to_string(), to.to_string())),
+            )
+            .collect(),
+    };
     let mut map = HostMap::default();
     for remote in remotes {
         if let Entry::Vacant(slot) = map.remotes.entry(remote.host_key()) {
-            let target = resolve_one(remote, slot.key(), &known, &signed_in, &aliases);
+            let target = resolve_one(slot.key(), &remote.host, &hosts);
             slot.insert(target);
         }
     }
-    let mut hosts = extra;
-    hosts.extend(map.remotes.values().filter_map(|t| match t {
+    // Eingetragene Hosts, die eine Anmeldung schon abdeckt, sind überflüssig
+    // (kein Netz-Aufruf an z. B. die SSH-IP eines angemeldeten Hosts).
+    for extra in hosts.extra.iter().filter(|e| !hosts.signed.contains(*e)) {
+        if let HostTarget::GitLab(key) = resolve_one(extra, strip_port(extra), &hosts) {
+            if key != *extra {
+                map.redundant_extra.insert(extra.clone(), key);
+            }
+        }
+    }
+    let mut network: BTreeSet<String> = hosts
+        .extra
+        .iter()
+        .filter(|e| !map.redundant_extra.contains_key(*e))
+        .cloned()
+        .collect();
+    network.extend(map.remotes.values().filter_map(|t| match t {
         HostTarget::GitLab(key) => Some(key.clone()),
         HostTarget::NotGitLab => None,
     }));
-    map.gitlab_hosts = hosts.into_iter().collect();
+    map.gitlab_hosts = network.into_iter().collect();
     map
+}
+
+/// Normalisierte Eingaben für `resolve_one`.
+struct Hosts {
+    /// Angemeldete glab-Hosts
+    signed: BTreeSet<String>,
+    /// Von Hand eingetragene GitLab-Hosts (`extra_hosts`)
+    extra: BTreeSet<String>,
+    /// Angemeldete Hosts mit ihrem `ssh_host`
+    signed_in: Vec<(String, Option<String>)>,
+    /// „gehört zu …“ und eingebaute Zuordnungen (von → nach)
+    aliases: Vec<(String, String)>,
 }
 
 /// GitManager-eigene Zuordnung (nicht in glab): GitLab.com-SSH über Port 443.
@@ -331,38 +360,53 @@ pub fn builtin_alias_target(host: &str) -> Option<&'static str> {
         .map(|(_, to)| *to)
 }
 
-fn resolve_one(
-    remote: &RemoteRef,
-    key: &str,
-    known: &BTreeSet<String>,
-    signed_in: &[(String, Option<String>)],
-    aliases: &[(String, String)],
-) -> HostTarget {
-    // 1. Exakter Treffer (`host` bzw. `host:port`)
-    if known.contains(key) {
+/// Zuordnung eines Remote-Hosts (`key` = `host` bzw. `host:port`, `host` =
+/// Hostname ohne Port).
+fn resolve_one(key: &str, host: &str, hosts: &Hosts) -> HostTarget {
+    // 1. Exakter Treffer auf einen angemeldeten Host (`host` bzw. `host:port`)
+    if hosts.signed.contains(key) {
         return HostTarget::GitLab(key.to_string());
     }
     // 2. ssh_host eines angemeldeten Hosts (nur Hostname, wie glab)
-    if let Some((glab_key, _)) = signed_in
+    if let Some((glab_key, _)) = hosts
+        .signed_in
         .iter()
-        .find(|(_, ssh)| ssh.as_deref() == Some(remote.host.as_str()))
+        .find(|(_, ssh)| ssh.as_deref() == Some(host))
     {
         return HostTarget::GitLab(glab_key.clone());
     }
     // 3. „gehört zu …“: erst `host:port`, dann der Hostname für alle Ports;
     // das Ziel muss selbst ein GitLab-Host sein (sonst kein Netz-Aufruf).
-    let alias = aliases
+    let alias = hosts
+        .aliases
         .iter()
         .find(|(from, _)| from == key)
-        .or_else(|| aliases.iter().find(|(from, _)| *from == remote.host));
-    match alias {
-        Some((_, to)) if known.contains(to) => HostTarget::GitLab(to.clone()),
-        _ => HostTarget::NotGitLab,
+        .or_else(|| hosts.aliases.iter().find(|(from, _)| from == host));
+    if let Some((_, to)) = alias {
+        if hosts.signed.contains(to) || hosts.extra.contains(to) {
+            return HostTarget::GitLab(to.clone());
+        }
     }
+    // 4. Von Hand eingetragener GitLab-Host (ohne glab-Anmeldung)
+    if hosts.extra.contains(key) {
+        return HostTarget::GitLab(key.to_string());
+    }
+    HostTarget::NotGitLab
 }
 
 fn norm_host(host: &str) -> String {
     host.trim().to_lowercase()
+}
+
+/// `ssh_host` aus der glab-Config als reiner Hostname: glab speichert ihn
+/// auch mit Benutzer, Port oder Schema (`git@192.0.2.10:2222`,
+/// `ssh://git@host:22/`).
+pub(super) fn norm_ssh_host(raw: &str) -> String {
+    let s = norm_host(raw);
+    let s = s.strip_prefix("ssh://").unwrap_or(&s);
+    let s = s.rsplit_once('@').map_or(s, |(_, host)| host);
+    let s = s.split('/').next().unwrap_or_default();
+    strip_port(s).to_string()
 }
 
 /// Hostname ohne `:port` (`[ipv6]` bleibt ganz).
@@ -723,6 +767,80 @@ mod tests {
             map.gitlab_hosts,
             vec!["git.intern.example", "gitlab.example.com"]
         );
+    }
+
+    #[test]
+    fn resolve_hosts_ssh_host_with_user_and_port() {
+        // glab speichert `ssh_host` auch mit Benutzer und Port, z. B.
+        // `git@10.0.0.5:2222`; die Remotes zeigen per SSH auf die IP.
+        let remotes = [
+            parsed("ssh://git@10.0.0.5:2222/kern/backend-api.git"),
+            parsed("git@ssh.example.com:web/kundenportal.git"),
+        ];
+        let glab = [
+            gh("gitlab.example.com", Some("git@10.0.0.5:2222")),
+            gh("git.intern.example", Some("ssh://git@SSH.example.com:22/")),
+        ];
+        let map = resolve_hosts(&remotes, &glab, &MrConfig::default());
+        assert_eq!(target(&map, "10.0.0.5"), gitlab("gitlab.example.com"));
+        assert_eq!(
+            target(&map, "ssh.example.com"),
+            gitlab("git.intern.example")
+        );
+        assert_eq!(
+            map.gitlab_hosts,
+            vec!["git.intern.example", "gitlab.example.com"]
+        );
+    }
+
+    #[test]
+    fn resolve_hosts_signed_in_ssh_host_beats_unsigned_extra() {
+        // Von Hand als GitLab-Host eingetragene IP, die glab über `ssh_host`
+        // einem angemeldeten Host zuordnet: die Anmeldung gewinnt, der
+        // Eintrag bekommt keine Netz-Aufrufe und gilt als überflüssig.
+        let remotes = [parsed("ssh://git@10.0.0.5:2222/kern/backend-api.git")];
+        let glab = [gh("gitlab.example.com", Some("git@10.0.0.5:2222"))];
+        let cfg = MrConfig {
+            extra_hosts: vec!["10.0.0.5".to_string()],
+            ..MrConfig::default()
+        };
+        let map = resolve_hosts(&remotes, &glab, &cfg);
+        assert_eq!(target(&map, "10.0.0.5"), gitlab("gitlab.example.com"));
+        assert_eq!(map.gitlab_hosts, vec!["gitlab.example.com"]);
+        assert_eq!(
+            map.redundant_extra.get("10.0.0.5").map(String::as_str),
+            Some("gitlab.example.com")
+        );
+    }
+
+    #[test]
+    fn resolve_hosts_unsigned_extra_stays_without_coverage() {
+        // Ohne passende Anmeldung bleibt der eingetragene Host ein
+        // GitLab-Host (Karte „Nicht angemeldet“, Token hinzufügen).
+        let remotes = [parsed("ssh://git@10.0.0.5:2222/kern/backend-api.git")];
+        let cfg = MrConfig {
+            extra_hosts: vec!["10.0.0.5".to_string()],
+            ..MrConfig::default()
+        };
+        let map = resolve_hosts(&remotes, &[], &cfg);
+        assert_eq!(target(&map, "10.0.0.5"), gitlab("10.0.0.5"));
+        assert_eq!(map.gitlab_hosts, vec!["10.0.0.5"]);
+        assert!(map.redundant_extra.is_empty());
+    }
+
+    #[test]
+    fn norm_ssh_host_forms() {
+        for (raw, want) in [
+            ("git@192.0.2.10:2222", "192.0.2.10"),
+            ("SSH.Example.com", "ssh.example.com"),
+            ("ssh.example.com:22", "ssh.example.com"),
+            ("ssh://git@ssh.example.com:2222/", "ssh.example.com"),
+            ("  git@host  ", "host"),
+            ("[::1]:22", "[::1]"),
+            ("", ""),
+        ] {
+            assert_eq!(norm_ssh_host(raw), want, "{raw}");
+        }
     }
 
     #[test]

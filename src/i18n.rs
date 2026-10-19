@@ -1083,6 +1083,8 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "mrs_alias_of") => "{} gehört zu diesem Host".to_string(),
         (Language::En, "mrs_alias_remove") => "Remove mapping".to_string(),
         (Language::De, "mrs_alias_remove") => "Zuordnung entfernen".to_string(),
+        (Language::En, "mrs_extra_redundant") => "Belongs to {} and is queried through it – this entry isn't needed and can be removed.".to_string(),
+        (Language::De, "mrs_extra_redundant") => "Gehört zu {} und wird darüber abgefragt – dieser Eintrag ist nicht nötig und kann entfernt werden.".to_string(),
         (Language::En, "mrs_glab_pending") => "Applies after “Save” – until then GitManager uses {}.".to_string(),
         (Language::De, "mrs_glab_pending") => "Gilt nach „Speichern“ – bis dahin nutzt GitManager {}.".to_string(),
 
@@ -1718,6 +1720,7 @@ mod tests {
             "mrs_alias_apply",
             "mrs_alias_of",
             "mrs_alias_remove",
+            "mrs_extra_redundant",
             "mrs_glab_pending",
         ];
         // Vollständigkeit: Liste ohne Dubletten, und jeder MR-Schlüssel aus

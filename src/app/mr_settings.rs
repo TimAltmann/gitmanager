@@ -467,6 +467,7 @@ mod tests {
 
     fn fake_app() -> (MyApp, Fake) {
         let glab: Fake = Arc::new(GatedRunner::new(FakeGlab::new()));
+        crate::app::merge_requests::tests::no_glab_config(glab.inner());
         let mut app = test_app_with_glab(glab.clone());
         app.config.language = Language::De;
         (app, glab)

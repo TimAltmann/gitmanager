@@ -16,8 +16,8 @@ use crate::gitlab::model::{
 };
 use crate::gitlab::remote::{builtin_alias_target, local_projects, resolve_hosts, GlabHost};
 use crate::gitlab::service::{
-    discover_glab_hosts, fetch_snapshot, fetch_uninvolved_more, is_auth_error, MrFetchResult,
-    UninvolvedPage,
+    discover_glab_hosts, fetch_snapshot, fetch_uninvolved_more, glab_config_hosts, is_auth_error,
+    MrFetchResult, UninvolvedPage,
 };
 use crate::gitlab::time::{now_unix, relative_time};
 use crate::i18n::{tr, tr_fmt, Language};
@@ -665,7 +665,10 @@ impl MyApp {
 }
 
 /// glab fehlt oder ist zu alt → keine Erkennung (Karte statt „Kein
-/// GitLab-Host“); sonst `discover_glab_hosts` (nur `config get`).
+/// GitLab-Host“); sonst `discover_glab_hosts` (nur `config get`) für die
+/// Kandidaten und alle Hosts aus der glab-Config. Letztere braucht es, wenn
+/// der angemeldete Web-Host in keinem Remote steht (Remotes per SSH auf eine
+/// IP, Zuordnung über `ssh_host`).
 fn discover(
     runner: &dyn GlabRunner,
     candidates: &[String],
@@ -674,7 +677,25 @@ fn discover(
         Err(kind @ (GlabErrorKind::NotInstalled | GlabErrorKind::TooOld(_))) => {
             (Vec::new(), Some(kind))
         }
-        _ => (discover_glab_hosts(runner, candidates), None),
+        _ => {
+            let mut all = candidates.to_vec();
+            all.extend(glab_config_hosts(runner, &process_env));
+            (discover_glab_hosts(runner, &all), None)
+        }
+    }
+}
+
+/// Umgebung für die Suche nach der glab-Config; in Tests leer (kein Zugriff
+/// auf eine echte glab-Config des Entwicklers).
+fn process_env(key: &str) -> Option<std::ffi::OsString> {
+    #[cfg(test)]
+    {
+        let _ = key;
+        None
+    }
+    #[cfg(not(test))]
+    {
+        std::env::var_os(key)
     }
 }
 
@@ -830,7 +851,7 @@ pub(super) fn top_bar_button(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::tests::{test_app, test_app_with_glab};
     use super::super::ScanResult;
     use super::*;
@@ -847,8 +868,79 @@ mod tests {
 
     fn fake_app() -> (MyApp, Fake) {
         let glab: Fake = Arc::new(GatedRunner::new(FakeGlab::new()));
+        no_glab_config(glab.inner());
         let app = test_app_with_glab(glab.clone());
         (app, glab)
+    }
+
+    fn is_config_path(r: &GlabRequest) -> bool {
+        r.args == ["config", "path"]
+    }
+
+    /// `glab config path` ohne Datei: die Erkennung liest keine Config-Hosts.
+    pub(in crate::app) fn no_glab_config(fake: &FakeGlab) {
+        fake.always_when(is_config_path, || FakeReply::stdout(0, "", ""));
+    }
+
+    /// Der angemeldete Web-Host steht in keinem Remote: die Remotes zeigen per
+    /// SSH auf eine IP, die glab als `ssh_host` (mit Benutzer und Port) des
+    /// Web-Hosts kennt. Die Erkennung findet ihn über die glab-Config.
+    #[test]
+    fn discovery_finds_web_host_from_glab_config_via_ssh_host() {
+        let (mut app, glab) = fake_app();
+        let fake = glab.inner();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yml");
+        std::fs::write(
+            &config,
+            "hosts:\n    gitlab.com:\n        user:\n    gitlab.firma.example:\n        user: tmueller\n",
+        )
+        .unwrap();
+        let shown = format!("{}\n", config.display());
+        fake.push_when(is_config_path, FakeReply::stdout(0, &shown, ""));
+        fake.push_when(is_version, version_reply());
+        fake.push_when(
+            config_get("10.0.0.5", "user"),
+            FakeReply::stdout(0, "\n", ""),
+        );
+        fake.push_when(
+            config_get("gitlab.com", "user"),
+            FakeReply::stdout(0, "\n", ""),
+        );
+        fake.push_when(
+            config_get("gitlab.firma.example", "user"),
+            FakeReply::stdout(0, "tmueller\n", ""),
+        );
+        fake.push_when(
+            config_get("gitlab.firma.example", "ssh_host"),
+            FakeReply::stdout(0, "git@10.0.0.5:2222\n", ""),
+        );
+        fake.push_when(
+            config_get("gitlab.firma.example", "api_protocol"),
+            FakeReply::stdout(0, "https\n", ""),
+        );
+        scan(
+            &mut app,
+            vec![repo("luma", "ssh://git@10.0.0.5:2222/team/luma.git")],
+        );
+        // Der Abruf nach der Erkennung geht an den Web-Host, nie an die IP
+        fake.push_when(is_version, version_reply());
+        push_api_timeout(fake, "gitlab.firma.example");
+        app.set_main_view(MainView::MergeRequests);
+        settle(&mut app);
+        assert_eq!(
+            app.mr_hosts.gitlab_hosts,
+            vec!["gitlab.firma.example".to_string()]
+        );
+        assert_eq!(app.mr_locals.len(), 1);
+        assert_eq!(app.mr_locals[0].host_key, "gitlab.firma.example");
+        assert_eq!(app.mr_locals[0].full_path, "team/luma");
+        assert_eq!(fetched_hosts(&app), ["gitlab.firma.example"]);
+        assert_eq!(fake.pending(), 0);
+        let to_ip = fake.take_calls().into_iter().any(|c| {
+            c.request.host_key.as_deref() == Some("10.0.0.5") && c.request.args[0] == "api"
+        });
+        assert!(!to_ip, "kein Netz-Aufruf an die SSH-IP");
     }
 
     /// GitLab-Host ohne Erkennung (eingetragen, E16).
@@ -1160,7 +1252,8 @@ mod tests {
         assert!(app.mr_hosts.gitlab_hosts.is_empty());
         assert!(app.mr_snapshot.is_none());
         let calls = fake.take_calls();
-        assert_eq!(calls.len(), 2);
+        // version, config path, config get user
+        assert_eq!(calls.len(), 3);
         assert!(calls.iter().all(|c| c.request.args[0] != "api"));
         // Umschalten, Intervall und erneuter Scan rufen nichts auf
         app.set_main_view(MainView::Repos);
@@ -1262,7 +1355,8 @@ mod tests {
         settle(&mut app);
         assert_eq!(app.mr_hosts.gitlab_hosts, vec![HOST.to_string()]);
         assert_eq!(app.mr_locals.len(), 1);
-        assert_eq!(fake.take_calls().len(), 4);
+        // version, config path, config get user/ssh_host/api_protocol
+        assert_eq!(fake.take_calls().len(), 5);
         scan(&mut app, repos);
         assert!(!app.mr_discovering);
         assert!(fake.take_calls().is_empty());
@@ -1285,7 +1379,7 @@ mod tests {
         assert!(!app.mr_loading, "Hosts noch unbekannt");
         settle(&mut app);
         let calls = fake.take_calls();
-        assert_eq!(calls.len(), 5, "Erkennung, dann Abruf");
+        assert_eq!(calls.len(), 6, "Erkennung (inkl. config path), dann Abruf");
         assert!(app.mr_glab_missing);
     }
 

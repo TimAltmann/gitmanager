@@ -25,6 +25,7 @@ use semver::Version;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 /// Env-Tokens in glabs Reihenfolge (`GITLAB_TOKEN` vor `GITLAB_ACCESS_TOKEN`
 /// vor `OAUTH_TOKEN`); glab schickt sie an jeden Host.
@@ -373,6 +374,91 @@ fn glab_config_get(
     }
     let value = out.body.trim();
     Ok((!value.is_empty()).then(|| value.to_string()))
+}
+
+/// Host-Schlüssel aus der glab-Config (`hosts:`), kleingeschrieben und
+/// sortiert. Kandidaten der lokalen Erkennung (E16): der angemeldete Host
+/// heißt oft anders als der Remote-Host (Web-Host `gitlab.firma.de`, Remotes
+/// per SSH auf eine IP, verbunden über `ssh_host`). Liest nur die Namen der
+/// Hosts, nie ihre Werte (dort kann ein Token im Klartext stehen). Pfad über
+/// `glab config path` (ab 1.115), sonst die bekannten Orte; ohne Datei leer.
+pub fn glab_config_hosts(
+    runner: &dyn GlabRunner,
+    env: &dyn Fn(&str) -> Option<OsString>,
+) -> Vec<String> {
+    let req = GlabRequest::read(None, ["config", "path"]).without_env(&TOKEN_ENV);
+    let shown = match runner.run(req) {
+        Ok(out) if out.exit == 0 => Some(PathBuf::from(out.body.trim())),
+        Ok(_) => None,
+        Err(_) => return Vec::new(),
+    };
+    let path = shown
+        .filter(|p| !p.as_os_str().is_empty())
+        .into_iter()
+        .chain(fallback_config_paths(env))
+        .find(|p| p.is_file());
+    let Some(path) = path else {
+        return Vec::new();
+    };
+    // Kein Riese: die glab-Config hat wenige KB
+    let small = std::fs::metadata(&path).is_ok_and(|m| m.len() <= 1024 * 1024);
+    match std::fs::read_to_string(&path) {
+        Ok(text) if small => parse_config_host_keys(&text),
+        _ => Vec::new(),
+    }
+}
+
+/// Bekannte Orte der glab-Config für glab ohne `config path`, in glabs
+/// Reihenfolge: `GLAB_CONFIG_DIR`, `~/.config/glab-cli` (alt), unter Windows
+/// `%LOCALAPPDATA%\glab-cli`.
+fn fallback_config_paths(env: &dyn Fn(&str) -> Option<OsString>) -> Vec<PathBuf> {
+    let file = |dir: PathBuf| dir.join("config.yml");
+    let mut paths = Vec::new();
+    if let Some(dir) = env("GLAB_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        paths.push(file(PathBuf::from(dir)));
+    }
+    if let Some(home) = env("USERPROFILE")
+        .or_else(|| env("HOME"))
+        .filter(|d| !d.is_empty())
+    {
+        paths.push(file(PathBuf::from(home).join(".config").join("glab-cli")));
+    }
+    if let Some(local) = env("LOCALAPPDATA").filter(|d| !d.is_empty()) {
+        paths.push(file(PathBuf::from(local).join("glab-cli")));
+    }
+    paths
+}
+
+/// Schlüssel der ersten Ebene unter `hosts:` (z. B. `gitlab.com`,
+/// `"host:8443"`). Werte und tiefere Ebenen werden übersprungen.
+fn parse_config_host_keys(text: &str) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    let mut in_hosts = false;
+    let mut level: Option<usize> = None;
+    for line in text.lines() {
+        let line = line.trim_end();
+        let content = line.trim_start();
+        if content.is_empty() || content.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - content.len();
+        if indent == 0 {
+            in_hosts = content == "hosts:";
+            level = None;
+            continue;
+        }
+        if !in_hosts || indent != *level.get_or_insert(indent) {
+            continue;
+        }
+        let Some(key) = content.strip_suffix(':') else {
+            continue;
+        };
+        let key = key.trim().trim_matches(|c| c == '"' || c == '\'');
+        if !key.is_empty() && !key.contains(char::is_whitespace) {
+            keys.insert(key.to_lowercase());
+        }
+    }
+    keys.into_iter().collect()
 }
 
 // --- Abruf ----------------------------------------------------------------
@@ -1686,6 +1772,7 @@ mod tests {
                 .map(|h| (h.to_string(), HostTarget::GitLab(h.to_string())))
                 .collect(),
             gitlab_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            ..HostMap::default()
         }
     }
 
@@ -2124,7 +2211,7 @@ mod tests {
             remotes: [("github.com".to_string(), HostTarget::NotGitLab)]
                 .into_iter()
                 .collect(),
-            gitlab_hosts: Vec::new(),
+            ..HostMap::default()
         };
         let got = fetch_snapshot(&runner, &hosts, &[], &MrConfig::default(), true);
         assert!(runner.inner().take_calls().is_empty());
@@ -2307,6 +2394,123 @@ mod tests {
                 assert!(!call.env.contains_key(key), "{key} in {:?}", call.env);
             }
         }
+    }
+
+    /// glab-Config wie unter Windows (CRLF, 4 Leerzeichen Einrückung,
+    /// Token im Klartext beim zweiten Host).
+    const GLAB_CONFIG: &str = "git_protocol: ssh\r\n\
+        # What editor glab should run\r\n\
+        editor:\r\n\
+        host: gitlab.com\r\n\
+        hosts:\r\n\
+        \x20   gitlab.com:\r\n\
+        \x20       api_protocol: https\r\n\
+        \x20       user:\r\n\
+        \x20   GitLab.Example.com:\r\n\
+        \x20       token: glpat-NichtAuslesen\r\n\
+        \x20       ssh_host: git@10.0.0.5:2222\r\n\
+        \x20       user: taltmann\r\n\
+        \x20   \"git.intern.example:8443\":\r\n\
+        \x20       user: tim\r\n\
+        aliases:\r\n\
+        \x20   ci: pipeline ci\r\n";
+
+    #[test]
+    fn parse_config_host_keys_reads_only_host_names() {
+        assert_eq!(
+            parse_config_host_keys(GLAB_CONFIG),
+            strings(&[
+                "git.intern.example:8443",
+                "gitlab.com",
+                "gitlab.example.com"
+            ])
+        );
+        assert!(parse_config_host_keys("hosts: {}\n").is_empty());
+        assert!(parse_config_host_keys("git_protocol: ssh\n").is_empty());
+        assert!(parse_config_host_keys("").is_empty());
+        // Tabs/Kommentare/Leerzeilen innerhalb von hosts stören nicht
+        let text = "hosts:\n\n  # Kommentar\n  a.example:\n    user: x\n  b.example:\n";
+        assert_eq!(
+            parse_config_host_keys(text),
+            strings(&["a.example", "b.example"])
+        );
+    }
+
+    #[test]
+    fn glab_config_hosts_via_config_path_without_env_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, GLAB_CONFIG).unwrap();
+        let runner = GatedRunner::new(
+            FakeGlab::new().with_parent_env(&[("GITLAB_TOKEN", "glpat-AusDerUmgebung")]),
+        );
+        let fake = runner.inner();
+        let shown = format!("{}\n", path.display());
+        fake.push_when(
+            |r: &GlabRequest| r.args == strings(&["config", "path"]),
+            FakeReply::stdout(0, &shown, ""),
+        );
+        let hosts = glab_config_hosts(&runner, &|_| None);
+        assert_eq!(
+            hosts,
+            strings(&[
+                "git.intern.example:8443",
+                "gitlab.com",
+                "gitlab.example.com"
+            ])
+        );
+        let calls = fake.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(!calls[0].env.contains_key("GITLAB_TOKEN"));
+        assert_eq!(calls[0].request.kind, CallKind::Read);
+    }
+
+    #[test]
+    fn glab_config_hosts_falls_back_for_old_glab() {
+        // glab < 1.115 kennt `config path` nicht → bekannte Orte
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.yml"), GLAB_CONFIG).unwrap();
+        let runner = gated();
+        runner.inner().push(FakeReply::stdout(
+            1,
+            "",
+            "Error: unknown command \"path\" for \"glab config\"",
+        ));
+        let dir_os = dir.path().as_os_str().to_owned();
+        let env = move |key: &str| (key == "GLAB_CONFIG_DIR").then(|| dir_os.clone());
+        assert_eq!(glab_config_hosts(&runner, &env).len(), 3);
+    }
+
+    #[test]
+    fn glab_config_hosts_empty_when_missing_or_unreadable() {
+        let runner = gated();
+        runner
+            .inner()
+            .push(FakeReply::stdout(0, "/gibt/es/nicht/config.yml\n", ""));
+        assert!(glab_config_hosts(&runner, &|_| None).is_empty());
+        let runner = gated();
+        runner.inner().push(FakeReply::error(GlabError::NotFound));
+        assert!(glab_config_hosts(&runner, &|_| None).is_empty());
+    }
+
+    #[test]
+    fn fallback_config_paths_order() {
+        let env = |key: &str| match key {
+            "GLAB_CONFIG_DIR" => Some(OsString::from("/cfg")),
+            "USERPROFILE" | "HOME" => Some(OsString::from("/home/u")),
+            "LOCALAPPDATA" => Some(OsString::from("/local")),
+            _ => None,
+        };
+        let paths = fallback_config_paths(&env);
+        assert_eq!(paths[0], PathBuf::from("/cfg").join("config.yml"));
+        assert!(paths.contains(
+            &PathBuf::from("/home/u")
+                .join(".config")
+                .join("glab-cli")
+                .join("config.yml")
+        ));
+        assert!(paths.contains(&PathBuf::from("/local").join("glab-cli").join("config.yml")));
+        assert!(fallback_config_paths(&|_| None).is_empty());
     }
 
     #[test]

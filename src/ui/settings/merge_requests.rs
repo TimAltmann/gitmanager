@@ -590,6 +590,8 @@ fn card_hosts(hosts: &HostMap, cfg: &MrConfig) -> Vec<String> {
         .gitlab_hosts
         .iter()
         .cloned()
+        // Überflüssige Einträge bleiben sichtbar (Hinweis + Entfernen)
+        .chain(hosts.redundant_extra.keys().cloned())
         .chain(cfg.host_aliases.iter().map(|a| a.to.trim().to_lowercase()))
         .filter(|h| !h.is_empty())
         .collect();
@@ -1245,6 +1247,13 @@ enum CardEdit {
     RemoveAlias(String),
 }
 
+/// Hinweis für einen eingetragenen Host, den schon ein angemeldeter
+/// glab-Host abdeckt (z. B. dessen SSH-IP); `None` für alle anderen.
+fn redundant_note(hosts: &HostMap, host: &str, lang: Language) -> Option<String> {
+    let cover = hosts.redundant_extra.get(host)?;
+    Some(tr_fmt(lang, "mrs_extra_redundant", &[cover]))
+}
+
 /// Karte je GitLab-Host: Status, Anmeldung, Urteile (E4), Scopes, Formular.
 fn host_card(
     ui: &mut Ui,
@@ -1256,6 +1265,25 @@ fn host_card(
     edit: &mut Option<CardEdit>,
 ) {
     let lang = t.lang;
+    if let Some(note) = redundant_note(&t.hosts, host, lang) {
+        // Überflüssiger Eintrag: nur Hinweis und Entfernen, keine Prüfung
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(host)
+                        .font(FontId::monospace(12.0))
+                        .color(t.p.title),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if icon_button(ui, ICON_TRASH, &tr(lang, "remove")).clicked() {
+                        *edit = Some(CardEdit::RemoveHost(host.to_string()));
+                    }
+                });
+            });
+            wrapped(ui, &note, 12.0, t.p.text2);
+        });
+        return;
+    }
     let probe = t.probe(host);
     let protocol = host_protocol(host, t.input.repos, &t.hosts, t.input.glab_hosts, cfg);
     let extra = cfg
@@ -2791,6 +2819,41 @@ mod tests {
     /// „gehört zu …“ auf ein (noch) nicht angemeldetes Ziel: der Remote-Host
     /// verlässt die Liste, das Ziel bekommt eine Karte (Token hinzufügen,
     /// Zuordnung entfernen); angeboten werden Karten und angemeldete Hosts.
+    #[test]
+    fn redundant_extra_host_keeps_card_with_note() {
+        // Von Hand eingetragene SSH-IP, die glab über `ssh_host` dem
+        // angemeldeten Web-Host zuordnet: keine Netz-Aufrufe, aber eine Karte
+        // mit Hinweis und Papierkorb, damit sich der Eintrag entfernen lässt.
+        let repos = vec![repo("luma", &["ssh://git@10.0.0.5:2222/team/luma.git"])];
+        let glab = vec![GlabHost {
+            key: "gitlab.firma.example".to_string(),
+            user: "tmueller".to_string(),
+            ssh_host: Some("git@10.0.0.5:2222".to_string()),
+            api_protocol: None,
+        }];
+        let cfg = MrConfig {
+            extra_hosts: keys(&["10.0.0.5"]),
+            ..MrConfig::default()
+        };
+        let hosts = draft_hosts(&repos, &glab, &cfg);
+        assert_eq!(hosts.gitlab_hosts, keys(&["gitlab.firma.example"]));
+        assert_eq!(
+            card_hosts(&hosts, &cfg),
+            keys(&["10.0.0.5", "gitlab.firma.example"])
+        );
+        assert_eq!(
+            redundant_note(&hosts, "10.0.0.5", Language::De).as_deref(),
+            Some(
+                "Gehört zu gitlab.firma.example und wird darüber abgefragt – \
+                 dieser Eintrag ist nicht nötig und kann entfernt werden."
+            )
+        );
+        assert_eq!(
+            redundant_note(&hosts, "gitlab.firma.example", Language::De),
+            None
+        );
+    }
+
     #[test]
     fn alias_targets_get_cards_and_choices() {
         let repos = vec![

@@ -1078,9 +1078,13 @@ pub mod fake {
 
     type Matcher = Box<dyn Fn(&GlabRequest) -> bool + Send>;
 
+    type ReplyFactory = Box<dyn Fn() -> FakeReply + Send>;
+
     #[derive(Default)]
     struct FakeState {
         replies: VecDeque<(Matcher, FakeReply)>,
+        /// Antworten ohne Verbrauch (nach der Queue geprüft, nicht in `pending`)
+        sticky: Vec<(Matcher, ReplyFactory)>,
         calls: Vec<FakeCall>,
         in_flight: HashMap<String, usize>,
         max_parallel: HashMap<String, usize>,
@@ -1120,6 +1124,18 @@ pub mod fake {
             reply: FakeReply,
         ) {
             self.lock().replies.push_back((Box::new(matches), reply));
+        }
+
+        /// Dauerhafte Antwort für jeden passenden Aufruf, auf den keine
+        /// Antwort aus der Queue passt (z. B. `config path` in App-Tests).
+        pub fn always_when(
+            &self,
+            matches: impl Fn(&GlabRequest) -> bool + Send + 'static,
+            reply: impl Fn() -> FakeReply + Send + 'static,
+        ) {
+            self.lock()
+                .sticky
+                .push((Box::new(matches), Box::new(reply)));
         }
 
         /// Protokoll in Aufrufreihenfolge (wird geleert).
@@ -1182,10 +1198,14 @@ pub mod fake {
             let kind = req.kind;
             let reply = {
                 let mut st = self.lock();
-                let Some(pos) = st.replies.iter().position(|(m, _)| m(&req)) else {
-                    panic!("FakeGlab: keine Antwort für {:?}", req.args);
+                let queued = st.replies.iter().position(|(m, _)| m(&req));
+                let reply = match queued {
+                    Some(pos) => st.replies.remove(pos).expect("Position aus der Queue").1,
+                    None => match st.sticky.iter().find(|(m, _)| m(&req)) {
+                        Some((_, make)) => make(),
+                        None => panic!("FakeGlab: keine Antwort für {:?}", req.args),
+                    },
                 };
-                let (_, reply) = st.replies.remove(pos).expect("Position aus der Queue");
                 if st.write_running || (kind == CallKind::Write && st.total > 0) {
                     st.write_overlap = true;
                 }
