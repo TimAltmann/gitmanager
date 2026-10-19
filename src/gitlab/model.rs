@@ -1,10 +1,13 @@
 //! Domänenlogik der Merge-Request-Ansicht (rein, ohne Netz und UI): MR-Modell
 //! aus den GraphQL-Rohdaten, Einteilung in Meine / Von anderen / Nicht
 //! beteiligt mit Repo-Auswahl (E1), Sortierung (E11), Badge (E9),
-//! „mergebereit“ (E10), Chips und Leerzustände (E13) und Pipeline-Link (E7).
+//! „mergebereit“ (E10), Chips und Leerzustände (E13), Pipeline-Link (E7),
+//! eigene gemergte MRs und die Suche je Spalte.
 
 use super::glab::GlabErrorKind;
-use super::graphql::{Dashboard, MentionKind, MentionNode, MrNode, ProjectMrs, UserNode};
+use super::graphql::{
+    Dashboard, MentionKind, MentionNode, MergedPage, MrNode, ProjectMrs, UserNode,
+};
 use super::remote::{project_key, LocalProject};
 use super::time::parse_rfc3339;
 use crate::config::MrConfig;
@@ -501,6 +504,175 @@ pub struct UninvolvedList {
     /// die geladenen („+N“, „{n} weitere laden“)
     pub total: usize,
     pub more: Vec<UninvolvedCursor>,
+}
+
+/// Eigener gemergter MR (Umschalter „Gemergt“).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedMr {
+    pub mr: MergeRequest,
+    /// Unix-Sekunden
+    pub merged_at: Option<i64>,
+    pub merged_by: Option<Person>,
+}
+
+/// Nächste Seite „Gemergt“ eines Hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedCursor {
+    pub host_key: String,
+    pub cursor: String,
+}
+
+/// Seite eines Hosts aus `fetch_merged`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergedHostPage {
+    pub host_key: String,
+    /// Angemeldeter Benutzer (für „von dir“)
+    pub me: Option<String>,
+    pub page: Result<MergedPage, GlabErrorKind>,
+}
+
+/// Eigene gemergte MRs eines Zeitraums über alle Hosts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MergedList {
+    /// Zeitraum in Tagen
+    pub days: u32,
+    /// Beginn des Zeitraums (Unix-Sekunden); gilt auch für weitere Seiten
+    pub since: i64,
+    /// Zuletzt gemergte zuerst
+    pub mrs: Vec<MergedMr>,
+    /// Gemergt im Zeitraum laut GitLab (`count`) ohne ausgeblendete,
+    /// mindestens die geladenen
+    pub total: usize,
+    pub more: Vec<MergedCursor>,
+    /// Hosts, deren Seite scheiterte
+    pub errors: Vec<(String, GlabErrorKind)>,
+    /// `count` je Host (erste Seite)
+    counts: BTreeMap<String, usize>,
+    /// Geladen, aber durch die Repo-Auswahl (E1) ausgeblendet
+    hidden: usize,
+}
+
+impl MergedList {
+    pub fn new(days: u32, since: i64) -> Self {
+        Self {
+            days,
+            since,
+            ..Self::default()
+        }
+    }
+
+    /// Fügt Seiten hinzu (erste oder weitere): Repo-Auswahl wie bei Meine
+    /// (E1), ohne Dubletten, nur ab `since` (falls der Server `mergedAfter`
+    /// nicht kennt), zuletzt gemergte zuerst. Cursor und Fehler eines Hosts
+    /// ersetzt seine neue Seite.
+    pub fn add_pages(
+        &mut self,
+        pages: Vec<MergedHostPage>,
+        locals: &[LocalProject],
+        cfg: &MrConfig,
+    ) {
+        let since = self.since;
+        let selection = RepoSelection::new(locals, cfg);
+        for MergedHostPage { host_key, me, page } in pages {
+            self.more.retain(|c| c.host_key != host_key);
+            self.errors.retain(|(h, _)| *h != host_key);
+            let page = match page {
+                Ok(page) => page,
+                Err(kind) => {
+                    self.errors.push((host_key, kind));
+                    continue;
+                }
+            };
+            let me = me.or_else(|| page.me.and_then(|m| m.username));
+            if let Some(count) = page.count {
+                let count = usize::try_from(count).unwrap_or(usize::MAX);
+                self.counts.entry(host_key.clone()).or_insert(count);
+            }
+            let next = page.page.filter(|p| p.has_next_page);
+            if let Some(cursor) = next.and_then(|p| p.end_cursor) {
+                self.more.push(MergedCursor {
+                    host_key: host_key.clone(),
+                    cursor,
+                });
+            }
+            for node in page.items {
+                let merged_at = node.merged_at.as_deref().and_then(parse_rfc3339);
+                if merged_at.is_some_and(|t| t < since) {
+                    continue;
+                }
+                let Some(mut mr) = MergeRequest::from_node(&host_key, node.mr, me.as_deref())
+                else {
+                    continue;
+                };
+                if self
+                    .mrs
+                    .iter()
+                    .any(|m| m.mr.id == mr.id && m.mr.host_key == mr.host_key)
+                {
+                    continue;
+                }
+                if selection.apply(&mut mr) != Visibility::Shown {
+                    self.hidden += 1;
+                    continue;
+                }
+                let merged_by = node
+                    .merge_user
+                    .as_ref()
+                    .map(|u| Person::from_user(u, me.as_deref()));
+                self.mrs.push(MergedMr {
+                    mr,
+                    merged_at,
+                    merged_by,
+                });
+            }
+        }
+        self.mrs
+            .sort_by_key(|m| Reverse(m.merged_at.unwrap_or(i64::MIN)));
+        let counted: usize = self.counts.values().sum();
+        self.total = counted.saturating_sub(self.hidden).max(self.mrs.len());
+    }
+}
+
+/// Suche je Spalte: jedes Wort (ohne Groß-/Kleinschreibung) steht in Titel,
+/// `!iid`, Quell- oder Zielbranch, Projektpfad oder Autor (Name,
+/// Benutzername). Leere Suche passt immer.
+pub fn mr_matches(mr: &MergeRequest, query: &str) -> bool {
+    query.trim().is_empty() || matches_fields(query, &mr_fields(mr))
+}
+
+/// Wie `mr_matches`, zusätzlich „gemergt von“.
+pub fn merged_matches(merged: &MergedMr, query: &str) -> bool {
+    if query.trim().is_empty() {
+        return true;
+    }
+    let mut fields = mr_fields(&merged.mr);
+    if let Some(by) = &merged.merged_by {
+        fields.extend([by.name.to_lowercase(), by.username.to_lowercase()]);
+    }
+    matches_fields(query, &fields)
+}
+
+/// Suchfelder in Kleinbuchstaben; `!412` findet auch „412“ und „!41“.
+fn mr_fields(mr: &MergeRequest) -> Vec<String> {
+    [
+        &mr.title,
+        &mr.source_branch,
+        &mr.target_branch,
+        &mr.project_path,
+        &mr.author.name,
+        &mr.author.username,
+    ]
+    .iter()
+    .map(|f| f.to_lowercase())
+    .chain([format!("!{}", mr.iid)])
+    .collect()
+}
+
+fn matches_fields(query: &str, fields: &[String]) -> bool {
+    query.split_whitespace().all(|word| {
+        let word = word.to_lowercase();
+        fields.iter().any(|f| f.contains(&word))
+    })
 }
 
 /// Stand der Ansicht nach einem Abruf.
@@ -1017,7 +1189,7 @@ pub fn initials(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gitlab::graphql::{PageInfo, PipelineNode, ReviewerNode, UserNode};
+    use crate::gitlab::graphql::{MergedNode, PageInfo, PipelineNode, ReviewerNode, UserNode};
     use std::path::PathBuf;
 
     const HOST: &str = "gitlab.example.com";
@@ -2587,5 +2759,156 @@ mod tests {
         assert_eq!(initials("(Bot) Renovate"), "BR");
         assert_eq!(initials(""), "?");
         assert_eq!(initials(" - "), "?");
+    }
+
+    // --- Gemergt und Suche ---------------------------------------------
+
+    fn merged_node(iid: u64, project: &str, at: &str, by: &str) -> MergedNode {
+        MergedNode {
+            mr: Mr::new(iid, project, ME, "2026-10-17T09:00:00Z")
+                .approved(&["mbecker"], 2)
+                .0,
+            merged_at: Some(at.to_string()),
+            merge_user: Some(user(by, false)),
+        }
+    }
+
+    fn merged_page(count: u32, cursor: Option<&str>, items: Vec<MergedNode>) -> MergedHostPage {
+        MergedHostPage {
+            host_key: HOST.to_string(),
+            me: Some(ME.to_string()),
+            page: Ok(MergedPage {
+                me: None,
+                count: Some(count),
+                page: Some(PageInfo {
+                    has_next_page: cursor.is_some(),
+                    end_cursor: cursor.map(str::to_string),
+                }),
+                items,
+            }),
+        }
+    }
+
+    fn merged_iids(list: &MergedList) -> Vec<u64> {
+        list.mrs.iter().map(|m| m.mr.iid).collect()
+    }
+
+    #[test]
+    fn merged_list_sorts_filters_and_pages() {
+        let since = parse_rfc3339("2026-09-17T10:00:00Z").expect("Zeit");
+        let locals = locals(&["tools/gitmanager"]);
+        let cfg = MrConfig::default();
+        let mut list = MergedList::new(30, since);
+        let first = vec![
+            merged_node(84, "web/kundenportal", "2026-10-16T08:00:00Z", "jkrueger"),
+            merged_node(408, "kern/backend-api", "2026-10-17T08:00:00Z", "mbecker"),
+            // abgewählt
+            merged_node(17, "tools/gitmanager", "2026-10-12T08:00:00Z", ME),
+            // vor dem Zeitraum (Server ohne `mergedAfter`)
+            merged_node(5, "kern/backend-api", "2026-08-01T08:00:00Z", ME),
+        ];
+        list.add_pages(vec![merged_page(6, Some("c1"), first)], &locals, &cfg);
+        assert_eq!(merged_iids(&list), vec![408, 84]);
+        let newest = &list.mrs[0];
+        let by = newest.merged_by.as_ref().expect("gemergt von");
+        assert_eq!((by.name.as_str(), by.is_me), ("Miriam Becker", false));
+        assert!(newest.mr.author.is_me && newest.mr.local);
+        assert_eq!(newest.merged_at, parse_rfc3339("2026-10-17T08:00:00Z"));
+        // 6 laut GitLab, davon einer abgewählt
+        assert_eq!(list.total, 5);
+        assert_eq!(
+            list.more,
+            vec![MergedCursor {
+                host_key: HOST.to_string(),
+                cursor: "c1".to_string(),
+            }]
+        );
+
+        // Weitere Seite: Dubletten fallen weg, `count` der ersten Seite gilt
+        let next = vec![
+            merged_node(84, "web/kundenportal", "2026-10-16T08:00:00Z", "jkrueger"),
+            merged_node(229, "kern/dokumentenservice", "2026-10-14T08:00:00Z", ME),
+        ];
+        list.add_pages(vec![merged_page(99, None, next)], &locals, &cfg);
+        assert_eq!(merged_iids(&list), vec![408, 84, 229]);
+        assert!(list.mrs[2].merged_by.as_ref().is_some_and(|p| p.is_me));
+        assert_eq!(list.total, 5);
+        assert!(list.more.is_empty());
+    }
+
+    #[test]
+    fn merged_list_records_host_errors() {
+        let mut list = MergedList::new(7, 0);
+        let failed = MergedHostPage {
+            host_key: "git.intern".to_string(),
+            me: Some(ME.to_string()),
+            page: Err(GlabErrorKind::Timeout),
+        };
+        let ok = merged_page(
+            1,
+            None,
+            vec![merged_node(
+                408,
+                "kern/backend-api",
+                "2026-10-17T08:00:00Z",
+                "mbecker",
+            )],
+        );
+        list.add_pages(vec![failed, ok], &locals(&[]), &MrConfig::default());
+        assert_eq!(
+            list.errors,
+            vec![("git.intern".to_string(), GlabErrorKind::Timeout)]
+        );
+        assert_eq!((list.total, merged_iids(&list)), (1, vec![408]));
+    }
+
+    #[test]
+    fn search_matches_all_words_in_fields() {
+        let mr = MergeRequest {
+            iid: 412,
+            title: "CSV-Export für Mandanten".to_string(),
+            project_path: "kern/backend-api".to_string(),
+            source_branch: "feature/csv-export".to_string(),
+            target_branch: "main".to_string(),
+            author: Person {
+                username: "dwagner".to_string(),
+                name: "David Wagner".to_string(),
+                ..Person::default()
+            },
+            ..MergeRequest::default()
+        };
+        for (query, hit) in [
+            ("", true),
+            ("  ", true),
+            ("csv", true),
+            ("MANDANTEN", true),
+            ("!412", true),
+            ("412", true),
+            ("!41", true),
+            ("!413", false),
+            ("backend-api", true),
+            ("feature/csv", true),
+            ("main", true),
+            ("Wagner", true),
+            ("dwagner", true),
+            ("csv  wagner", true),
+            ("csv müller", false),
+            ("xyz", false),
+        ] {
+            assert_eq!(mr_matches(&mr, query), hit, "{query}");
+        }
+        let merged = MergedMr {
+            mr,
+            merged_at: None,
+            merged_by: Some(Person {
+                username: "mbecker".to_string(),
+                name: "Miriam Becker".to_string(),
+                ..Person::default()
+            }),
+        };
+        assert!(merged_matches(&merged, "becker"));
+        assert!(merged_matches(&merged, "csv mbecker"));
+        assert!(merged_matches(&merged, ""));
+        assert!(!merged_matches(&merged, "krüger"));
     }
 }

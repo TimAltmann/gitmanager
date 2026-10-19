@@ -9,16 +9,17 @@ use super::glab::{
     StdinBody, CI_ENV, DEFAULT_TIMEOUT, TOKEN_ENV,
 };
 use super::graphql::{
-    self, parse_access, parse_dashboard, parse_mentions, parse_uninvolved, parse_uninvolved_page,
-    run_query, run_query_with, HostSchema, ProjectMrs, ProjectNode, SchemaErrorCode, UserNode,
+    self, parse_access, parse_dashboard, parse_mentions, parse_merged, parse_uninvolved,
+    parse_uninvolved_page, run_query, run_query_with, GqlData, HostSchema, MergedPage, ProjectMrs,
+    ProjectNode, SchemaErrorCode, UserNode,
 };
 use super::model::{
-    build_snapshot, sort_uninvolved, HostRaw, HostStatus, MergeRequest, MrPart, MrSnapshot,
-    UninvolvedCursor,
+    build_snapshot, sort_uninvolved, HostRaw, HostStatus, MergeRequest, MergedHostPage, MrPart,
+    MrSnapshot, UninvolvedCursor,
 };
 use super::remote::{strip_port, GlabHost, HostMap, LocalProject};
 use super::secret::SecretString;
-use super::time::{now_unix, parse_date};
+use super::time::{format_rfc3339, now_unix, parse_date};
 use crate::config::MrConfig;
 use crate::i18n::{tr, tr_fmt, Language};
 use semver::Version;
@@ -715,6 +716,60 @@ fn not_filter_removed(schema: &HostSchema) -> bool {
     schema.removed.iter().any(|e| {
         e.code != SchemaErrorCode::UndefinedField && (e.name == "not" || e.name == "authorUsername")
     })
+}
+
+/// Eigene gemergte MRs ab `since` (Unix-Sekunden): je Host die erste Seite
+/// oder mit Cursor die nächste. Hosts parallel (ein Thread je Host), je Host
+/// das gelernte Schema; Fehler stehen in der Seite des Hosts.
+pub fn fetch_merged(
+    runner: &dyn GlabRunner,
+    jobs: &[(String, Option<String>, Option<String>)],
+    since: i64,
+) -> Vec<MergedHostPage> {
+    let since = format_rfc3339(since);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = jobs
+            .iter()
+            .map(|(host, me, cursor)| {
+                let since = &since;
+                scope.spawn(move || {
+                    let mut schema = schema_for(host);
+                    let query = graphql::merged(since, cursor.as_deref());
+                    let page = run_query(runner, host, &mut schema, query).and_then(merged_page);
+                    store_schema(host, schema);
+                    MergedHostPage {
+                        host_key: host.clone(),
+                        me: me.clone(),
+                        page,
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|w| {
+                w.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
+/// Seite aus der Antwort; fehlt die Liste, zählen die Meldungen als Fehler
+/// (sonst sähe es aus wie „nichts gemergt“).
+fn merged_page(got: GqlData) -> Result<MergedPage, GlabErrorKind> {
+    let Some(user) = got.data.get("currentUser").filter(|u| u.is_object()) else {
+        return Err(if got.errors.is_empty() {
+            GlabErrorKind::NotAuthenticated
+        } else {
+            GlabErrorKind::GraphQl(got.errors)
+        });
+    };
+    let missing = user.get("authoredMergeRequests").is_none_or(Value::is_null);
+    if missing && !got.errors.is_empty() {
+        return Err(GlabErrorKind::GraphQl(got.errors));
+    }
+    Ok(parse_merged(&got.data))
 }
 
 /// Nächste Seite „Nicht beteiligt“ für die Projekte eines Hosts (Cursor aus
@@ -1926,6 +1981,62 @@ mod tests {
         assert_eq!(status.partial, Vec::new());
         // Review-Anfragen bleiben
         assert_eq!(iids(&got.snapshot.others), vec![92, 421]);
+    }
+
+    #[test]
+    fn fetch_merged_pages_per_host_with_errors() {
+        let runner = gated();
+        let fake = runner.inner();
+        let page = json!({ "data": { "currentUser": { "username": ME, "authoredMergeRequests": {
+            "count": 1,
+            "pageInfo": { "hasNextPage": false, "endCursor": null },
+            "nodes": [{ "id": "gid://gitlab/MergeRequest/1", "iid": "408",
+                        "mergedAt": "2026-10-17T08:00:00Z" }]
+        } } } })
+        .to_string();
+        fake.push_when(query(HOST, "GmMerged"), gql(&page));
+        // Liste `null` mit Meldung: Fehler statt „nichts gemergt“
+        fake.push_when(
+            query(HOST_B, "GmMerged"),
+            gql(r#"{"data":{"currentUser":{"username":"taltmann","authoredMergeRequests":null}},"errors":[{"message":"Gemergte nicht verfügbar"}]}"#),
+        );
+        let jobs = vec![
+            (HOST.to_string(), Some(ME.to_string()), None),
+            (
+                HOST_B.to_string(),
+                Some(ME.to_string()),
+                Some("MTA".to_string()),
+            ),
+        ];
+        let since = parse_date("2026-09-17").expect("Datum");
+        let pages = fetch_merged(&runner, &jobs, since);
+        assert_eq!(fake.pending(), 0);
+        let calls = fake.take_calls();
+        let to_b = calls
+            .iter()
+            .find(|c| c.request.host_key.as_deref() == Some(HOST_B))
+            .expect("Aufruf an HOST_B");
+        assert_eq!(
+            variables(to_b),
+            json!({ "since": "2026-09-17T00:00:00Z", "after": "MTA" })
+        );
+        let hosts: Vec<&str> = pages.iter().map(|p| p.host_key.as_str()).collect();
+        assert_eq!(hosts, vec![HOST, HOST_B]);
+        let ok = pages[0].page.as_ref().expect("Seite");
+        assert_eq!(ok.items.len(), 1);
+        assert_eq!(ok.count, Some(1));
+        assert_eq!(
+            pages[1].page,
+            Err(GlabErrorKind::GraphQl(strings(&[
+                "Gemergte nicht verfügbar"
+            ])))
+        );
+
+        // Ohne Anmeldung (`currentUser: null`)
+        let runner = gated();
+        runner.inner().push(gql(r#"{"data":{"currentUser":null}}"#));
+        let pages = fetch_merged(&runner, &jobs[..1], since);
+        assert_eq!(pages[0].page, Err(GlabErrorKind::NotAuthenticated));
     }
 
     #[test]

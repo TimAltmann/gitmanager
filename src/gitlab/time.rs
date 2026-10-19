@@ -71,6 +71,15 @@ pub fn parse_date(s: &str) -> Option<i64> {
     parse_ymd(s).map(|days| days * DAY)
 }
 
+/// Zeitpunkt als RFC 3339 in UTC (`JJJJ-MM-TTTHH:MM:SSZ`), z. B. für
+/// `mergedAfter`.
+pub fn format_rfc3339(ts: i64) -> String {
+    let (y, m, d) = civil_from_days(ts.div_euclid(DAY));
+    let secs = ts.rem_euclid(DAY);
+    let (hour, min, sec) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    format!("{y:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
+
 /// Datum als `TT.MM.JJJJ` (UTC).
 pub fn format_date(ts: i64) -> String {
     let (y, m, d) = civil_from_days(ts.div_euclid(DAY));
@@ -156,6 +165,18 @@ mod tests {
     const MIN: i64 = 60;
     const HOUR: i64 = 60 * MIN;
     const DAY: i64 = 24 * HOUR;
+
+    #[test]
+    fn format_rfc3339_round_trip() {
+        for text in [
+            "2026-10-19T12:58:15Z",
+            "1970-01-01T00:00:00Z",
+            "2024-02-29T23:59:59Z",
+        ] {
+            let ts = parse_rfc3339(text).expect("gültig");
+            assert_eq!(format_rfc3339(ts), text);
+        }
+    }
 
     #[test]
     fn parse_rfc3339_utc() {

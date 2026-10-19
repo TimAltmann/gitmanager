@@ -24,6 +24,8 @@ pub const UNINVOLVED_PAGE_CHUNK: usize = 3;
 pub const ACCESS_CHUNK: usize = 50;
 /// Erwähnungen: höchstens so viele Seiten (erledigte To-dos häufen sich).
 pub const MENTIONS_MAX_PAGES: usize = 3;
+/// Seitengröße der eigenen gemergten MRs („Gemergt“).
+pub const MERGED_PAGE_SIZE: usize = 20;
 /// Versuche je Abfrage beim Schema-Fallback; GitLab meldet höchstens 5
 /// Fehler je Antwort.
 pub const MAX_ATTEMPTS: usize = 4;
@@ -554,6 +556,33 @@ pub fn mentions(after: Option<&str>) -> Query {
     .fragment(mr_fragment())
 }
 
+/// `MERGED`: eigene gemergte MRs ab `since` (RFC 3339), zuletzt gemergte
+/// zuerst; `after` = Cursor der nächsten Seite. Ohne `mergedAfter` bzw.
+/// `sort` (Schema-Fallback) filtert und sortiert der Client.
+pub fn merged(since: &str, after: Option<&str>) -> Query {
+    let mut mr = vec![Item::Spread(MR_FRAGMENT)];
+    mr.extend(scalars("mergedAt"));
+    mr.push(Field::object("mergeUser", &["UserCore"], scalars("username name")).into());
+    let nodes = Field::object("nodes", &["MergeRequest"], mr);
+    let mut items = scalars("count");
+    items.extend([page_info(), nodes.into()]);
+    let list = Field::object("authoredMergeRequests", &["MergeRequestConnection"], items)
+        .arg("state", "merged")
+        .opt_arg("mergedAfter", "$since")
+        .opt_arg("sort", "MERGED_AT_DESC")
+        .arg("first", MERGED_PAGE_SIZE)
+        .arg("after", "$after");
+    let mut user = scalars("username");
+    user.push(list.into());
+    Query::new(
+        "GmMerged",
+        vec![Field::object("currentUser", CURRENT_USER, user).into()],
+    )
+    .var("since", "Time", Some(Value::from(since)))
+    .var("after", "String", after.map(Value::from))
+    .fragment(mr_fragment())
+}
+
 /// `UNINVOLVED`: offene MRs anderer in den Projekten, je Abfrage höchstens
 /// `UNINVOLVED_CHUNK` Pfade. Ohne Pfade keine Abfrage.
 pub fn uninvolved(paths: &[String], me: &str) -> Vec<Query> {
@@ -998,6 +1027,25 @@ impl Mentions {
     }
 }
 
+/// Gemergter MR samt Zeitpunkt und wer gemergt hat.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MergedNode {
+    pub mr: MrNode,
+    /// RFC 3339
+    pub merged_at: Option<String>,
+    pub merge_user: Option<UserNode>,
+}
+
+/// Eine Seite eigener gemergter MRs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MergedPage {
+    pub me: Option<UserNode>,
+    /// `count` laut GitLab (im Zeitraum, falls `mergedAfter` ging)
+    pub count: Option<u32>,
+    pub page: Option<PageInfo>,
+    pub items: Vec<MergedNode>,
+}
+
 /// Offene MRs anderer in einem Projekt.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectMrs {
@@ -1193,6 +1241,28 @@ pub fn parse_mentions(data: &Value) -> Mentions {
 fn todos_hidden(user: &Value) -> bool {
     nodes(user, "todos").is_some_and(|n| n.is_empty())
         && page(user, "todos").is_some_and(|p| p.has_next_page)
+}
+
+pub fn parse_merged(data: &Value) -> MergedPage {
+    let user = data.get("currentUser").unwrap_or(&Value::Null);
+    let list = user.get("authoredMergeRequests").unwrap_or(&Value::Null);
+    let items = nodes(user, "authoredMergeRequests")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|node| {
+            Some(MergedNode {
+                mr: parse_mr(node)?,
+                merged_at: text(node, "mergedAt"),
+                merge_user: node.get("mergeUser").and_then(parse_user),
+            })
+        })
+        .collect();
+    MergedPage {
+        me: parse_user(user),
+        count: number(list, "count"),
+        page: page(user, "authoredMergeRequests"),
+        items,
+    }
 }
 
 /// Ohne eigene MRs (falls `not` entfallen ist).
@@ -2060,7 +2130,8 @@ mod tests {
         queries.extend(uninvolved(&long[..UNINVOLVED_CHUNK], ME));
         queries.extend(uninvolved_page(&pages, ME));
         queries.extend(access(&long));
-        assert_eq!(queries.len(), 5);
+        queries.push(merged("2026-09-19T10:00:00Z", Some("MTAwMjQ")));
+        assert_eq!(queries.len(), 6);
         for query in &queries {
             let text = compact(&query.text());
             assert!(
@@ -2152,6 +2223,62 @@ mod tests {
         let body: Value = serde_json::from_str(&query.body()).expect("JSON");
         assert_eq!(body["query"], text);
         assert_eq!(body["variables"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn merged_text_variables_and_parse() {
+        let query = merged("2026-09-19T10:00:00Z", Some("MTA"));
+        let text = query.text();
+        assert!(text.starts_with("query GmMerged($since: Time, $after: String) { currentUser { username authoredMergeRequests(state: merged, mergedAfter: $since, sort: MERGED_AT_DESC, first: 20, after: $after) { count pageInfo { hasNextPage endCursor } nodes { ...Mr mergedAt mergeUser { username name } } } } }"), "{text}");
+        let body: Value = serde_json::from_str(&query.body()).expect("JSON");
+        assert_eq!(
+            body["variables"],
+            serde_json::json!({ "since": "2026-09-19T10:00:00Z", "after": "MTA" })
+        );
+        // Erste Seite: ohne Cursor (`null`)
+        let first: Value = serde_json::from_str(&merged("x", None).body()).expect("JSON");
+        assert_eq!(first["variables"].get("after"), None);
+
+        let data = serde_json::json!({ "currentUser": { "username": ME, "authoredMergeRequests": {
+            "count": 8,
+            "pageInfo": { "hasNextPage": true, "endCursor": "MjA" },
+            "nodes": [
+                { "id": "gid://gitlab/MergeRequest/1", "iid": "3546", "title": "A",
+                  "mergedAt": "2026-10-19T12:58:15Z",
+                  "mergeUser": { "username": "tmueller", "name": "T W" } },
+                { "iid": "5", "mergedAt": null, "mergeUser": null },
+                { "title": "ohne id" },
+                null
+            ]
+        } } });
+        let page = parse_merged(&data);
+        assert_eq!(page.count, Some(8));
+        assert_eq!(
+            page.page,
+            Some(PageInfo {
+                has_next_page: true,
+                end_cursor: Some("MjA".to_string()),
+            })
+        );
+        assert_eq!(page.items.len(), 2);
+        let newest = &page.items[0];
+        assert_eq!(newest.mr.iid, Some(3546));
+        assert_eq!(newest.merged_at.as_deref(), Some("2026-10-19T12:58:15Z"));
+        assert_eq!(
+            newest
+                .merge_user
+                .as_ref()
+                .and_then(|u| u.username.as_deref()),
+            Some("tmueller")
+        );
+        assert_eq!(
+            (
+                page.items[1].merged_at.as_deref(),
+                page.items[1].merge_user.as_ref()
+            ),
+            (None, None)
+        );
+        assert_eq!(page.me.and_then(|m| m.username).as_deref(), Some(ME));
     }
 
     #[test]

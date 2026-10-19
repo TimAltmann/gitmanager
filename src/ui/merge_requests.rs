@@ -1,6 +1,7 @@
 //! Merge-Request-Ansicht nach Design B (zweispaltiges Dashboard, E8):
-//! „Meine Merge Requests“ und „Von anderen“ mit Filter-Chips (E13), darunter
-//! „Nicht beteiligt“; Zeilen mit Approvals, klickbarer Pipeline (E7),
+//! „Meine Merge Requests“ (Offen | Gemergt) und „Von anderen“ mit
+//! Filter-Chips (E13), darunter „Nicht beteiligt“, je Spalte eine Suche
+//! (Entwurf S1); Zeilen mit Approvals, klickbarer Pipeline (E7),
 //! Threads und Checkout-Menü K1 (E5/E6) sowie die Zustandskarten. Zeichnet
 //! nur und meldet Klicks über `MrViewActions`; Abruf, Auschecken und Öffnen
 //! verdrahtet `app.rs` (Task 10/11). Farben nur aus `mr_palette` (E14).
@@ -13,20 +14,23 @@ use crate::gitlab::checkout::{
     OpenBranches, UnavailableReason,
 };
 use crate::gitlab::glab::{GlabErrorKind, GlabOutput};
+use crate::gitlab::graphql::MERGED_PAGE_SIZE;
 use crate::gitlab::model::{
-    approvals, chip_counts, empty_state, filter_others, initials, mr_url, others_header_count,
-    pipeline_url, ready, Approvals, ChipCounts, Chips, EmptyKind, HeaderCount, MergeRequest,
-    MrPart, MrSnapshot, MyReview, PipelineState, Reason, UninvolvedList,
+    approvals, chip_counts, empty_state, filter_others, initials, merged_matches, mr_matches,
+    mr_url, others_header_count, pipeline_url, ready, Approvals, ChipCounts, Chips, EmptyKind,
+    HeaderCount, MergeRequest, MergedList, MergedMr, MrPart, MrSnapshot, MyReview, PipelineState,
+    Reason, UninvolvedList,
 };
 use crate::gitlab::remote::{HostMap, LocalProject};
 use crate::gitlab::service::{error_text, is_auth_error};
-use crate::gitlab::time::relative_time;
+use crate::gitlab::time::{format_date, relative_time};
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::ui::theme::{mr_palette, MrPalette};
 use egui::{
-    vec2, Align, Align2, Atoms, Button, Color32, CursorIcon, FontId, Frame, Id, Image, ImageSource,
-    Label, Layout, Margin, Popup, PopupCloseBehavior, RectAlign, Response, RichText, ScrollArea,
-    Sense, Spinner, Stroke, StrokeKind, Ui, UiBuilder, WidgetInfo, WidgetType,
+    vec2, Align, Align2, Atoms, Button, Color32, ComboBox, CursorIcon, FontId, Frame, Id, Image,
+    ImageSource, Key, Label, Layout, Margin, Popup, PopupCloseBehavior, RectAlign, Response,
+    RichText, ScrollArea, Sense, Spinner, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, WidgetInfo,
+    WidgetType,
 };
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
@@ -73,6 +77,8 @@ const ICON_FOLDER_ARROW: ImageSource =
 const ICON_CODE: ImageSource = egui::include_image!("../../assets/icons/mr/code.svg");
 const ICON_SPARKLE: ImageSource = egui::include_image!("../../assets/icons/mr/sparkle.svg");
 const ICON_WARNING: ImageSource = egui::include_image!("../../assets/icons/mr/warning-circle.svg");
+const ICON_SEARCH: ImageSource = egui::include_image!("../../assets/icons/mr/magnifying-glass.svg");
+const ICON_CROSS: ImageSource = egui::include_image!("../../assets/icons/mr/x.svg");
 
 /// Mindestbreite einer Spalte: zwei Spalten ab 2 × 420 + 12 = 852 px
 /// Inhaltsbreite (E8), damit B beim Mindestfenster zweispaltig bleibt.
@@ -83,6 +89,9 @@ const COLUMN_GAP: f32 = 12.0;
 const COMPACT_WIDTH: f32 = 460.0;
 /// Zeilen „Nicht beteiligt“ je Schritt („{k} weitere laden“)
 pub const UNINVOLVED_STEP: usize = 10;
+/// Zeiträume „Gemergt“ in Tagen; Vorgabe 30.
+pub const MERGED_PERIODS: [u32; 3] = [7, 30, 90];
+pub const MERGED_DEFAULT_DAYS: u32 = 30;
 /// Checkout-Menü (K1) bzw. Menü „Bereits ausgecheckt“
 const MENU_WIDTH: f32 = 400.0;
 const ALREADY_MENU_WIDTH: f32 = 320.0;
@@ -116,6 +125,13 @@ pub struct MrViewState {
     pub show_uninvolved: bool,
     /// Angezeigte Zeilen „Nicht beteiligt“
     pub uninvolved_shown: usize,
+    /// „Meine“ zeigt die gemergten statt der offenen MRs
+    pub mine_merged: bool,
+    /// Zeitraum „Gemergt“ in Tagen (`MERGED_PERIODS`)
+    pub merged_days: u32,
+    /// Suche je Spalte
+    pub mine_query: String,
+    pub others_query: String,
 }
 
 impl MrViewState {
@@ -127,6 +143,10 @@ impl MrViewState {
             mention_on: chips.mention,
             show_uninvolved: chips.all,
             uninvolved_shown: UNINVOLVED_STEP,
+            mine_merged: false,
+            merged_days: MERGED_DEFAULT_DAYS,
+            mine_query: String::new(),
+            others_query: String::new(),
         }
     }
 
@@ -186,6 +206,10 @@ pub struct MrViewActions {
     pub fetch_uninvolved: bool,
     /// Nächste Seite „Nicht beteiligt“
     pub load_more: bool,
+    /// „Gemergt“ für `MrViewState::merged_days` laden (Umschalten, Zeitraum)
+    pub fetch_merged: bool,
+    /// Nächste Seite „Gemergt“
+    pub load_more_merged: bool,
     /// Einstellungen direkt im Tab „Merge Requests“ öffnen (Deep-Link)
     pub open_settings_mr_tab: bool,
 }
@@ -199,6 +223,10 @@ pub struct MrViewInput<'a> {
     pub snapshot: Option<&'a MrSnapshot>,
     /// „Nicht beteiligt“ (erste oder weitere Seite) wird geladen
     pub uninvolved_loading: bool,
+    /// Zuletzt geladene gemergte MRs (Zeitraum in `MergedList::days`)
+    pub merged: Option<&'a MergedList>,
+    /// „Gemergt“ (erste oder weitere Seite) wird geladen
+    pub merged_loading: bool,
     /// glab fehlt (`NotInstalled`) oder ist zu alt (`TooOld`)
     pub glab_error: Option<&'a GlabErrorKind>,
     /// Scan oder lokale glab-Erkennung (E16) läuft noch: ohne GitLab-Host
@@ -595,14 +623,16 @@ fn show_dashboard(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut 
                         return;
                     };
                     column_frame(mine, v, |ui| {
-                        mine_header(ui, v);
+                        mine_header(ui, v, state, actions);
+                        mine_search(ui, v, state, actions);
                         ScrollArea::vertical()
                             .id_salt("mr_mine")
                             .auto_shrink([false, false])
-                            .show(ui, |ui| mine_body(ui, v, actions));
+                            .show(ui, |ui| mine_body(ui, v, state, actions));
                     });
                     column_frame(others, v, |ui| {
                         others_header(ui, v, state, actions);
+                        others_search(ui, v, state);
                         ScrollArea::vertical()
                             .id_salt("mr_others")
                             .auto_shrink([false, false])
@@ -619,12 +649,14 @@ fn show_dashboard(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut 
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     column_frame(ui, v, |ui| {
-                        mine_header(ui, v);
-                        mine_body(ui, v, actions);
+                        mine_header(ui, v, state, actions);
+                        mine_search(ui, v, state, actions);
+                        mine_body(ui, v, state, actions);
                     });
                     ui.add_space(COLUMN_GAP);
                     column_frame(ui, v, |ui| {
                         others_header(ui, v, state, actions);
+                        others_search(ui, v, state);
                         others_body(ui, v, state, actions);
                     });
                 });
@@ -645,13 +677,15 @@ fn column_frame(ui: &mut Ui, v: &View, add: impl FnOnce(&mut Ui)) {
         });
 }
 
-/// Spaltenkopf: Titel und Zähler-Pill links, `right` rechtsbündig – oder
-/// in einer zweiten Zeile, wenn `right_width` nicht mehr daneben passt.
+/// Spaltenkopf: Titel und `beside` (Zähler-Pill bzw. Umschalter, Breite
+/// `beside_width`) links, `right` rechtsbündig – oder in einer zweiten
+/// Zeile, wenn `right_width` nicht mehr daneben passt.
 fn column_header(
     ui: &mut Ui,
     v: &View,
     title: &str,
-    count: &str,
+    beside_width: f32,
+    beside: impl FnOnce(&mut Ui),
     right_width: f32,
     right: impl FnOnce(&mut Ui, bool),
 ) {
@@ -659,14 +693,12 @@ fn column_header(
         .inner_margin(Margin::symmetric(12, 8))
         .show(ui, |ui| {
             ui.set_min_height(24.0);
-            let left_width = text_width(ui, title, FontId::proportional(13.0))
-                + text_width(ui, count, FontId::proportional(11.0))
-                + 30.0;
+            let left_width = text_width(ui, title, FontId::proportional(13.0)) + beside_width + 8.0;
             let wide = ui.available_width() >= left_width + right_width + 12.0;
             let left = |ui: &mut Ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.label(RichText::new(title).size(13.0).color(v.p.title));
-                count_pill(ui, v, count);
+                beside(ui);
             };
             if wide {
                 ui.horizontal(|ui| {
@@ -683,17 +715,25 @@ fn column_header(
         });
 }
 
-fn mine_header(ui: &mut Ui, v: &View) {
+fn mine_header(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrViewActions) {
     let lang = v.lang();
-    let caption = tr(lang, "mr_sorted");
+    let (caption, tooltip) = if state.mine_merged {
+        (
+            tr(lang, "mr_sorted_merged"),
+            tr(lang, "mr_sorted_merged_tt"),
+        )
+    } else {
+        (tr(lang, "mr_sorted"), tr(lang, "mr_sorted_tt"))
+    };
     let caption_width = text_width(ui, &caption, FontId::proportional(11.0)) + 26.0;
-    let count = v.snap.mine.len().to_string();
-    let tooltip = tr(lang, "mr_sorted_tt");
+    let segments = mine_segments(v, state);
+    let segments_width = segments_width(ui, &segments);
     column_header(
         ui,
         v,
         &tr(lang, "mr_mine_title"),
-        &count,
+        segments_width,
+        |ui| show_mine_segments(ui, v, &segments, state, actions),
         caption_width,
         |ui, rtl| {
             // Statische Beschriftung (E11), Regel im Tooltip
@@ -717,6 +757,255 @@ fn mine_header(ui: &mut Ui, v: &View) {
     );
 }
 
+/// Segment des Umschalters „Offen | Gemergt“: (Beschriftung, Zähler, Tooltip).
+type Segment = (String, Option<String>, String);
+
+/// „Offen {n}“ und „Gemergt {n}“; mit Suche „{sichtbar} von {gesamt}“ am
+/// aktiven Segment. „Gemergt“ zählt erst, wenn der Zeitraum geladen ist.
+fn mine_segments(v: &View, state: &MrViewState) -> [Segment; 2] {
+    let lang = v.lang();
+    let searching = !state.mine_query.trim().is_empty();
+    let of = |visible: usize, total: usize| {
+        tr_fmt(
+            lang,
+            "mr_count_of",
+            &[&visible.to_string(), &total.to_string()],
+        )
+    };
+    let total = v.snap.mine.len();
+    let open = if searching && !state.mine_merged {
+        let visible = visible_mine(v, &state.mine_query).len();
+        of(visible, total)
+    } else {
+        total.to_string()
+    };
+    let merged = current_merged(v, state).map(|list| {
+        if searching && state.mine_merged {
+            of(visible_merged(list, &state.mine_query).len(), list.total)
+        } else {
+            list.total.to_string()
+        }
+    });
+    let days = state.merged_days.to_string();
+    [
+        (
+            tr(lang, "mr_seg_open"),
+            Some(open),
+            tr(lang, "mr_seg_open_tt"),
+        ),
+        (
+            tr(lang, "mr_seg_merged"),
+            merged,
+            tr_fmt(lang, "mr_seg_merged_tt", &[&days]),
+        ),
+    ]
+}
+
+fn segment_width(ui: &Ui, (label, count, _): &Segment) -> f32 {
+    let count = count
+        .as_deref()
+        .map_or(0.0, |c| 6.0 + text_width(ui, c, FontId::proportional(11.0)));
+    2.0 * ui.spacing().button_padding.x + text_width(ui, label, FontId::proportional(12.0)) + count
+}
+
+/// Breite samt Rahmen (2 px Innenabstand, 2 px Abstand der Segmente).
+fn segments_width(ui: &Ui, segments: &[Segment; 2]) -> f32 {
+    segments.iter().map(|s| segment_width(ui, s)).sum::<f32>() + 2.0 + 6.0
+}
+
+/// Umschalter „Offen | Gemergt“ in der Anatomie des Ansichts-Umschalters.
+/// „Gemergt“ lädt, wenn der Zeitraum noch nicht geladen ist.
+fn show_mine_segments(
+    ui: &mut Ui,
+    v: &View,
+    segments: &[Segment; 2],
+    state: &mut MrViewState,
+    actions: &mut MrViewActions,
+) {
+    let p = &v.p;
+    Frame::new()
+        .stroke(Stroke::new(1.0, p.line))
+        .corner_radius(8)
+        .inner_margin(2)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (merged, (label, count, tooltip)) in [false, true].into_iter().zip(segments) {
+                    let selected = state.mine_merged == merged;
+                    let mut atoms = Atoms::new(RichText::new(label).size(12.0));
+                    if let Some(count) = count {
+                        let mut text = RichText::new(count).size(11.0);
+                        if !selected {
+                            text = text.color(p.text2);
+                        }
+                        atoms.push_right(text);
+                    }
+                    let button = Button::selectable(selected, atoms)
+                        .corner_radius(6)
+                        .min_size(vec2(0.0, 20.0))
+                        .gap(6.0);
+                    if ui.add(button).on_hover_text(tooltip).clicked() && !selected {
+                        state.mine_merged = merged;
+                        if merged && needs_merged(v, state) {
+                            actions.fetch_merged = true;
+                        }
+                    }
+                }
+            });
+        });
+}
+
+/// Geladene gemergte MRs, sofern sie zum gewählten Zeitraum passen.
+fn current_merged<'a>(v: &View<'a>, state: &MrViewState) -> Option<&'a MergedList> {
+    v.input.merged.filter(|l| l.days == state.merged_days)
+}
+
+/// „Gemergt“ muss (neu) geladen werden: noch nichts oder anderer Zeitraum.
+fn needs_merged(v: &View, state: &MrViewState) -> bool {
+    current_merged(v, state).is_none() && !v.input.merged_loading
+}
+
+fn visible_mine<'a>(v: &View<'a>, query: &str) -> Vec<&'a MergeRequest> {
+    v.snap
+        .mine
+        .iter()
+        .filter(|m| mr_matches(m, query))
+        .collect()
+}
+
+fn visible_merged<'a>(list: &'a MergedList, query: &str) -> Vec<&'a MergedMr> {
+    list.mrs
+        .iter()
+        .filter(|m| merged_matches(m, query))
+        .collect()
+}
+
+/// Suchzeile „Meine“; bei „Gemergt“ darunter Anzahl und Zeitraum.
+fn mine_search(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrViewActions) {
+    let lang = v.lang();
+    search_row(
+        ui,
+        v,
+        &mut state.mine_query,
+        &tr(lang, "mr_search_mine_hint"),
+        "mine",
+    );
+    if state.mine_merged {
+        merged_period_row(ui, v, state, actions);
+    }
+}
+
+fn others_search(ui: &mut Ui, v: &View, state: &mut MrViewState) {
+    search_row(
+        ui,
+        v,
+        &mut state.others_query,
+        &tr(v.lang(), "mr_search_others_hint"),
+        "others",
+    );
+}
+
+/// Suchfeld einer Spalte: Lupe, Text, X zum Leeren (auch Esc). Filtert live.
+fn search_row(ui: &mut Ui, v: &View, query: &mut String, hint: &str, salt: &str) {
+    let (lang, p) = (v.lang(), &v.p);
+    let edit_id = Id::new(("mr_search", salt));
+    let focused = ui.memory(|m| m.has_focus(edit_id));
+    let stroke = if focused {
+        ui.visuals().selection.stroke.color
+    } else {
+        p.line
+    };
+    Frame::new()
+        .inner_margin(Margin {
+            left: 12,
+            right: 12,
+            top: 0,
+            bottom: 8,
+        })
+        .show(ui, |ui| {
+            Frame::new()
+                .stroke(Stroke::new(1.0, stroke))
+                .corner_radius(6)
+                .inner_margin(Margin::symmetric(8, 1))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.add(icon_image(ICON_SEARCH, 14.0, p.text2));
+                        let clear_width = if query.is_empty() { 0.0 } else { 28.0 };
+                        let edit = TextEdit::singleline(query)
+                            .id(edit_id)
+                            .hint_text(RichText::new(hint).color(p.text2))
+                            .font(FontId::proportional(12.0))
+                            .frame(Frame::NONE)
+                            .margin(Margin::symmetric(0, 4))
+                            .desired_width((ui.available_width() - clear_width).max(40.0));
+                        let resp = ui.add(edit);
+                        // Esc gibt den Fokus ab: dann leeren
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                            query.clear();
+                        }
+                        if !query.is_empty()
+                            && icon_button(
+                                ui,
+                                ICON_CROSS,
+                                &tr(lang, "mr_search_clear"),
+                                false,
+                                true,
+                            )
+                            .clicked()
+                        {
+                            query.clear();
+                        }
+                    });
+                });
+        });
+}
+
+/// „{n} gemergt in den letzten {d} Tagen“ und Zeitraum 7/30/90 Tage.
+fn merged_period_row(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrViewActions) {
+    let lang = v.lang();
+    let days = state.merged_days;
+    Frame::new()
+        .inner_margin(Margin {
+            left: 12,
+            right: 12,
+            top: 0,
+            bottom: 8,
+        })
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if let Some(list) = current_merged(v, state) {
+                    let text = tr_fmt(
+                        lang,
+                        "mr_merged_caption",
+                        &[&list.total.to_string(), &days.to_string()],
+                    );
+                    small(ui, &text, v.p.text2);
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let label = |d: u32| tr_fmt(lang, "mr_period", &[&d.to_string()]);
+                    let mut picked = days;
+                    ComboBox::from_id_salt("mr_merged_period")
+                        .selected_text(RichText::new(label(days)).size(11.0))
+                        .show_ui(ui, |ui| {
+                            for d in MERGED_PERIODS {
+                                ui.selectable_value(&mut picked, d, label(d));
+                            }
+                        })
+                        .response
+                        .on_hover_text(tr(lang, "mr_period_tt"));
+                    if picked != days {
+                        state.merged_days = picked;
+                        if needs_merged(v, state) {
+                            actions.fetch_merged = true;
+                        }
+                    }
+                });
+            });
+        });
+}
+
 /// Filter-Chips im Kopf „Von anderen“ (E13), in Anzeige-Reihenfolge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeaderChip {
@@ -736,7 +1025,19 @@ const HEADER_CHIPS: [HeaderChip; 4] = [
 fn others_header(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrViewActions) {
     let lang = v.lang();
     let counts = chip_counts(v.snap);
-    let count = header_count_text(lang, others_header_count(&v.snap.others, &state.chips()));
+    let chips_now = state.chips();
+    let count = if state.others_query.trim().is_empty() {
+        header_count_text(lang, others_header_count(&v.snap.others, &chips_now))
+    } else {
+        let visible = visible_others(v, &chips_now, &state.others_query).len();
+        header_count_text(
+            lang,
+            HeaderCount::Of {
+                visible,
+                total: v.snap.others.len(),
+            },
+        )
+    };
     let chip = |kind| -> (bool, String, Option<String>) {
         match kind {
             HeaderChip::Reviewer => (
@@ -777,7 +1078,8 @@ fn others_header(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut M
         ui,
         v,
         &tr(lang, "mr_others_title"),
-        &count,
+        pill_width(ui, &count, false),
+        |ui| count_pill(ui, v, &count),
         right_width,
         |ui, rtl| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -815,14 +1117,135 @@ fn others_header(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut M
     );
 }
 
-fn mine_body(ui: &mut Ui, v: &View, actions: &mut MrViewActions) {
+fn mine_body(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrViewActions) {
+    if state.mine_merged {
+        merged_body(ui, v, state, actions);
+        return;
+    }
     let failed = partial_banners(ui, v, &[(MrPart::Dashboard, "mr_part_mine")]);
-    for mr in &v.snap.mine {
+    let rows = visible_mine(v, &state.mine_query);
+    for mr in &rows {
         show_row(ui, v, mr, RowKind::Mine, actions);
     }
-    if v.snap.mine.is_empty() && !failed && v.has_data {
-        empty_block(ui, v, &tr(v.lang(), "mr_empty_mine"), None);
+    if rows.is_empty() && !failed && v.has_data {
+        if v.snap.mine.is_empty() {
+            empty_block(ui, v, &tr(v.lang(), "mr_empty_mine"), None);
+        } else {
+            no_hits(ui, v, &mut state.mine_query);
+        }
     }
+}
+
+/// „Gemergt“: Fehler je Host, ruhigere Zeilen, Leerzustände und „{n}
+/// weitere laden“.
+fn merged_body(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrViewActions) {
+    let (lang, p) = (v.lang(), &v.p);
+    let loading = v.input.merged_loading;
+    let Some(list) = current_merged(v, state) else {
+        if loading {
+            loading_line(ui, v, &tr(lang, "mr_loading_merged"));
+        } else {
+            not_loaded_line(ui, v, |a| a.fetch_merged = true, actions);
+        }
+        return;
+    };
+    for (host, kind) in &list.errors {
+        let reason = short_reason(kind, host, lang);
+        let mut text = tr_fmt(lang, "mr_partial", &[&tr(lang, "mr_part_merged"), &reason]);
+        if v.multi_host {
+            text = format!("{host} · {text}");
+        }
+        let id = Id::new(("mr_merged_error", host, &reason));
+        Frame::new()
+            .inner_margin(Margin::symmetric(12, 6))
+            .show(ui, |ui| {
+                error_banner(ui, v, id, &text, &error_details(kind))
+            });
+    }
+    let rows = visible_merged(list, &state.mine_query);
+    for merged in &rows {
+        show_merged_row(ui, v, merged, actions);
+    }
+    if rows.is_empty() && list.errors.is_empty() {
+        if list.mrs.is_empty() {
+            let days = list.days.to_string();
+            empty_block(ui, v, &tr_fmt(lang, "mr_empty_merged", &[&days]), None);
+        } else {
+            no_hits(ui, v, &mut state.mine_query);
+        }
+    }
+    let more = list.total.saturating_sub(list.mrs.len());
+    if list.more.is_empty() || more == 0 {
+        return;
+    }
+    divider(ui, v);
+    Frame::new()
+        .inner_margin(Margin {
+            left: 12,
+            right: 12,
+            top: 8,
+            bottom: 12,
+        })
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if loading {
+                    ui.add(Spinner::new().size(14.0).color(p.run_icon));
+                } else {
+                    let step = more.min(MERGED_PAGE_SIZE);
+                    let label = tr_fmt(lang, "mr_load_more", &[&step.to_string()]);
+                    let button = Button::new(RichText::new(label).size(12.0))
+                        .corner_radius(6)
+                        .min_size(vec2(0.0, 22.0));
+                    if ui.add(button).clicked() {
+                        actions.load_more_merged = true;
+                    }
+                }
+                let text = tr_fmt(
+                    lang,
+                    "mr_shown_of",
+                    &[&list.mrs.len().to_string(), &list.total.to_string()],
+                );
+                small(ui, &text, p.text2);
+            });
+        });
+}
+
+/// Leerzustand der Suche: „Keine Treffer für „{q}““ und „Suche leeren“.
+fn no_hits(ui: &mut Ui, v: &View, query: &mut String) {
+    let lang = v.lang();
+    divider(ui, v);
+    Frame::new()
+        .inner_margin(Margin::symmetric(12, 20))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 4.0;
+            let title = tr_fmt(lang, "mr_no_hits", &[query.trim()]);
+            ui.add(Label::new(RichText::new(title).size(13.0).color(v.p.title_quiet)).wrap());
+            if link_button(ui, &tr(lang, "mr_search_clear_link"), 11.0, v.p.text2).clicked() {
+                query.clear();
+            }
+        });
+}
+
+/// Von anderen nach Chips und Suche.
+fn visible_others<'a>(v: &View<'a>, chips: &Chips, query: &str) -> Vec<&'a MergeRequest> {
+    filter_others(&v.snap.others, chips)
+        .into_iter()
+        .filter(|m| mr_matches(m, query))
+        .collect()
+}
+
+/// Treffer der Suche in „Nicht beteiligt“, wenn der Abschnitt sichtbar und
+/// geladen ist.
+fn uninvolved_hits(v: &View, state: &MrViewState) -> usize {
+    let list = v.snap.uninvolved.as_ref().filter(|_| state.show_uninvolved);
+    list.map_or(0, |l| {
+        l.mrs
+            .iter()
+            .filter(|m| mr_matches(m, &state.others_query))
+            .count()
+    })
 }
 
 fn others_body(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrViewActions) {
@@ -837,11 +1260,16 @@ fn others_body(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrV
         ],
     );
     todos_hidden_banner(ui, v, actions);
-    for mr in filter_others(&v.snap.others, &chips) {
+    let rows = visible_others(v, &chips, &state.others_query);
+    for mr in &rows {
         show_row(ui, v, mr, RowKind::Other, actions);
     }
     if !failed && v.has_data {
         match empty_state(&chips, &v.snap.others) {
+            // Suche ohne Treffer (außer in „Nicht beteiligt“)
+            EmptyKind::NotEmpty if rows.is_empty() && uninvolved_hits(v, state) == 0 => {
+                no_hits(ui, v, &mut state.others_query);
+            }
             EmptyKind::NotEmpty => {}
             EmptyKind::NoData => empty_block(ui, v, &tr(lang, "mr_empty_others"), None),
             EmptyKind::NoFilter => empty_block(
@@ -933,9 +1361,23 @@ fn uninvolved_section(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &
     let lang = v.lang();
     let p = &v.p;
     let list = v.snap.uninvolved.as_ref();
+    let query = state.others_query.clone();
+    let searching = !query.trim().is_empty();
     let total = list.map_or_else(
         || "…".to_string(),
-        |l| uninvolved_counts(l, state.uninvolved_shown).1.to_string(),
+        |l| {
+            let total = uninvolved_counts(l, state.uninvolved_shown).1;
+            if searching {
+                let hits = uninvolved_hits(v, state);
+                tr_fmt(
+                    lang,
+                    "mr_count_of",
+                    &[&hits.to_string(), &total.to_string()],
+                )
+            } else {
+                total.to_string()
+            }
+        },
     );
     divider(ui, v);
     Frame::new()
@@ -964,12 +1406,18 @@ fn uninvolved_section(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &
         if v.input.uninvolved_loading {
             loading_line(ui, v, &tr(lang, "mr_loading_uninvolved"));
         } else if !failed {
-            not_loaded_line(ui, v, actions);
+            not_loaded_line(ui, v, |a| a.fetch_uninvolved = true, actions);
         }
         return;
     };
     let (shown, total, more) = uninvolved_counts(list, state.uninvolved_shown);
-    for mr in list.mrs.iter().take(shown) {
+    // Mit Suche alle geladenen Treffer, sonst die ersten `shown`
+    let rows: Vec<&MergeRequest> = if searching {
+        list.mrs.iter().filter(|m| mr_matches(m, &query)).collect()
+    } else {
+        list.mrs.iter().take(shown).collect()
+    };
+    for mr in rows {
         show_row(ui, v, mr, RowKind::Uninvolved, actions);
     }
     divider(ui, v);
@@ -1020,11 +1468,41 @@ enum RowKind {
     Other,
     /// Ruhiger: Titel in Text-Farbe, zwei Zeilen
     Uninvolved,
+    /// Eigener gemergter MR: ruhiger, ohne Auschecken
+    Merged,
 }
 
 fn show_row(ui: &mut Ui, v: &View, mr: &MergeRequest, kind: RowKind, actions: &mut MrViewActions) {
     let brief = checkout_brief(&MrRefInfo::from_mr(mr), v.input.repos, v.input.hosts);
     let button = checkout_button(&brief);
+    draw_row(ui, v, mr, None, kind, &button, actions);
+}
+
+/// Zeile „Gemergt“: Titel ruhiger mit Chip „Gemergt“, Projekt und Branches,
+/// „gemergt {Zeit} von {Name}“ · Pipeline · Approvals, nur Browser-Button.
+fn show_merged_row(ui: &mut Ui, v: &View, merged: &MergedMr, actions: &mut MrViewActions) {
+    // Kein Auschecken: der Button wird nicht gezeichnet
+    let button = ButtonKind::Menu;
+    draw_row(
+        ui,
+        v,
+        &merged.mr,
+        Some(merged),
+        RowKind::Merged,
+        &button,
+        actions,
+    );
+}
+
+fn draw_row(
+    ui: &mut Ui,
+    v: &View,
+    mr: &MergeRequest,
+    merged: Option<&MergedMr>,
+    kind: RowKind,
+    button: &ButtonKind,
+    actions: &mut MrViewActions,
+) {
     ui.push_id((&mr.host_key, &mr.id), |ui| {
         divider(ui, v);
         let margin = if kind == RowKind::Uninvolved {
@@ -1048,8 +1526,9 @@ fn show_row(ui: &mut Ui, v: &View, mr: &MergeRequest, kind: RowKind, actions: &m
             let row = Row {
                 v,
                 mr,
+                merged,
                 kind,
-                button: &button,
+                button,
                 compact,
             };
             row.title_line(ui, actions);
@@ -1075,6 +1554,14 @@ fn show_row(ui: &mut Ui, v: &View, mr: &MergeRequest, kind: RowKind, actions: &m
                         row.threads(ui);
                     });
                 }
+                RowKind::Merged => {
+                    row.mine_line2(ui);
+                    row.line3(ui, actions, |ui, actions| {
+                        row.merged_by(ui);
+                        row.pipeline(ui, actions, 0.0);
+                        row.approvals_text(ui);
+                    });
+                }
                 RowKind::Uninvolved => {
                     row.line3(ui, actions, |ui, actions| {
                         let width = text_width(ui, &mr.project_path, FontId::proportional(11.0));
@@ -1097,6 +1584,8 @@ fn show_row(ui: &mut Ui, v: &View, mr: &MergeRequest, kind: RowKind, actions: &m
 struct Row<'r> {
     v: &'r View<'r>,
     mr: &'r MergeRequest,
+    /// Nur bei `RowKind::Merged`
+    merged: Option<&'r MergedMr>,
     kind: RowKind,
     button: &'r ButtonKind,
     /// Spalte schmaler als 460 px: Mindestbreiten entfallen
@@ -1115,6 +1604,7 @@ impl Row<'_> {
         let iid = format!("!{}", mr.iid);
         let draft = mr.draft.then(|| tr(lang, "mr_draft"));
         let ready_label = (self.kind == RowKind::Mine && ready(mr)).then(|| tr(lang, "mr_ready"));
+        let merged_label = (self.kind == RowKind::Merged).then(|| tr(lang, "mr_seg_merged"));
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             // Rest der Zeile zuerst messen: der Titel kürzt, iid und Chips bleiben
@@ -1125,10 +1615,13 @@ impl Row<'_> {
             if let Some(r) = &ready_label {
                 suffix += pill_width(ui, r, true) + 8.0;
             }
+            if let Some(m) = &merged_label {
+                suffix += pill_width(ui, m, true) + 8.0;
+            }
             if self.kind == RowKind::Uninvolved {
                 suffix += 26.0 + text_width(ui, &mr.author.name, FontId::proportional(11.0)) + 8.0;
             }
-            let title_color = if self.kind == RowKind::Uninvolved {
+            let title_color = if matches!(self.kind, RowKind::Uninvolved | RowKind::Merged) {
                 p.title_quiet
             } else {
                 p.title
@@ -1163,6 +1656,14 @@ impl Row<'_> {
                     Some((ICON_CHECK, p.ok_icon)),
                 )
                 .on_hover_text(tr(lang, "mr_ready_tt"));
+            }
+            if let Some(m) = &merged_label {
+                pill(
+                    ui,
+                    m,
+                    PillStyle::filled(p.pill_bg, p.pill_text),
+                    Some((ICON_PULL_REQUEST, p.pill_text)),
+                );
             }
             if self.kind == RowKind::Uninvolved {
                 author(ui, self.v, &mr.author.name, p.text2);
@@ -1263,13 +1764,16 @@ impl Row<'_> {
                 if browser.clicked() {
                     actions.open_url = url.map(str::to_string);
                 }
-                self.checkout_control(ui, actions);
-                ui.add_space(4.0);
-                let updated = mr
-                    .updated_at
-                    .map(|t| relative_time(t, self.v.input.now, lang))
-                    .unwrap_or_default();
-                small(ui, &updated, p.text2);
+                // Gemergt: Zeitpunkt steht links, kein Auschecken
+                if self.kind != RowKind::Merged {
+                    self.checkout_control(ui, actions);
+                    ui.add_space(4.0);
+                    let updated = mr
+                        .updated_at
+                        .map(|t| relative_time(t, self.v.input.now, lang))
+                        .unwrap_or_default();
+                    small(ui, &updated, p.text2);
+                }
                 ui.add_space(8.0);
                 ui.with_layout(
                     Layout::left_to_right(Align::Center).with_main_wrap(true),
@@ -1426,6 +1930,50 @@ impl Row<'_> {
             small(ui, &label, p.title_quiet);
         })
         .on_hover_text(mr.threads_tooltip(lang));
+    }
+
+    /// „gemergt {Zeit} von {Name}“ bzw. „… von dir“ (Gemergt); Datum im
+    /// Tooltip.
+    fn merged_by(&self, ui: &mut Ui) {
+        let Some(merged) = self.merged else {
+            return;
+        };
+        let lang = self.lang();
+        let when = merged
+            .merged_at
+            .map(|t| relative_time(t, self.v.input.now, lang))
+            .unwrap_or_default();
+        let text = match &merged.merged_by {
+            Some(by) if by.is_me => tr_fmt(lang, "mr_merged_by_me", &[&when]),
+            Some(by) => tr_fmt(lang, "mr_merged_by", &[&when, &by.name]),
+            None => tr_fmt(lang, "mr_merged_at", &[&when]),
+        };
+        let width = text_width(ui, &text, FontId::proportional(11.0));
+        let resp = unit(ui, width, 22.0, |ui| {
+            small(ui, &text, self.v.p.title_quiet);
+        });
+        if let Some(t) = merged.merged_at {
+            resp.on_hover_text(format_date(t));
+        }
+    }
+
+    /// „{n} Approvals“ beim Merge, Namen im Tooltip (Gemergt).
+    fn approvals_text(&self, ui: &mut Ui) {
+        let lang = self.lang();
+        let appr = approvals(self.mr, self.v.input.cfg.ignore_bot_approvals);
+        let text = if appr.given == 1 {
+            tr(lang, "mr_appr_one")
+        } else {
+            tr_fmt(lang, "mr_appr_n", &[&appr.given.to_string()])
+        };
+        let width = text_width(ui, &text, FontId::proportional(11.0));
+        let resp = unit(ui, width, 22.0, |ui| {
+            small(ui, &text, self.v.p.title_quiet);
+        });
+        let names: Vec<&str> = appr.approvers.iter().map(|p| p.name.as_str()).collect();
+        if !names.is_empty() {
+            resp.on_hover_text(names.join(", "));
+        }
     }
 
     /// Mindestbreite; entfällt in schmalen Spalten.
@@ -2434,8 +2982,14 @@ fn loading_line(ui: &mut Ui, v: &View, text: &str) {
         });
 }
 
-/// „Noch nicht geladen. Jetzt laden“ („Nicht beteiligt“ ohne Abruf).
-fn not_loaded_line(ui: &mut Ui, v: &View, actions: &mut MrViewActions) {
+/// „Noch nicht geladen. Jetzt laden“ („Nicht beteiligt“ bzw. „Gemergt“
+/// ohne Abruf); `load` setzt die passende Aktion.
+fn not_loaded_line(
+    ui: &mut Ui,
+    v: &View,
+    load: impl FnOnce(&mut MrViewActions),
+    actions: &mut MrViewActions,
+) {
     let lang = v.lang();
     Frame::new()
         .inner_margin(Margin::symmetric(12, 12))
@@ -2444,7 +2998,7 @@ fn not_loaded_line(ui: &mut Ui, v: &View, actions: &mut MrViewActions) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 small(ui, &tr(lang, "mr_uninvolved_not_loaded"), v.p.text2);
                 if link_button(ui, &tr(lang, "mr_load_now"), 11.0, v.p.text2).clicked() {
-                    actions.fetch_uninvolved = true;
+                    load(actions);
                 }
             });
         });
@@ -2464,7 +3018,7 @@ mod tests {
     use crate::config::AgentLaunchMode;
     use crate::gitlab::checkout::AlreadyCheckedOut;
     use crate::gitlab::model::{HostStatus, Person, UninvolvedCursor};
-    use crate::gitlab::remote::{resolve_hosts, GlabHost, RemoteInfo};
+    use crate::gitlab::remote::{resolve_hosts, GlabHost, LocalProject, RemoteInfo};
     use semver::Version;
 
     fn agent(id: &str, name: &str) -> AgentProfile {
@@ -3251,6 +3805,8 @@ mod tests {
                     cfg: &cfg,
                     snapshot: Some(&snap),
                     uninvolved_loading: false,
+                    merged: None,
+                    merged_loading: false,
                     glab_error: None,
                     discovering: false,
                     repos: &repos,
@@ -3306,6 +3862,8 @@ mod tests {
                     cfg: &cfg,
                     snapshot,
                     uninvolved_loading: true,
+                    merged: None,
+                    merged_loading: false,
                     glab_error,
                     discovering: false,
                     repos: &repos,
@@ -3328,6 +3886,223 @@ mod tests {
         }
     }
 
+    /// Gemergte MRs wie aus dem Abruf (`add_pages`): !408 von Miriam Becker,
+    /// !229 von mir, 8 im Zeitraum laut GitLab, weitere Seite vorhanden.
+    fn sample_merged(locals: &[LocalProject], cfg: &MrConfig) -> MergedList {
+        use crate::gitlab::graphql::{
+            MergedNode, MergedPage, MrNode, PageInfo, PipelineNode, UserNode,
+        };
+        use crate::gitlab::model::MergedHostPage;
+        use crate::gitlab::time::format_rfc3339;
+        let user = |username: &str, name: &str| UserNode {
+            username: Some(username.to_string()),
+            name: Some(name.to_string()),
+            bot: Some(false),
+        };
+        let node = |iid: u64, title: &str, ago: i64, by: UserNode| MergedNode {
+            mr: MrNode {
+                id: Some(format!("gid://gitlab/MergeRequest/{iid}")),
+                iid: Some(iid),
+                title: Some(title.to_string()),
+                web_url: Some(format!("https://{HOST}/kern/api/-/merge_requests/{iid}")),
+                web_path: Some(format!("/kern/api/-/merge_requests/{iid}")),
+                project_path: Some("kern/api".to_string()),
+                source_branch: Some(format!("feature/mr-{iid}")),
+                target_branch: Some("main".to_string()),
+                author: Some(user("taltmann", "Tim Altmann")),
+                approved_by: Some(vec![user("jkrueger", "Jonas Krüger")]),
+                head_pipeline: Some(PipelineNode {
+                    status: Some("SUCCESS".to_string()),
+                    path: Some("/kern/api/-/pipelines/1".to_string()),
+                }),
+                ..MrNode::default()
+            },
+            merged_at: Some(format_rfc3339(NOW - ago)),
+            merge_user: Some(by),
+        };
+        let page = MergedPage {
+            me: None,
+            count: Some(8),
+            page: Some(PageInfo {
+                has_next_page: true,
+                end_cursor: Some("c".to_string()),
+            }),
+            items: vec![
+                node(
+                    408,
+                    "Export-Dialog aufräumen",
+                    7200,
+                    user("mbecker", "Miriam Becker"),
+                ),
+                node(
+                    229,
+                    "PDF-Rendering parallelisieren",
+                    3 * 86_400,
+                    user("taltmann", "Tim Altmann"),
+                ),
+            ],
+        };
+        let mut list = MergedList::new(MERGED_DEFAULT_DAYS, NOW - 30 * 86_400);
+        let pages = vec![MergedHostPage {
+            host_key: HOST.to_string(),
+            me: Some("taltmann".to_string()),
+            page: Ok(page),
+        }];
+        list.add_pages(pages, locals, cfg);
+        list
+    }
+
+    #[test]
+    fn search_and_merged_render_without_actions() {
+        let snap = sample_snapshot();
+        let repos = sample_repos();
+        let hosts = sample_hosts(&repos);
+        let cfg = MrConfig::default();
+        let locals = crate::gitlab::remote::local_projects(&repos, &hosts, &cfg);
+        let merged = sample_merged(&locals, &cfg);
+        assert_eq!(merged.mrs.len(), 2);
+        let theme = crate::config::Theme::Dark;
+        let input = MrViewInput {
+            lang: Language::De,
+            theme: &theme,
+            cfg: &cfg,
+            snapshot: Some(&snap),
+            uninvolved_loading: false,
+            merged: Some(&merged),
+            merged_loading: false,
+            glab_error: None,
+            discovering: false,
+            repos: &repos,
+            hosts: &hosts,
+            locals: &locals,
+            agents: &[],
+            ide: None,
+            ide_for: &vscode_for,
+            lookup: MenuLookup {
+                mru: &mru,
+                exists: &never_exists,
+            },
+            now: NOW,
+        };
+        // (Gemergt, Suche Meine, Suche Von anderen, Zeitraum)
+        let cases = [
+            (true, "", "", MERGED_DEFAULT_DAYS),
+            (true, "export", "", MERGED_DEFAULT_DAYS),
+            (true, "becker", "", MERGED_DEFAULT_DAYS),
+            (true, "nichts", "", MERGED_DEFAULT_DAYS),
+            // anderer Zeitraum noch nicht geladen: „Jetzt laden“ ohne Klick
+            (true, "", "", 7),
+            (false, "login", "navigation", MERGED_DEFAULT_DAYS),
+            (false, "nichts", "zzz", MERGED_DEFAULT_DAYS),
+            // Treffer nur in „Nicht beteiligt“
+            (false, "", "abhängigkeiten", MERGED_DEFAULT_DAYS),
+        ];
+        for (mine_merged, mine_query, others_query, days) in cases {
+            for width in [1200.0, 700.0] {
+                let mut state = MrViewState::new(&cfg);
+                state.mine_merged = mine_merged;
+                state.mine_query = mine_query.to_string();
+                state.others_query = others_query.to_string();
+                state.merged_days = days;
+                state.show_uninvolved = true;
+                assert_eq!(
+                    render(&input, &mut state, width),
+                    MrViewActions::default(),
+                    "{mine_merged} {mine_query:?} {others_query:?} {days} {width}"
+                );
+                // Zeichnen ändert weder Suche noch Umschalter
+                assert_eq!(state.mine_query, mine_query);
+                assert_eq!(state.mine_merged, mine_merged);
+            }
+        }
+
+        // Ohne Stand „Gemergt“, Abruf läuft: Spinner
+        let loading = MrViewInput {
+            merged: None,
+            merged_loading: true,
+            ..input
+        };
+        let mut state = MrViewState::new(&cfg);
+        state.mine_merged = true;
+        let (actions, repaint) = render_repaint(&loading, &mut state, 1200.0);
+        assert_eq!(actions, MrViewActions::default());
+        assert!(repaint, "Spinner beim Laden");
+    }
+
+    #[test]
+    fn segment_and_header_counts_follow_search() {
+        let snap = sample_snapshot();
+        let repos = sample_repos();
+        let hosts = sample_hosts(&repos);
+        let cfg = MrConfig::default();
+        let locals = crate::gitlab::remote::local_projects(&repos, &hosts, &cfg);
+        let merged = sample_merged(&locals, &cfg);
+        let theme = crate::config::Theme::Dark;
+        let input = MrViewInput {
+            lang: Language::De,
+            theme: &theme,
+            cfg: &cfg,
+            snapshot: Some(&snap),
+            uninvolved_loading: false,
+            merged: Some(&merged),
+            merged_loading: false,
+            glab_error: None,
+            discovering: false,
+            repos: &repos,
+            hosts: &hosts,
+            locals: &locals,
+            agents: &[],
+            ide: None,
+            ide_for: &vscode_for,
+            lookup: MenuLookup {
+                mru: &mru,
+                exists: &never_exists,
+            },
+            now: NOW,
+        };
+        let view = View {
+            input: &input,
+            p: mr_palette(&theme, &egui::Visuals::dark()),
+            snap: &snap,
+            open: OpenBranches::from_snapshot(&snap),
+            multi_host: false,
+            has_data: true,
+        };
+        let counts = |state: &MrViewState| -> (Option<String>, Option<String>) {
+            let [open, merged] = mine_segments(&view, state);
+            (open.1, merged.1)
+        };
+        let mut state = MrViewState::new(&cfg);
+        assert_eq!(counts(&state), (Some("2".into()), Some("8".into())));
+        // Suche zählt nur am aktiven Segment
+        state.mine_query = "login".to_string();
+        assert_eq!(counts(&state), (Some("1 von 2".into()), Some("8".into())));
+        state.mine_merged = true;
+        state.mine_query = "export".to_string();
+        assert_eq!(counts(&state), (Some("2".into()), Some("1 von 8".into())));
+        // Anderer Zeitraum: „Gemergt“ noch ohne Zahl
+        state.merged_days = 90;
+        assert_eq!(counts(&state).1, None);
+        assert!(needs_merged(&view, &state));
+
+        // Von anderen: Chips und Suche
+        let chips = state.chips();
+        let iids = |query: &str| -> Vec<u64> {
+            visible_others(&view, &chips, query)
+                .iter()
+                .map(|m| m.iid)
+                .collect()
+        };
+        assert_eq!(iids(""), vec![421, 92, 240]);
+        assert_eq!(iids("fork"), vec![240]);
+        assert_eq!(iids("!92"), vec![92]);
+        state.others_query = "abhängigkeiten".to_string();
+        state.show_uninvolved = true;
+        assert_eq!(uninvolved_hits(&view, &state), 1);
+        state.show_uninvolved = false;
+        assert_eq!(uninvolved_hits(&view, &state), 0);
+    }
+
     #[test]
     fn uninvolved_spinner_only_while_loading() {
         // Host nicht erreichbar: der Abruf endet vor „Nicht beteiligt“, ohne
@@ -3348,6 +4123,8 @@ mod tests {
                 cfg: &cfg,
                 snapshot: Some(&snap),
                 uninvolved_loading: loading,
+                merged: None,
+                merged_loading: false,
                 glab_error: None,
                 discovering: false,
                 repos: &repos,
@@ -3392,6 +4169,8 @@ mod tests {
             cfg: &cfg,
             snapshot: Some(&snap),
             uninvolved_loading: false,
+            merged: None,
+            merged_loading: false,
             glab_error: None,
             discovering: false,
             repos: &repos,
@@ -3474,6 +4253,8 @@ mod tests {
             cfg: &cfg,
             snapshot: Some(&snap),
             uninvolved_loading: false,
+            merged: None,
+            merged_loading: false,
             glab_error: None,
             discovering: false,
             repos: &repos,

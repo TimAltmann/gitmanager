@@ -5,7 +5,7 @@ mod mr_settings;
 use crate::config::{AfterAction, AppConfig, RepoSortMode};
 use crate::git::{launch_agent, launch_ide, MrPrep, RepoInfo};
 use crate::gitlab::glab::{GlabErrorKind, GlabRunner};
-use crate::gitlab::model::MrSnapshot;
+use crate::gitlab::model::{MergedList, MrSnapshot};
 use crate::gitlab::remote::{GlabHost, HostMap, LocalProject};
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::scanner::scan_repos;
@@ -346,6 +346,11 @@ pub struct MyApp {
     mr_discovering: bool,
     /// Ausstehende Seiten „Nicht beteiligt“ (eine je Host)
     mr_more_pending: usize,
+    /// Eigene gemergte MRs (Umschalter „Gemergt“); `None` = nicht geladen
+    mr_merged: Option<MergedList>,
+    mr_merged_loading: bool,
+    /// Zählt neue Abrufe „Gemergt“; Ergebnisse älterer werden verworfen
+    mr_merged_gen: u64,
     mr_tx: Sender<MrResult>,
     mr_rx: Receiver<MrResult>,
     mr_view: MrViewState,
@@ -462,6 +467,9 @@ impl MyApp {
             mr_auth_epoch: 0,
             mr_discovering: false,
             mr_more_pending: 0,
+            mr_merged: None,
+            mr_merged_loading: false,
+            mr_merged_gen: 0,
             mr_tx,
             mr_rx,
             mr_view,
@@ -2989,6 +2997,9 @@ mod tests {
             mr_auth_epoch: 0,
             mr_discovering: false,
             mr_more_pending: 0,
+            mr_merged: None,
+            mr_merged_loading: false,
+            mr_merged_gen: 0,
             mr_tx,
             mr_rx,
             mr_view,

@@ -1,6 +1,7 @@
 //! Verdrahtung der Merge-Request-Ansicht in `MyApp` (Task 10): lokale
 //! glab-Erkennung nach dem Scan (E16), Abruf im Hintergrund mit Epoche und
-//! gemerktem Refresh, „Nicht beteiligt“ nachladen, Umschalter mit Badge (E9),
+//! gemerktem Refresh, „Nicht beteiligt“ und „Gemergt“ nachladen, Umschalter
+//! mit Badge (E9),
 //! Statusleiste und Auswertung von `MrViewActions`. Fehler aus Erkennung und
 //! Abruf bleiben im MR-Zustand, nie in `self.error` (E20). Hintergrundarbeit
 //! wie beim Scan: `std::thread` + `mpsc` + `catch_unwind`, Übernahme in
@@ -12,12 +13,13 @@ use crate::git::RepoInfo;
 use crate::gitlab::checkout::MenuLookup;
 use crate::gitlab::glab::{glab_version, GlabErrorKind, GlabRunner};
 use crate::gitlab::model::{
-    sort_others, sort_uninvolved, MrPart, MrSnapshot, Reason, UninvolvedCursor,
+    sort_others, sort_uninvolved, MergedHostPage, MergedList, MrPart, MrSnapshot, Reason,
+    UninvolvedCursor,
 };
 use crate::gitlab::remote::{builtin_alias_target, local_projects, resolve_hosts, GlabHost};
 use crate::gitlab::service::{
-    discover_glab_hosts, fetch_snapshot, fetch_uninvolved_more, glab_config_hosts, is_auth_error,
-    MrFetchResult, UninvolvedPage,
+    discover_glab_hosts, fetch_merged, fetch_snapshot, fetch_uninvolved_more, glab_config_hosts,
+    is_auth_error, MrFetchResult, UninvolvedPage,
 };
 use crate::gitlab::time::{now_unix, relative_time};
 use crate::i18n::{tr, tr_fmt, Language};
@@ -56,6 +58,16 @@ pub(super) enum MrResult {
         epoch: u64,
         host_key: String,
         page: Result<UninvolvedPage, GlabErrorKind>,
+    },
+    /// Seiten „Gemergt“ aller Hosts; `gen` = `mr_merged_gen` beim Start,
+    /// `append` = weitere Seite statt neuem Zeitraum
+    Merged {
+        epoch: u64,
+        gen: u64,
+        append: bool,
+        days: u32,
+        since: i64,
+        pages: Vec<MergedHostPage>,
     },
     /// Lokale glab-Erkennung (E16) fertig; `glab_error`, wenn glab fehlt
     /// oder zu alt ist (dann ohne Hosts)
@@ -290,6 +302,110 @@ impl MyApp {
         }
     }
 
+    /// Eigene gemergte MRs: neu für den Zeitraum der Ansicht oder mit
+    /// `append` die nächste Seite je Host. Nur angemeldete Hosts ohne
+    /// Fehler; ein neuer Abruf macht laufende ungültig (Generation).
+    fn start_mr_merged(&mut self, append: bool) {
+        if self.mr_glab_missing || (append && self.mr_merged_loading) {
+            return;
+        }
+        let Some(snap) = self.mr_snapshot.as_deref() else {
+            return;
+        };
+        let user = |host: &str| -> Option<String> {
+            let status = snap.per_host.iter().find(|h| h.host_key == host)?;
+            status
+                .error
+                .is_none()
+                .then(|| status.user.clone())
+                .flatten()
+        };
+        type Job = (String, Option<String>, Option<String>);
+        let (days, since, jobs): (u32, i64, Vec<Job>) = if append {
+            let Some(list) = &self.mr_merged else {
+                return;
+            };
+            let jobs = list
+                .more
+                .iter()
+                .filter_map(|c| {
+                    let me = user(&c.host_key)?;
+                    Some((c.host_key.clone(), Some(me), Some(c.cursor.clone())))
+                })
+                .collect();
+            (list.days, list.since, jobs)
+        } else {
+            let days = self.mr_view.merged_days;
+            let jobs = snap
+                .per_host
+                .iter()
+                .filter_map(|h| Some((h.host_key.clone(), Some(user(&h.host_key)?), None)))
+                .collect();
+            (days, now_unix() - i64::from(days) * 86_400, jobs)
+        };
+        if !append {
+            self.mr_merged_gen = self.mr_merged_gen.wrapping_add(1);
+        }
+        if jobs.is_empty() {
+            if !append {
+                // Kein angemeldeter Host: leer statt „wird geladen“
+                self.mr_merged = Some(MergedList::new(days, since));
+                self.mr_merged_loading = false;
+            }
+            return;
+        }
+        self.mr_merged_loading = true;
+        let runner = Arc::clone(&self.glab);
+        let tx = self.mr_tx.clone();
+        let (epoch, gen) = (self.mr_auth_epoch, self.mr_merged_gen);
+        std::thread::spawn(move || {
+            let pages = catch_unwind(AssertUnwindSafe(|| fetch_merged(&*runner, &jobs, since)))
+                .unwrap_or_else(|_| {
+                    eprintln!("Abruf „Gemergt“ abgestürzt (panic vor send)");
+                    jobs.iter()
+                        .map(|(host_key, me, _)| MergedHostPage {
+                            host_key: host_key.clone(),
+                            me: me.clone(),
+                            page: Err(GlabErrorKind::Other),
+                        })
+                        .collect()
+                });
+            let _ = tx.send(MrResult::Merged {
+                epoch,
+                gen,
+                append,
+                days,
+                since,
+                pages,
+            });
+        });
+    }
+
+    fn on_mr_merged(
+        &mut self,
+        (epoch, gen, append): (u64, u64, bool),
+        days: u32,
+        since: i64,
+        pages: Vec<MergedHostPage>,
+    ) {
+        // Anmeldung geändert oder neuerer Abruf läuft
+        if epoch != self.mr_auth_epoch || gen != self.mr_merged_gen {
+            return;
+        }
+        self.mr_merged_loading = false;
+        // Zeitraum inzwischen zurückgestellt: geladene Liste behalten
+        let shown = self.mr_merged.as_ref().map(|l| l.days);
+        if days != self.mr_view.merged_days && shown == Some(self.mr_view.merged_days) {
+            return;
+        }
+        let mut list = match self.mr_merged.take() {
+            Some(list) if append && list.days == days => list,
+            _ => MergedList::new(days, since),
+        };
+        list.add_pages(pages, &self.mr_locals, &self.config.merge_requests);
+        self.mr_merged = Some(list);
+    }
+
     /// „Aktualisieren“ in der MR-Ansicht bzw. auf der Karte „glab fehlt“:
     /// fehlte glab, beginnt die Erkennung von vorn (nach einer Installation);
     /// sonst werden nicht angemeldete Kandidaten erneut lokal geprüft
@@ -326,6 +442,9 @@ impl MyApp {
     /// weiter mit (`mr_more_pending`), ihre Ergebnisse verwirft die Epoche.
     pub(super) fn bump_mr_auth_epoch(&mut self) {
         self.mr_auth_epoch = self.mr_auth_epoch.wrapping_add(1);
+        // „Gemergt“ gehört zur alten Anmeldung; neu nach dem Abruf
+        self.mr_merged = None;
+        self.mr_merged_loading = false;
         self.start_mr_refresh();
     }
 
@@ -340,6 +459,14 @@ impl MyApp {
                     host_key,
                     page,
                 } => self.on_mr_more_page(epoch, &host_key, page),
+                MrResult::Merged {
+                    epoch,
+                    gen,
+                    append,
+                    days,
+                    since,
+                    pages,
+                } => self.on_mr_merged((epoch, gen, append), days, since, pages),
                 MrResult::Discovered { hosts, glab_error } => {
                     self.on_mr_discovered(hosts, glab_error)
                 }
@@ -347,7 +474,11 @@ impl MyApp {
             }
             ctx.request_repaint();
         }
-        if self.mr_loading || self.mr_discovering || self.mr_more_pending > 0 {
+        if self.mr_loading
+            || self.mr_discovering
+            || self.mr_more_pending > 0
+            || self.mr_merged_loading
+        {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
@@ -368,6 +499,12 @@ impl MyApp {
                 self.mr_snapshot = Some(Box::new(data.snapshot));
                 // E21: Badge im Tray beim nächsten Sync aktualisieren
                 self.mark_tray_dirty();
+                // „Gemergt“ mit auffrischen, sonst beim nächsten Umschalten
+                if self.mr_view.mine_merged {
+                    self.start_mr_merged(false);
+                } else {
+                    self.mr_merged = None;
+                }
             }
         }
         self.run_pending_mr_refresh();
@@ -601,6 +738,9 @@ impl MyApp {
                 snapshot: self.mr_snapshot.as_deref(),
                 uninvolved_loading: self.mr_more_pending > 0
                     || (self.mr_loading && self.mr_view.show_uninvolved),
+                merged: self.mr_merged.as_ref(),
+                merged_loading: self.mr_merged_loading
+                    || (self.mr_loading && self.mr_view.mine_merged),
                 glab_error: self.mr_glab_error.as_ref(),
                 discovering: self.scanning || self.mr_discovering,
                 repos: &self.repos,
@@ -644,6 +784,12 @@ impl MyApp {
         }
         if actions.load_more {
             self.start_mr_load_more();
+        }
+        if actions.fetch_merged {
+            self.start_mr_merged(false);
+        }
+        if actions.load_more_merged {
+            self.start_mr_merged(true);
         }
         if actions.open_settings_mr_tab {
             self.open_settings_mr_tab();
@@ -1028,7 +1174,11 @@ pub(super) mod tests {
         let until = Instant::now() + Duration::from_secs(5);
         loop {
             app.poll_mr(&ctx);
-            if !app.mr_loading && !app.mr_discovering && app.mr_more_pending == 0 {
+            if !app.mr_loading
+                && !app.mr_discovering
+                && app.mr_more_pending == 0
+                && !app.mr_merged_loading
+            {
                 return;
             }
             assert!(Instant::now() < until, "MR-Worker hängt");
@@ -1687,6 +1837,57 @@ pub(super) mod tests {
         let calls = glab.inner().take_calls();
         assert!(!calls.is_empty());
         assert!(calls.iter().all(|c| c.request.args[0] == "api"));
+    }
+
+    #[test]
+    fn merged_loads_on_toggle_and_drops_stale_results() {
+        use crate::gitlab::remote::LocalProject;
+        use crate::gitlab::time::format_rfc3339;
+        let (mut app, glab) = fake_app();
+        app.mr_snapshot = Some(Box::new(MrSnapshot {
+            per_host: vec![host_status(HOST)],
+            ..MrSnapshot::default()
+        }));
+        app.mr_locals = vec![LocalProject {
+            host_key: HOST.to_string(),
+            full_path: "group/app".to_string(),
+            repos: Vec::new(),
+            included: true,
+        }];
+        let page = serde_json::json!({ "data": { "currentUser": { "username": "taltmann",
+            "authoredMergeRequests": {
+                "count": 1,
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [{ "id": "gid://gitlab/MergeRequest/7", "iid": "7",
+                            "project": { "fullPath": "group/app" },
+                            "mergedAt": format_rfc3339(now_unix() - 3600) }]
+            } } } });
+        glab.inner().push(FakeReply::http(200, &page.to_string()));
+        app.mr_view.mine_merged = true;
+        app.mr_view.merged_days = 7;
+        let actions = MrViewActions {
+            fetch_merged: true,
+            ..MrViewActions::default()
+        };
+        app.handle_mr_actions(&egui::Context::default(), actions);
+        assert!(app.mr_merged_loading);
+        // Ergebnis eines älteren Abrufs (andere Generation) zählt nicht
+        let stale = app.mr_merged_gen.wrapping_sub(1);
+        app.on_mr_merged((app.mr_auth_epoch, stale, false), 7, 0, Vec::new());
+        assert!(app.mr_merged_loading && app.mr_merged.is_none());
+        settle(&mut app);
+        let list = app.mr_merged.as_ref().expect("Gemergt geladen");
+        assert_eq!(list.days, 7);
+        assert_eq!(
+            list.mrs.iter().map(|m| m.mr.iid).collect::<Vec<_>>(),
+            vec![7]
+        );
+        let calls = glab.inner().take_calls();
+        assert_eq!(calls.len(), 1);
+        // Neue Anmeldung: alter Stand „Gemergt“ entfällt
+        // (ohne GitLab-Host startet kein neuer Abruf)
+        app.bump_mr_auth_epoch();
+        assert!(app.mr_merged.is_none() && !app.mr_merged_loading);
     }
 
     /// K1: Auschecken und „Bereits ausgecheckt“ aus der Ansicht landen bei
