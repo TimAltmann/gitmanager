@@ -385,7 +385,9 @@ fn fetch_one_remote(repo: &Repository, repo_path: &Path, remote_name: &str) -> a
 }
 
 /// Fetch eines Remotes mit expliziten Refspecs (leer = konfigurierte) und
-/// wählbarem Prune. Mit Refspecs ohne Tags (wie `--no-tags`).
+/// wählbarem Prune. Mit Refspecs ohne Tags (wie `--no-tags`). Kurze
+/// Abbrüche wiederholt libgit2 (siehe [`with_fetch_retries`]), erst danach
+/// greift System-`git`.
 fn fetch_remote_with(
     repo: &Repository,
     repo_path: &Path,
@@ -393,56 +395,122 @@ fn fetch_remote_with(
     refspecs: &[&str],
     prune: bool,
 ) -> anyhow::Result<()> {
-    match repo.find_remote(remote_name) {
-        Ok(mut remote) => {
-            let remote_url = remote.url().unwrap_or("").to_string();
-            // Repo-Config für credential.helper (https) — Snapshot vor Callbacks.
-            let repo_config = repo.config().ok();
-            let mut callbacks = git2::RemoteCallbacks::new();
-            callbacks.credentials(move |url, username_from_url, allowed| {
-                fetch_credentials(&repo_config, url, username_from_url, allowed, &remote_url)
-            });
-            // Zertifikatsprüfung NICHT deaktivieren (TLS bleibt verifiziert).
-            let mut opts = git2::FetchOptions::new();
-            opts.prune(if prune {
-                git2::FetchPrune::On
-            } else {
-                git2::FetchPrune::Off
-            });
-            if !refspecs.is_empty() {
-                opts.download_tags(git2::AutotagOption::None);
-            }
-            opts.remote_callbacks(callbacks);
-            match remote.fetch(refspecs, Some(&mut opts), None) {
-                Ok(()) => Ok(()),
-                Err(lib_err) => {
+    let mut remote = match repo.find_remote(remote_name) {
+        Ok(remote) => remote,
+        Err(e) => {
+            eprintln!("Remote '{remote_name}' nicht gefunden: {e}");
+            return Err(anyhow::anyhow!("{e}"));
+        }
+    };
+    let remote_url = remote.url().unwrap_or("").to_string();
+    let lib_res = with_fetch_retries(remote_name, &fetch_retry_delays(), || {
+        libgit2_fetch(repo, &mut remote, &remote_url, refspecs, prune)
+    });
+    match lib_res {
+        Ok(()) => Ok(()),
+        Err(lib_err) => {
+            eprintln!(
+                "libgit2 fetch für Remote '{remote_name}' fehlgeschlagen ({lib_err}), versuche System-git..."
+            );
+            // Fallback: System-git nutzt Credential-Manager/SSH-Agent des Users.
+            match fetch_with_git_cli(repo_path, remote_name, refspecs, prune) {
+                Ok(()) => {
+                    eprintln!("System-git fetch für Remote '{remote_name}' erfolgreich (Fallback)");
+                    Ok(())
+                }
+                Err(cli_err) => {
                     eprintln!(
-                        "libgit2 fetch für Remote '{remote_name}' fehlgeschlagen ({lib_err}), versuche System-git..."
+                        "System-git fetch für Remote '{remote_name}' ebenfalls fehlgeschlagen: {cli_err:#}"
                     );
-                    // Fallback: System-git nutzt Credential-Manager/SSH-Agent des Users.
-                    match fetch_with_git_cli(repo_path, remote_name, refspecs, prune) {
-                        Ok(()) => {
-                            eprintln!(
-                                "System-git fetch für Remote '{remote_name}' erfolgreich (Fallback)"
-                            );
-                            Ok(())
-                        }
-                        Err(cli_err) => {
-                            eprintln!(
-                                "System-git fetch für Remote '{remote_name}' ebenfalls fehlgeschlagen: {cli_err:#}"
-                            );
-                            // Strukturierter Fehler bleibt libgit2-basiert (English-neutral,
-                            // keine lokalisierten git-CLI-Texte) — CLI nur im Log.
-                            Err(anyhow::anyhow!("{lib_err}"))
-                        }
-                    }
+                    // Strukturierter Fehler bleibt libgit2-basiert (English-neutral,
+                    // keine lokalisierten git-CLI-Texte) — CLI nur im Log.
+                    Err(anyhow::anyhow!("{lib_err}"))
                 }
             }
         }
-        Err(e) => {
-            eprintln!("Remote '{remote_name}' nicht gefunden: {e}");
-            Err(anyhow::anyhow!("{e}"))
+    }
+}
+
+/// Ein Fetch-Versuch per libgit2 mit Auth-Callbacks.
+fn libgit2_fetch(
+    repo: &Repository,
+    remote: &mut git2::Remote,
+    remote_url: &str,
+    refspecs: &[&str],
+    prune: bool,
+) -> Result<(), git2::Error> {
+    // Repo-Config für credential.helper (https) — Snapshot vor Callbacks.
+    let repo_config = repo.config().ok();
+    let remote_url = remote_url.to_string();
+    let mut callbacks = git2::RemoteCallbacks::new();
+    callbacks.credentials(move |url, username_from_url, allowed| {
+        fetch_credentials(&repo_config, url, username_from_url, allowed, &remote_url)
+    });
+    // Zertifikatsprüfung NICHT deaktivieren (TLS bleibt verifiziert).
+    let mut opts = git2::FetchOptions::new();
+    opts.prune(if prune {
+        git2::FetchPrune::On
+    } else {
+        git2::FetchPrune::Off
+    });
+    if !refspecs.is_empty() {
+        opts.download_tags(git2::AutotagOption::None);
+    }
+    opts.remote_callbacks(callbacks);
+    remote.fetch(refspecs, Some(&mut opts), None)
+}
+
+/// Wartezeiten vor dem 2. und 3. Versuch, mit bis zu 1 s Streuung: Worker,
+/// die gemeinsam abgebrochen sind, sollen nicht wieder gleichzeitig ankommen.
+/// Tests warten nicht (ihre `invalid.example.com`-Remotes scheitern im Netz).
+fn fetch_retry_delays() -> [Duration; 2] {
+    if cfg!(test) {
+        return [Duration::ZERO; 2];
+    }
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_millis()));
+    [
+        Duration::from_millis(1_500 + jitter),
+        Duration::from_millis(4_000 + jitter),
+    ]
+}
+
+/// Wiederholt `fetch` nach jeder Wartezeit aus `delays`, solange der Fehler
+/// vorübergehend ist ([`is_transient_fetch_error`]); andere Fehler und der
+/// Fehler des letzten Versuchs gehen unverändert zurück.
+fn with_fetch_retries(
+    remote_name: &str,
+    delays: &[Duration],
+    mut fetch: impl FnMut() -> Result<(), git2::Error>,
+) -> Result<(), git2::Error> {
+    let mut delays = delays.iter();
+    loop {
+        match fetch() {
+            Err(e) if is_transient_fetch_error(&e) => {
+                let Some(delay) = delays.next() else {
+                    return Err(e);
+                };
+                eprintln!(
+                    "libgit2 fetch für Remote '{remote_name}' abgebrochen ({e}), neuer Versuch in {delay:?}"
+                );
+                std::thread::sleep(*delay);
+            }
+            res => return res,
         }
+    }
+}
+
+/// Abbruch in der SSH- oder Netzwerkschicht, der beim nächsten Versuch meist
+/// weg ist: Der Server trennt z. B. beim Handshake, wenn viele Verbindungen
+/// gleichzeitig ankommen (libssh2 „Failed getting response“ bzw. „Failed
+/// getting banner“, von libgit2 als `class=Ssh`, `code=Auth` gemeldet). Ein
+/// abgelehntes HTTP-Login ist endgültig.
+fn is_transient_fetch_error(e: &git2::Error) -> bool {
+    match e.class() {
+        git2::ErrorClass::Ssh | git2::ErrorClass::Net | git2::ErrorClass::Os => true,
+        git2::ErrorClass::Http => e.code() != git2::ErrorCode::Auth,
+        _ => false,
     }
 }
 
@@ -3130,6 +3198,84 @@ mod tests {
         let repo = Repository::open(dir.path()).unwrap();
         assert_eq!(list_branches(dir.path()), list_branches_in(&repo));
         assert_eq!(ahead_behind(dir.path()), ahead_behind_in(&repo));
+    }
+
+    #[test]
+    fn fetch_retries_transient_errors_only() {
+        let dropped = || {
+            git2::Error::new(
+                git2::ErrorCode::Auth,
+                git2::ErrorClass::Ssh,
+                "remote rejected authentication: Failed getting response",
+            )
+        };
+        let delays = [Duration::ZERO; 2];
+        // SSH-Abbruch beim Handshake: zweiter Versuch klappt
+        let mut calls = 0;
+        let res = with_fetch_retries("origin", &delays, || {
+            calls += 1;
+            if calls == 1 {
+                Err(dropped())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(res.is_ok());
+        assert_eq!(calls, 2);
+        // Bleibt der Abbruch, kommt nach allen Versuchen der letzte Fehler
+        let mut calls = 0;
+        let res = with_fetch_retries("origin", &delays, || {
+            calls += 1;
+            Err(dropped())
+        });
+        assert_eq!(calls, 3);
+        assert!(res
+            .unwrap_err()
+            .message()
+            .contains("Failed getting response"));
+        // Endgültige Fehler (abgelehntes HTTP-Login, kaputte Refspec) nur einmal
+        for (code, class) in [
+            (git2::ErrorCode::Auth, git2::ErrorClass::Http),
+            (git2::ErrorCode::GenericError, git2::ErrorClass::Reference),
+        ] {
+            let mut calls = 0;
+            let res = with_fetch_retries("origin", &delays, || {
+                calls += 1;
+                Err(git2::Error::new(code, class, "nope"))
+            });
+            assert!(res.is_err());
+            assert_eq!(calls, 1, "{class:?}");
+        }
+    }
+
+    #[test]
+    fn fetch_transient_error_classes() {
+        let err = |code, class| git2::Error::new(code, class, "x");
+        use git2::{ErrorClass, ErrorCode};
+        assert!(is_transient_fetch_error(&err(
+            ErrorCode::Auth,
+            ErrorClass::Ssh
+        )));
+        assert!(is_transient_fetch_error(&err(
+            ErrorCode::GenericError,
+            ErrorClass::Net
+        )));
+        assert!(is_transient_fetch_error(&err(
+            ErrorCode::GenericError,
+            ErrorClass::Os
+        )));
+        assert!(is_transient_fetch_error(&err(
+            ErrorCode::GenericError,
+            ErrorClass::Http
+        )));
+        assert!(!is_transient_fetch_error(&err(
+            ErrorCode::Auth,
+            ErrorClass::Http
+        )));
+        assert!(!is_transient_fetch_error(&err(
+            ErrorCode::NotFound,
+            ErrorClass::Config
+        )));
     }
 
     #[test]
