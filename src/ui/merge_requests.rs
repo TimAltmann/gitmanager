@@ -1547,7 +1547,7 @@ fn draw_row(
                         if let Some(review) = mr.my_status() {
                             row.my_review(ui, review);
                         }
-                        let appr = approvals(mr, v.input.cfg.ignore_bot_approvals);
+                        let appr = row.approvals();
                         let tooltip = appr.tooltip(v.lang());
                         row.pips(ui, &appr, tooltip);
                         row.pipeline(ui, actions, if compact { 0.0 } else { 130.0 });
@@ -1572,7 +1572,7 @@ fn draw_row(
                         if let Some(review) = mr.my_status() {
                             row.my_review(ui, review);
                         }
-                        let appr = approvals(mr, v.input.cfg.ignore_bot_approvals);
+                        let appr = row.approvals();
                         let tooltip = appr.label(v.lang());
                         row.pips(ui, &appr, tooltip);
                         row.pipeline(ui, actions, 0.0);
@@ -1599,6 +1599,11 @@ struct Row<'r> {
 impl Row<'_> {
     fn lang(&self) -> Language {
         self.v.lang()
+    }
+
+    fn approvals(&self) -> Approvals {
+        let cfg = self.v.input.cfg;
+        approvals(self.mr, cfg.ignore_bot_approvals, cfg.approval_goal)
     }
 
     /// Zeile 1: Titel (klickbar, E12), `!iid`, Chips Entwurf / mergebereit
@@ -1793,7 +1798,7 @@ impl Row<'_> {
     /// Approval-Balken mit dem Painter (`ProgressBar` zeichnet bei 0 einen Rest).
     fn approval_bar(&self, ui: &mut Ui) {
         let (lang, p) = (self.lang(), &self.v.p);
-        let appr = approvals(self.mr, self.v.input.cfg.ignore_bot_approvals);
+        let appr = self.approvals();
         let label = appr.label(lang);
         let label_width = text_width(ui, &label, FontId::proportional(11.0)).max(self.min(92.0));
         unit(ui, 126.0 + label_width, 22.0, |ui| {
@@ -1801,10 +1806,11 @@ impl Row<'_> {
             let (rect, _) = ui.allocate_exact_size(vec2(120.0, 6.0), Sense::hover());
             let painter = ui.painter();
             painter.rect_filled(rect, 3.0, p.track);
-            let fill = if appr.required > 0 && appr.given >= appr.required {
+            // Läuft bis zum Ziel (Regel oder Einstellung) und wird dort grün
+            let fill = if appr.done() {
                 Some((1.0, p.bar_done))
-            } else if appr.given > 0 && appr.given < appr.required {
-                Some((appr.given as f32 / appr.required as f32, p.bar_partial))
+            } else if appr.given > 0 && appr.goal > 0 {
+                Some((appr.fraction(), p.bar_partial))
             } else {
                 None
             };
@@ -1822,7 +1828,7 @@ impl Row<'_> {
     fn pips(&self, ui: &mut Ui, appr: &Approvals, tooltip: String) {
         let p = &self.v.p;
         let short = appr.short(self.lang());
-        let n = appr.required.min(MAX_PIPS);
+        let n = appr.goal.min(MAX_PIPS);
         let pips_width = if n > 0 {
             n as f32 * 8.0 + (n - 1) as f32 * 3.0
         } else {
@@ -1964,7 +1970,7 @@ impl Row<'_> {
     /// „{n} Approvals“ beim Merge, Namen im Tooltip (Gemergt).
     fn approvals_text(&self, ui: &mut Ui) {
         let lang = self.lang();
-        let appr = approvals(self.mr, self.v.input.cfg.ignore_bot_approvals);
+        let appr = self.approvals();
         let text = if appr.given == 1 {
             tr(lang, "mr_appr_one")
         } else {

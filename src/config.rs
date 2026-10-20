@@ -158,6 +158,9 @@ pub enum AfterCheckoutPref {
     Fixed(AfterAction),
 }
 
+/// Obergrenze für `MrConfig::approval_goal` (so viele Pips passen).
+pub const MAX_APPROVAL_GOAL: u32 = 10;
+
 /// Einstellungen der Merge-Request-Ansicht (v15). Fehlende Felder fallen
 /// über `#[serde(default)]` einzeln auf `MrConfig::default()` zurück.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +174,9 @@ pub struct MrConfig {
     pub show_uninvolved_default: bool,
     /// Approvals von Bots nicht mitzählen (Sortierung „Meine“, E11)
     pub ignore_bot_approvals: bool,
+    /// Approvals für einen vollen Balken, wenn das Projekt keine
+    /// Approval-Regel hat; 0 = aus, max. [`MAX_APPROVAL_GOAL`]
+    pub approval_goal: u32,
     /// Auch MRs aus Projekten ohne lokalen Klon anzeigen (E1)
     pub include_nonlocal: bool,
     /// Abgewählte Projekte als `host/full/path` (E2), klein, sortiert, dedupliziert
@@ -198,6 +204,7 @@ impl Default for MrConfig {
             refresh_interval_min: 3,
             show_uninvolved_default: false,
             ignore_bot_approvals: true,
+            approval_goal: 2,
             include_nonlocal: true,
             excluded_projects: Vec::new(),
             extra_hosts: Vec::new(),
@@ -222,6 +229,7 @@ impl MrConfig {
             program.to_string()
         };
         self.refresh_interval_min = self.refresh_interval_min.min(60);
+        self.approval_goal = self.approval_goal.min(MAX_APPROVAL_GOAL);
         normalize_key_list(&mut self.excluded_projects);
         normalize_key_list(&mut self.extra_hosts);
         // Hosts case-insensitiv; bei doppeltem Schlüssel gewinnt der erste Eintrag
@@ -3315,6 +3323,7 @@ mod tests {
         assert_eq!(mr.refresh_interval_min, 3);
         assert!(!mr.show_uninvolved_default);
         assert!(mr.ignore_bot_approvals);
+        assert_eq!(mr.approval_goal, 2);
         assert!(mr.include_nonlocal);
         assert!(mr.excluded_projects.is_empty());
         assert!(mr.extra_hosts.is_empty());
@@ -3421,6 +3430,7 @@ mod tests {
             refresh_interval_min: 15,
             show_uninvolved_default: true,
             ignore_bot_approvals: false,
+            approval_goal: 3,
             include_nonlocal: false,
             excluded_projects: vec!["gitlab.example.com/group/app".to_string()],
             extra_hosts: vec!["gitlab.local:8443".to_string()],
@@ -3488,6 +3498,20 @@ mod tests {
         assert!(big.normalize());
         assert_eq!(big.refresh_interval_min, 60);
         assert_eq!(big.glab_program, "glab");
+
+        let mut goal = MrConfig {
+            approval_goal: 99,
+            ..Default::default()
+        };
+        assert!(goal.normalize());
+        assert_eq!(goal.approval_goal, MAX_APPROVAL_GOAL);
+        for v in [0, MAX_APPROVAL_GOAL] {
+            let mut ok = MrConfig {
+                approval_goal: v,
+                ..Default::default()
+            };
+            assert!(!ok.normalize());
+        }
 
         // 0 = aus und 60 bleiben unverändert
         for v in [0, 60] {

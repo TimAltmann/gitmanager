@@ -10,6 +10,7 @@
 use super::SettingsState;
 use crate::config::{
     AfterAction, AfterCheckoutPref, AppConfig, HostAlias, IdeConfig, MrConfig, Theme,
+    MAX_APPROVAL_GOAL,
 };
 use crate::git::RepoInfo;
 use crate::gitlab::checkout::review_root_dir;
@@ -2075,6 +2076,15 @@ fn display_section(ui: &mut Ui, t: &Tab, cfg: &mut MrConfig) {
         tr(lang, "mrs_show_all_default"),
     );
     ui.checkbox(&mut cfg.ignore_bot_approvals, tr(lang, "mrs_ignore_bots"));
+    ui.horizontal(|ui| {
+        ui.label(tr(lang, "mrs_approval_goal"));
+        ui.add(
+            egui::DragValue::new(&mut cfg.approval_goal)
+                .range(0..=MAX_APPROVAL_GOAL)
+                .speed(0.1),
+        );
+        small(ui, &tr(lang, "mrs_approval_goal_unit"), t.p.text2);
+    });
 }
 
 // --- Bausteine ------------------------------------------------------------------

@@ -375,6 +375,9 @@ pub struct Approvals {
     pub given: u32,
     /// 0 = keine Approval-Regel (auch CE)
     pub required: u32,
+    /// Approvals für 100 %: die Regel, ohne Regel das Ziel aus den
+    /// Einstellungen; 0 = kein Ziel
+    pub goal: u32,
     pub left: u32,
     /// In GitLab-Reihenfolge, ohne Bots, wenn ausgeblendet
     pub approvers: Vec<Person>,
@@ -406,11 +409,29 @@ impl Approvals {
         self.required > 0
     }
 
-    /// „{g} von {r} Approvals“ bzw. ohne Regel „1 Approval“ / „{g} Approvals“
+    /// Ziel kommt aus den Einstellungen (Projekt ohne Regel).
+    fn goal_from_settings(&self) -> bool {
+        !self.has_rule() && self.goal > 0
+    }
+
+    /// Ziel erreicht: Balken voll und grün.
+    pub fn done(&self) -> bool {
+        self.goal > 0 && self.given >= self.goal
+    }
+
+    /// Füllstand des Balkens, 0 bis 1; ohne Ziel 0.
+    pub fn fraction(&self) -> f32 {
+        if self.goal == 0 {
+            return 0.0;
+        }
+        (self.given as f32 / self.goal as f32).min(1.0)
+    }
+
+    /// „{g} von {z} Approvals“ bzw. ohne Ziel „1 Approval“ / „{g} Approvals“
     pub fn label(&self, lang: Language) -> String {
         let given = self.given.to_string();
-        if self.has_rule() {
-            tr_fmt(lang, "mr_appr_of", &[&given, &self.required.to_string()])
+        if self.goal > 0 {
+            tr_fmt(lang, "mr_appr_of", &[&given, &self.goal.to_string()])
         } else if self.given == 1 {
             tr(lang, "mr_appr_one")
         } else {
@@ -418,11 +439,11 @@ impl Approvals {
         }
     }
 
-    /// „{g}/{r}“ bzw. „{g}“
+    /// „{g}/{z}“ bzw. „{g}“
     pub fn short(&self, lang: Language) -> String {
         let given = self.given.to_string();
-        if self.has_rule() {
-            tr_fmt(lang, "mr_appr_short", &[&given, &self.required.to_string()])
+        if self.goal > 0 {
+            tr_fmt(lang, "mr_appr_short", &[&given, &self.goal.to_string()])
         } else {
             given
         }
@@ -447,10 +468,15 @@ impl Approvals {
             };
             tr_fmt(lang, key, &[&display_name(&r.name, r.is_me, lang)])
         }));
-        match (details.is_empty(), self.has_rule()) {
-            (true, false) => tr(lang, "mr_appr_no_rule"),
-            (true, true) => self.label(lang),
+        let text = match (details.is_empty(), self.has_rule()) {
+            (true, false) if self.goal == 0 => return tr(lang, "mr_appr_no_rule"),
+            (true, _) => self.label(lang),
             (false, _) => format!("{} · {}", self.label(lang), details.join("; ")),
+        };
+        if self.goal_from_settings() {
+            format!("{text}\n{}", tr(lang, "mr_appr_goal_tt"))
+        } else {
+            text
         }
     }
 }
@@ -1137,7 +1163,9 @@ fn approval_counts(mr: &MergeRequest, ignore_bots: bool) -> (u32, u32, u32) {
     (given, required, left)
 }
 
-pub fn approvals(mr: &MergeRequest, ignore_bots: bool) -> Approvals {
+/// `goal`: Approvals für 100 %, wenn das Projekt keine Regel hat
+/// (`MrConfig::approval_goal`, 0 = aus).
+pub fn approvals(mr: &MergeRequest, ignore_bots: bool, goal: u32) -> Approvals {
     let (given, required, left) = approval_counts(mr, ignore_bots);
     let approved = |r: &Reviewer| {
         !r.person.username.is_empty()
@@ -1171,6 +1199,7 @@ pub fn approvals(mr: &MergeRequest, ignore_bots: bool) -> Approvals {
     Approvals {
         given,
         required,
+        goal: if required > 0 { required } else { goal },
         left,
         approvers: mr
             .approved_by
@@ -1652,14 +1681,14 @@ mod tests {
 
         sort_mine(&mut mine, true);
         assert_eq!(iids(&mine), vec![412, 87, 233, 19, 305]);
-        let a = approvals(by_iid(&mine, 19), true);
+        let a = approvals(by_iid(&mine, 19), true, 0);
         assert_eq!((a.given, a.required, a.left), (0, 1, 1));
         assert!(a.approvers.is_empty());
 
         // Bots zählen mit: !19 hat 1 Approval und keins mehr offen → vor !87
         sort_mine(&mut mine, false);
         assert_eq!(iids(&mine), vec![412, 19, 87, 233, 305]);
-        let a = approvals(by_iid(&mine, 19), false);
+        let a = approvals(by_iid(&mine, 19), false, 0);
         assert_eq!((a.given, a.required, a.left), (1, 1, 0));
         assert_eq!(a.approvers[0].name, "Renovate Bot");
     }
@@ -1697,7 +1726,7 @@ mod tests {
             .collect();
         sort_mine(&mut mine, true);
         assert_eq!(iids(&mine), vec![412, 87, 233, 305, 19]);
-        let a = approvals(by_iid(&mine, 412), true);
+        let a = approvals(by_iid(&mine, 412), true, 0);
         assert_eq!((a.given, a.required, a.left), (2, 0, 0));
         assert!(!a.has_rule());
     }
@@ -2410,7 +2439,7 @@ mod tests {
     fn approvals_tooltips_design_brief() {
         let snap = sample_snapshot(false);
         let tip =
-            |mrs: &[MergeRequest], iid| approvals(by_iid(mrs, iid), true).tooltip(Language::De);
+            |mrs: &[MergeRequest], iid| approvals(by_iid(mrs, iid), true, 0).tooltip(Language::De);
         assert_eq!(
             tip(&snap.mine, 412),
             "2 von 2 Approvals · Miriam Becker, Sara Yilmaz"
@@ -2437,14 +2466,14 @@ mod tests {
         );
         // Von anderen: nur Approver, keine ausstehenden Reviewer (auch nicht ich)
         assert_eq!(tip(&snap.others, 421), "0 von 2 Approvals");
-        assert!(approvals(by_iid(&snap.others, 421), true)
+        assert!(approvals(by_iid(&snap.others, 421), true, 0)
             .pending_reviewers
             .is_empty());
-        let a = approvals(by_iid(&snap.others, 92), true);
+        let a = approvals(by_iid(&snap.others, 92), true, 0);
         assert_eq!(a.label(Language::En), "2 of 2 approvals");
         assert_eq!(a.short(Language::De), "2/2");
         assert_eq!(
-            approvals(by_iid(&snap.mine, 87), true).pending_reviewers,
+            approvals(by_iid(&snap.mine, 87), true, 0).pending_reviewers,
             vec![PendingReviewer {
                 name: "Miriam Becker".to_string(),
                 started: true,
@@ -2457,7 +2486,7 @@ mod tests {
             .reviewer(ME, "UNREVIEWED")
             .mr();
         assert_eq!(
-            approvals(&self_review, true).tooltip(Language::De),
+            approvals(&self_review, true, 0).tooltip(Language::De),
             "0 von 1 Approvals · Tim Altmann (du) ausstehend"
         );
         // Ohne Regel mit genau einem Approval: Einzahl
@@ -2465,7 +2494,7 @@ mod tests {
             .approved(&["mbecker"], 0)
             .ce()
             .mr();
-        let a = approvals(&one, true);
+        let a = approvals(&one, true, 0);
         assert_eq!(a.label(Language::De), "1 Approval");
         assert_eq!(a.label(Language::En), "1 approval");
         assert_eq!(a.short(Language::De), "1");
@@ -2474,7 +2503,7 @@ mod tests {
         let no_rule = Mr::new(1, "g/p", ME, "2026-10-17T09:00:00Z")
             .approved(&["mbecker", "syilmaz"], 0)
             .mr();
-        let a = approvals(&no_rule, true);
+        let a = approvals(&no_rule, true, 0);
         assert_eq!(a.label(Language::De), "2 Approvals");
         assert_eq!(a.short(Language::De), "2");
         assert_eq!(
@@ -2488,6 +2517,56 @@ mod tests {
     }
 
     #[test]
+    fn approvals_goal_without_rule() {
+        let note = "Keine Approval-Regel in GitLab – Ziel aus den Einstellungen";
+        let one = Mr::new(1, "g/p", ME, "2026-10-17T09:00:00Z")
+            .approved(&["mbecker"], 0)
+            .mr();
+        let a = approvals(&one, true, 2);
+        assert_eq!((a.given, a.required, a.goal), (1, 0, 2));
+        assert!(!a.has_rule());
+        assert!(!a.done());
+        assert_eq!(a.fraction(), 0.5);
+        assert_eq!(a.label(Language::De), "1 von 2 Approvals");
+        assert_eq!(a.short(Language::De), "1/2");
+        assert_eq!(
+            a.tooltip(Language::De),
+            format!("1 von 2 Approvals · Miriam Becker\n{note}")
+        );
+        // Ziel erreicht und überschritten: voll
+        let three = Mr::new(1, "g/p", ME, "2026-10-17T09:00:00Z")
+            .approved(&["mbecker", "syilmaz", "jkrueger"], 0)
+            .mr();
+        let a = approvals(&three, true, 2);
+        assert!(a.done());
+        assert_eq!(a.fraction(), 1.0);
+        assert_eq!(a.short(Language::De), "3/2");
+        // CE ohne Approvals
+        let ce = Mr::new(1, "g/p", ME, "2026-10-17T09:00:00Z").ce().mr();
+        let a = approvals(&ce, true, 2);
+        assert_eq!(a.fraction(), 0.0);
+        assert_eq!(
+            a.tooltip(Language::De),
+            format!("0 von 2 Approvals\n{note}")
+        );
+        // Eine Regel hat Vorrang vor dem Ziel
+        let rule = Mr::new(1, "g/p", ME, "2026-10-17T09:00:00Z")
+            .approved(&["mbecker"], 1)
+            .mr();
+        let a = approvals(&rule, true, 3);
+        assert_eq!(a.goal, 1);
+        assert!(a.done());
+        assert_eq!(a.tooltip(Language::De), "1 von 1 Approvals · Miriam Becker");
+        // Ziel 0 = aus: wie ohne Einstellung
+        let a = approvals(&one, true, 0);
+        assert_eq!(a.goal, 0);
+        assert!(!a.done());
+        assert_eq!(a.fraction(), 0.0);
+        assert_eq!(a.label(Language::De), "1 Approval");
+        assert_eq!(a.tooltip(Language::De), "1 Approval · Miriam Becker");
+    }
+
+    #[test]
     fn approvals_left_prefers_gitlab_value() {
         // GitLab kennt Regeln (z. B. Code Owner), die mehr verlangen als
         // `required − given`
@@ -2496,14 +2575,14 @@ mod tests {
             .node();
         node.approvals_left = Some(1);
         let mr = Mr(node).mr();
-        assert_eq!(approvals(&mr, true).left, 1);
+        assert_eq!(approvals(&mr, true, 0).left, 1);
         // Ein Bot fällt weg: nie weniger offen als GitLab meldet
         let mr = Mr::new(1, "g/p", ME, "2026-10-17T09:00:00Z")
             .approved(&["mbecker"], 2)
             .bot_approval("renovate-bot")
             .mr();
-        assert_eq!(approvals(&mr, false).left, 0);
-        assert_eq!(approvals(&mr, true).left, 1);
+        assert_eq!(approvals(&mr, false, 0).left, 0);
+        assert_eq!(approvals(&mr, true, 0).left, 1);
     }
 
     // --- Pipeline-Link (E7) ---
