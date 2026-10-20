@@ -115,7 +115,7 @@ The `Merge Requests` view shows the open merge requests of the GitLab projects b
 ### What is shown
 
 - **My merge requests:** sorted by most approvals; `ready to merge` when GitLab reports the MR as mergeable.
-- **From others:** review requests (`Reviewer`) and mentions (`Mentioned`); `All open` adds open MRs of your local projects you are not involved in.
+- **From others:** review requests (`Reviewer`) and mentions (`Mentioned`); `All open` adds open MRs of your local projects you are not involved in. `Approved by you` also shows when you approved without being a reviewer.
 - `Settings → Merge Requests → Repositories for merge requests` selects the projects (new projects are included automatically). The selection applies to all groups and the badge. `Also show MRs from projects without a local clone` is on by default.
 - Clicking the title or `Open in browser` opens the MR; clicking the pipeline status opens the pipeline. `Refresh` reloads the MRs; automatic refresh every 3 min (0 = off).
 

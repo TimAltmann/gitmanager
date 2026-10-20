@@ -99,15 +99,15 @@ pub enum MyReview {
 }
 
 impl MyReview {
-    /// Ohne `reviewState` (altes GitLab) zählt ein eigenes Approval, sonst
-    /// gilt das Review als offen.
+    /// Ein eigenes Approval (`approvedBy`) gilt immer, auch wenn
+    /// `reviewState` noch einen anderen Stand meldet; ohne `reviewState`
+    /// (altes GitLab) gilt das Review sonst als offen.
     fn from_state(state: Option<&str>, approved_by_me: bool) -> Self {
         match state {
+            _ if approved_by_me => Self::Approved,
             Some("APPROVED") => Self::Approved,
             Some("REQUESTED_CHANGES") => Self::ChangesRequested,
             Some("REVIEWED" | "UNAPPROVED") => Self::Commented,
-            Some("UNREVIEWED" | "REVIEW_STARTED") => Self::Pending,
-            _ if approved_by_me => Self::Approved,
             _ => Self::Pending,
         }
     }
@@ -305,6 +305,18 @@ impl MergeRequest {
 
     pub fn is_reviewer(&self) -> bool {
         self.reasons.contains(&Reason::Reviewer)
+    }
+
+    /// Ich stehe unter `approvedBy`, auch ohne Reviewer zu sein.
+    pub fn approved_by_me(&self) -> bool {
+        self.approved_by.iter().any(|p| p.is_me)
+    }
+
+    /// Eigener Stand für die Zeile: Review-Status als Reviewer, sonst
+    /// „Von dir approved“ bei einem Approval ohne Review-Anfrage.
+    pub fn my_status(&self) -> Option<MyReview> {
+        self.my_review
+            .or_else(|| self.approved_by_me().then_some(MyReview::Approved))
     }
 
     pub fn is_mentioned(&self) -> bool {
@@ -813,8 +825,7 @@ fn classify_host(raw: &HostRaw, me: Option<&str>) -> HostGroups {
         }
         // Review-Anfrage ohne `reviewers` (altes GitLab)
         if mr.is_reviewer() && mr.my_review.is_none() {
-            let approved = mr.approved_by.iter().any(|p| p.is_me);
-            mr.my_review = Some(MyReview::from_state(None, approved));
+            mr.my_review = Some(MyReview::from_state(None, mr.approved_by_me()));
         }
     }
 
@@ -2209,6 +2220,81 @@ mod tests {
             tr(Language::En, MyReview::Commented.label_key()),
             "Commented"
         );
+    }
+
+    #[test]
+    fn own_approval_counts_without_review_request() {
+        // Als dritte Person approved, ohne Reviewer zu sein
+        let mr = Mr::new(1, "g/p", "dwagner", "2026-10-17T09:00:00Z")
+            .approved(&["mbecker", "syilmaz", ME], 2)
+            .reviewer("mbecker", "APPROVED")
+            .mr();
+        assert_eq!(mr.my_review, None);
+        assert!(mr.approved_by_me());
+        assert_eq!(mr.my_status(), Some(MyReview::Approved));
+        // `reviewState` hinkt hinterher: `approvedBy` gewinnt
+        let mr = Mr::new(1, "g/p", "dwagner", "2026-10-17T09:00:00Z")
+            .approved(&[ME], 1)
+            .reviewer(ME, "UNREVIEWED")
+            .mr();
+        assert_eq!(mr.my_review, Some(MyReview::Approved));
+        // Ohne eigenes Approval bleibt der Review-Status
+        let mr = Mr::new(1, "g/p", "dwagner", "2026-10-17T09:00:00Z")
+            .approved(&["mbecker"], 1)
+            .reviewer(ME, "REVIEWED")
+            .mr();
+        assert_eq!(mr.my_status(), Some(MyReview::Commented));
+        // Weder Reviewer noch Approver
+        let mr = Mr::new(1, "g/p", "dwagner", "2026-10-17T09:00:00Z")
+            .approved(&["mbecker"], 1)
+            .mr();
+        assert_eq!(mr.my_status(), None);
+    }
+
+    #[test]
+    fn own_approval_is_no_pending_review_and_keeps_groups() {
+        let raw = HostRaw {
+            host_key: HOST.to_string(),
+            dashboard: Some(dashboard(
+                Vec::new(),
+                vec![
+                    // Review-Anfrage, `reviewState` noch offen, aber approved
+                    Mr::new(1, "kern/backend-api", "dwagner", "2026-10-17T09:00:00Z")
+                        .approved(&[ME], 1)
+                        .reviewer(ME, "UNREVIEWED")
+                        .node(),
+                ],
+            )),
+            // Erwähnt und als dritte Person approved
+            mentions: vec![mention(
+                Mr::new(2, "kern/backend-api", "dwagner", "2026-10-17T09:00:00Z")
+                    .approved(&["mbecker", "syilmaz", ME], 2)
+                    .node(),
+                MentionKind::Comment,
+            )],
+            // Ohne Review-Anfrage und Erwähnung approved: bleibt nicht beteiligt
+            uninvolved: Some(vec![project_mrs(
+                "kern/backend-api",
+                1,
+                None,
+                vec![
+                    Mr::new(3, "kern/backend-api", "dwagner", "2026-10-17T09:00:00Z")
+                        .approved(&[ME], 0)
+                        .node(),
+                ],
+            )]),
+            ..HostRaw::default()
+        };
+        let snap = build_snapshot(&[raw], &locals(&[]), &MrConfig::default(), &me_map());
+        assert_eq!(snap.badge, 0);
+        let review = by_iid(&snap.others, 1);
+        assert!(review.is_reviewer());
+        assert_eq!(review.my_status(), Some(MyReview::Approved));
+        let mentioned = by_iid(&snap.others, 2);
+        assert!(!mentioned.is_reviewer());
+        assert_eq!(mentioned.my_status(), Some(MyReview::Approved));
+        let list = snap.uninvolved.expect("nicht beteiligt");
+        assert_eq!(by_iid(&list.mrs, 3).my_status(), Some(MyReview::Approved));
     }
 
     // --- Modell ---

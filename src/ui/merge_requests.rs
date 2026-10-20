@@ -1544,7 +1544,7 @@ fn draw_row(
                 RowKind::Other => {
                     row.other_line2(ui);
                     row.line3(ui, actions, |ui, actions| {
-                        if let Some(review) = mr.my_review {
+                        if let Some(review) = mr.my_status() {
                             row.my_review(ui, review);
                         }
                         let appr = approvals(mr, v.input.cfg.ignore_bot_approvals);
@@ -1568,6 +1568,10 @@ fn draw_row(
                         unit(ui, width, 22.0, |ui| {
                             small(ui, &mr.project_path, v.p.text2);
                         });
+                        // Nicht beteiligt: höchstens „Von dir approved“
+                        if let Some(review) = mr.my_status() {
+                            row.my_review(ui, review);
+                        }
                         let appr = approvals(mr, v.input.cfg.ignore_bot_approvals);
                         let tooltip = appr.label(v.lang());
                         row.pips(ui, &appr, tooltip);
