@@ -1057,12 +1057,11 @@ impl MyApp {
         // Start, sonst Back-to-Back bei Fetch-Dauer > Intervall.
         // Finding D1: bewusst NICHT `git_busy` — Refresh/Fetch bleiben klickbar.
         self.set_auto_fetching(true);
-        let paths: Vec<PathBuf> = self.repos.iter().map(|r| r.path.clone()).collect();
+        // Worktrees eines Repos teilen die Remote-Refs: ein Fetch je Repo
+        let paths = crate::git::fetch_targets(&self.repos);
         let cfg = self.config.clone();
         let tx = self.scan_tx.clone();
         std::thread::spawn(move || {
-            // Worktrees eines Repos teilen die Remote-Refs: ein Fetch je Repo
-            let paths = crate::git::fetch_targets(&paths);
             // Finding E: Fehler aggregieren statt nur loggen — erster Fehler
             // geht als FetchDone mit (persistenter Banner), weiter fetchen,
             // damit erreichbare Remotes trotzdem frische Counts liefern.

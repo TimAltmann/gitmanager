@@ -369,34 +369,28 @@ pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
     Err(anyhow::Error::new(PartialFetch { succeeded, failed }))
 }
 
-/// Pfade für einen Fetch-Durchlauf über viele Repos: Worktrees eines
-/// Repositorys teilen Remotes und Remote-Refs, ein Fetch je Repository
-/// reicht; gleichzeitige Fetches in dasselbe `.git` stören sich zudem an
-/// den Ref-Locks. Bevorzugt den Haupt-Worktree, sonst den ersten Pfad.
-/// Pfade, die sich nicht öffnen lassen, bleiben (ihr Fehler soll weiter
-/// erscheinen). Reihenfolge wie in `paths`.
-pub fn fetch_targets(paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut by_common: HashMap<PathBuf, usize> = HashMap::new();
-    // (Pfad, ist ein verknüpfter Worktree)
-    let mut out: Vec<(PathBuf, bool)> = Vec::new();
-    for path in paths {
-        let Ok(repo) = Repository::open(path) else {
-            out.push((path.clone(), false));
-            continue;
-        };
-        let common = repo.commondir();
-        let common = std::fs::canonicalize(common).unwrap_or_else(|_| common.to_path_buf());
-        let linked = repo.is_worktree();
-        match by_common.get(&common) {
-            Some(&i) if out[i].1 && !linked => out[i] = (path.clone(), false),
+/// Pfade für einen Fetch-Durchlauf über die gescannten Repos: Worktrees
+/// eines Repositorys teilen Remotes und Remote-Refs, ein Fetch je
+/// Repository reicht; gleichzeitige Fetches in dasselbe `.git` stören sich
+/// zudem an den Ref-Locks. Gruppiert nach `common_dir` aus dem Scan, ohne
+/// die Repos erneut zu öffnen; bevorzugt den Haupt-Worktree, sonst den
+/// ersten Pfad. Ein Pfad, der sich seit dem Scan nicht mehr öffnen lässt,
+/// bleibt (sein Fehler soll beim Fetch erscheinen). Reihenfolge wie in
+/// `repos`.
+pub fn fetch_targets(repos: &[RepoInfo]) -> Vec<PathBuf> {
+    let mut by_common: HashMap<&Path, usize> = HashMap::new();
+    let mut out: Vec<&RepoInfo> = Vec::new();
+    for repo in repos {
+        match by_common.get(repo.common_dir.as_path()) {
+            Some(&i) if out[i].is_linked_worktree && !repo.is_linked_worktree => out[i] = repo,
             Some(_) => {}
             None => {
-                by_common.insert(common, out.len());
-                out.push((path.clone(), linked));
+                by_common.insert(&repo.common_dir, out.len());
+                out.push(repo);
             }
         }
     }
-    out.into_iter().map(|(path, _)| path).collect()
+    out.into_iter().map(|repo| repo.path.clone()).collect()
 }
 
 /// K1: holt nur die angegebenen Refspecs eines Remotes, z. B. den
@@ -3431,21 +3425,23 @@ mod tests {
         let wt_b = base.path().join("wt-b");
         repo.worktree("wt-a", &wt_a, None).unwrap();
         repo.worktree("wt-b", &wt_b, None).unwrap();
-        let missing = base.path().join("fehlt");
+        let scanned = |path: &PathBuf| get_repo_info(path.clone()).unwrap();
+        let missing = RepoInfo::new(base.path().join("fehlt"), "main".into(), false, false);
         // Worktrees vor dem Haupt-Worktree: der Haupt-Worktree gewinnt
-        let paths = vec![
-            wt_a.clone(),
-            other.clone(),
+        let repos = vec![
+            scanned(&wt_a),
+            scanned(&other),
             missing.clone(),
-            main.clone(),
-            wt_b.clone(),
+            scanned(&main),
+            scanned(&wt_b),
         ];
-        assert_eq!(
-            fetch_targets(&paths),
-            vec![main.clone(), other.clone(), missing]
-        );
+        let expected = vec![main.clone(), other.clone(), missing.path.clone()];
+        assert_eq!(fetch_targets(&repos), expected);
+        // Nur aus den Scan-Daten: ein seither gelöschtes Repo bleibt
+        fs::remove_dir_all(&other).unwrap();
+        assert_eq!(fetch_targets(&repos), expected);
         // Nur Worktrees: der erste
-        assert_eq!(fetch_targets(&[wt_b.clone(), wt_a]), vec![wt_b]);
+        assert_eq!(fetch_targets(&[scanned(&wt_b), scanned(&wt_a)]), vec![wt_b]);
         assert!(fetch_targets(&[]).is_empty());
     }
 
