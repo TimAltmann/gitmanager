@@ -100,8 +100,9 @@ impl MyApp {
         self.update_mr_hosts();
         let discovering = self.start_mr_discovery();
         // Folge-Scan (gemerkt während eines Auto-Fetch) abwarten
-        let saved =
-            !self.scanning && !self.pending_scan && std::mem::take(&mut self.mr_refresh_after_scan);
+        let saved = !self.git_busy.scans_repos()
+            && !self.pending_scan
+            && std::mem::take(&mut self.mr_refresh_after_scan);
         if saved || self.mr_lacks_new_hosts(&before) {
             // Wartet ggf. auf die Erkennung (`mr_pending_refresh`)
             self.start_mr_refresh();
@@ -116,7 +117,7 @@ impl MyApp {
     /// und sofort neu laden.
     pub(super) fn mr_after_settings_save(&mut self) {
         self.update_mr_hosts();
-        if self.scanning || self.pending_scan {
+        if self.git_busy.scans_repos() || self.pending_scan {
             self.mr_refresh_after_scan = true;
             return;
         }
@@ -742,7 +743,7 @@ impl MyApp {
                 merged_loading: self.mr_merged_loading
                     || (self.mr_loading && self.mr_view.mine_merged),
                 glab_error: self.mr_glab_error.as_ref(),
-                discovering: self.scanning || self.mr_discovering,
+                discovering: self.git_busy.scans_repos() || self.mr_discovering,
                 repos: &self.repos,
                 hosts: &self.mr_hosts,
                 locals: &self.mr_locals,
@@ -999,7 +1000,7 @@ pub(super) fn top_bar_button(
 #[cfg(test)]
 pub(super) mod tests {
     use super::super::tests::{test_app, test_app_with_glab};
-    use super::super::ScanResult;
+    use super::super::{GitBusy, ScanResult};
     use super::*;
     use crate::gitlab::glab::fake::FakeGlab;
     use crate::gitlab::glab::{FakeReply, GatedRunner, GlabError, GlabRequest};
@@ -1600,7 +1601,7 @@ pub(super) mod tests {
         let fake = glab.inner();
         app.glab_hosts = vec![signed_in(HOST)];
         app.mr_last_refresh = Some(Instant::now());
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.mr_after_settings_save();
         assert!(!app.mr_loading && !app.mr_pending_refresh);
         assert!(app.mr_refresh_after_scan);
@@ -1899,7 +1900,7 @@ pub(super) mod tests {
         let mut app = test_app();
         app.main_view = MainView::MergeRequests;
         // Läuft ein Scan, wird das Auschecken mit Hinweis abgelehnt
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         let path = PathBuf::from("/tmp/gm-mr-test/app");
         let actions = MrViewActions {
             checkout: Some(MrCheckoutChoice {
@@ -2145,7 +2146,7 @@ pub(super) mod tests {
                     assert!(app.config.agents.len() > 1, "AI-Auswahl als Combo");
                     app.main_view = view;
                     // Spinner in beiden Ansichten, Badge zweistellig
-                    app.scanning = true;
+                    app.git_busy = GitBusy::Scan;
                     app.mr_loading = true;
                     app.mr_snapshot = Some(Box::new(MrSnapshot {
                         badge: 12,

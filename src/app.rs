@@ -147,14 +147,14 @@ pub fn capped_file_count_label(count: usize, truncated: bool) -> String {
     }
 }
 
-/// Statusleiste der Repo-Liste, solange `scanning` gesetzt ist. Das
-/// Auschecken eines MR (K1) hält `scanning` nur als Ref-Lock (auch während
-/// eines minutenlangen Klons): dann „Auschecken für !{iid} läuft …“ statt
-/// „Scanne nach Repositories…“.
-fn repo_busy_text(lang: Language, scanning: bool, mr_checkout: Option<u64>) -> Option<String> {
-    match mr_checkout {
-        Some(iid) => Some(tr_fmt(lang, "mr_checkout_running", &[&iid.to_string()])),
-        None => scanning.then(|| tr(lang, "scanning_repos")),
+/// Statusleiste der Repo-Liste, solange ein Lauf die Refs hält. Beim
+/// Auschecken eines MR (K1, auch während eines minutenlangen Klons)
+/// „Auschecken für !{iid} läuft …“ statt „Scanne nach Repositories…“.
+fn repo_busy_text(lang: Language, busy: &GitBusy) -> Option<String> {
+    match busy {
+        GitBusy::Idle => None,
+        GitBusy::Scan | GitBusy::Fetch { .. } => Some(tr(lang, "scanning_repos")),
+        GitBusy::Checkout { iid } => Some(tr_fmt(lang, "mr_checkout_running", &[&iid.to_string()])),
     }
 }
 
@@ -254,10 +254,40 @@ enum MainView {
     MergeRequests,
 }
 
+/// Was gerade die Refs der Repos hält: höchstens ein Scan, manueller Fetch
+/// oder MR-Checkout zur Zeit (zwei libgit2-Läufe racen um FETCH_HEAD/Refs,
+/// „cannot lock ref“). Der Auto-Fetch zählt bewusst nicht dazu
+/// (`auto_fetching`, Finding D1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum GitBusy {
+    #[default]
+    Idle,
+    /// Scan der Suchpfade (`start_scan`)
+    Scan,
+    /// Manueller Fetch dieses Repos, danach Rescan (`start_repo_fetch`)
+    Fetch { repo: PathBuf },
+    /// K1: Auschecken dieses MR, ohne abschließenden Scan
+    Checkout { iid: u64 },
+}
+
+impl GitBusy {
+    /// Ein Lauf hält die Refs: kein zweiter Scan, Fetch oder Checkout
+    fn holds_refs(&self) -> bool {
+        *self != GitBusy::Idle
+    }
+
+    /// Scan oder manueller Fetch: beide enden mit neuen Repos (`Repos` bzw.
+    /// `FetchDone`), das Auschecken nicht
+    fn scans_repos(&self) -> bool {
+        matches!(self, GitBusy::Scan | GitBusy::Fetch { .. })
+    }
+}
+
 pub struct MyApp {
     config: AppConfig,
     repos: Vec<RepoInfo>,
-    scanning: bool,
+    /// Scan, manueller Fetch oder MR-Checkout (Ref-Lock, Spinner)
+    git_busy: GitBusy,
     error: Option<String>,
     show_settings: bool,
     settings_state: Option<SettingsState>,
@@ -303,7 +333,7 @@ pub struct MyApp {
     /// `None` = noch nie gelaufen (erster Durchlauf nach Startup-Scan fällig).
     last_auto_fetch: Option<std::time::Instant>,
     /// Finding D1: eigener Busy-Zustand für den periodischen Auto-Fetch.
-    /// Der Auto-Fetch setzt bewusst NICHT `scanning`, damit Refresh/Fetch
+    /// Der Auto-Fetch setzt bewusst NICHT `git_busy`, damit Refresh/Fetch
     /// währenddessen klickbar bleiben (stiller Hintergrundlauf).
     auto_fetching: bool,
     /// P2b/L2: manueller Refresh während Auto-Fetch — Intent merken statt
@@ -358,10 +388,6 @@ pub struct MyApp {
     /// (außer „Aktualisieren“); `mr_glab_error` trägt die Art für die Karte
     mr_glab_missing: bool,
     mr_glab_error: Option<GlabErrorKind>,
-    /// K1: Auschecken läuft für diesen MR (`iid`); hält `scanning` als Ref-Lock
-    mr_checkout_busy: Option<u64>,
-    /// Repo, für das gerade ein manueller Fetch läuft (Spinner im Tray)
-    fetching_repo: Option<PathBuf>,
     /// K1: Wechsel eines bestehenden Klons wartet auf `execute_branch_switch`
     mr_switch: Option<MrSwitch>,
     /// K1: „Danach öffnen“ mit der IDE wartet auf den Rescan
@@ -411,7 +437,7 @@ impl MyApp {
         let mut app = Self {
             config,
             repos: Vec::new(),
-            scanning: false,
+            git_busy: GitBusy::Idle,
             error: None,
             show_settings: false,
             settings_state: None,
@@ -475,8 +501,6 @@ impl MyApp {
             mr_view,
             mr_glab_missing: false,
             mr_glab_error: None,
-            mr_checkout_busy: None,
-            fetching_repo: None,
             mr_switch: None,
             pending_after_checkout: None,
             mr_notice: None,
@@ -594,13 +618,16 @@ impl MyApp {
     }
 
     fn start_scan(&mut self) {
-        if self.scanning {
-            // K1: das Auschecken hält `scanning` ohne abschließenden Scan –
-            // Wunsch merken, `poll_scan` holt ihn danach nach
-            if self.mr_checkout_busy.is_some() {
+        match self.git_busy {
+            GitBusy::Idle => {}
+            // Ein laufender Scan/Fetch liefert ohnehin neue Repos
+            GitBusy::Scan | GitBusy::Fetch { .. } => return,
+            // K1: das Auschecken endet ohne Scan – Wunsch merken, `poll_scan`
+            // holt ihn danach nach
+            GitBusy::Checkout { .. } => {
                 self.pending_scan = true;
+                return;
             }
-            return;
         }
         // L2: kein paralleler Lauf zum Auto-Fetch — zwei libgit2-Fetches
         // auf denselben Repos racen um FETCH_HEAD/refs (cannot lock ref).
@@ -611,12 +638,12 @@ impl MyApp {
             self.status_message_time = Some(std::time::Instant::now());
             return;
         }
-        self.scanning = true;
+        self.git_busy = GitBusy::Scan;
         self.error = None;
         let cfg = self.config.clone();
         let tx = self.scan_tx.clone();
         std::thread::spawn(move || {
-            // H3: Panic darf `scanning` nicht hängen lassen — Fallback
+            // H3: Panic darf `git_busy` nicht hängen lassen — Fallback
             // resettet Flags + zeigt Fehler (Liste bleibt erhalten).
             let msg =
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan_repos(&cfg))) {
@@ -636,7 +663,7 @@ impl MyApp {
         while let Ok(result) = self.scan_rx.try_recv() {
             match result {
                 ScanResult::Repos(repos) => {
-                    self.scanning = false;
+                    self.git_busy = GitBusy::Idle;
                     // I1: auto_fetching NICHT hier löschen — ein laufender
                     // Auto-Fetch würde sonst als fertig gelten und sofort ein
                     // zweiter Auto-Fetch starten (Ref-Race). Nur FetchDone
@@ -667,25 +694,20 @@ impl MyApp {
                     fetch_is_fetch_error,
                     is_auto,
                 } => {
-                    // L4: `scanning` nur für manuelle Läufe zurücksetzen — ein
+                    // L4: `git_busy` nur für manuelle Läufe zurücksetzen — ein
                     // parallel eintreffendes Auto-FetchDone darf den Spinner
                     // eines noch laufenden manuellen Laufs nicht löschen.
                     if !is_auto {
-                        self.scanning = false;
-                        self.fetching_repo = None;
+                        self.git_busy = GitBusy::Idle;
                     }
                     // I1: nur Auto-FetchDone löscht auto_fetching — manueller
                     // Fetch (is_auto=false) lässt einen laufenden Auto-Fetch in Ruhe.
+                    // P2b: einen gemerkten Refresh holt das Ende von `poll_scan` nach.
                     if is_auto {
                         self.auto_fetching = false;
                         // I6: Timestamp = Ende statt Start — bei langsamem Fetch
                         // (> Intervall) kein Back-to-Back-Dauerfeuer.
                         self.last_auto_fetch = Some(std::time::Instant::now());
-                        // P2b: gemerkten manuellen Refresh jetzt nachholen.
-                        if self.pending_scan {
-                            self.pending_scan = false;
-                            self.start_scan();
-                        }
                     }
                     let mut repos = repos;
                     sort_main_repos(&mut repos, &self.config);
@@ -721,17 +743,11 @@ impl MyApp {
                     // Spinner), Fehler persistent zeigen, Liste behalten.
                     // Wie Auto-FetchDone als Intervall-Ende werten (kein
                     // sofortiges Back-to-Back mit Panic-Loop).
-                    self.scanning = false;
-                    self.mr_checkout_busy = None;
-                    self.fetching_repo = None;
+                    self.git_busy = GitBusy::Idle;
                     self.auto_fetching = false;
                     self.last_auto_fetch = Some(std::time::Instant::now());
-                    // F1#F2: gemerkten Refresh auch nach Abort nachholen
-                    // (wie Auto-FetchDone) — sonst wartet er bis Intervall.
-                    if self.pending_scan {
-                        self.pending_scan = false;
-                        self.start_scan();
-                    }
+                    // F1#F2: einen gemerkten Refresh holt auch nach Abort das
+                    // Ende von `poll_scan` nach — sonst wartet er bis Intervall.
                     let msg = tr(self.config.language, reason_key);
                     let msg = if msg == reason_key {
                         reason_key.to_string()
@@ -746,8 +762,7 @@ impl MyApp {
                 }
                 ScanResult::MrCheckoutReady { choice, result } => {
                     // K1: Ref-Lock lösen; dann Rescan, Wechsel oder Fehler
-                    self.scanning = false;
-                    self.mr_checkout_busy = None;
+                    self.git_busy = GitBusy::Idle;
                     self.on_mr_checkout_ready(*choice, result);
                     self.mark_tray_dirty();
                     ctx.request_repaint();
@@ -822,7 +837,7 @@ impl MyApp {
                 }
             }
         }
-        if self.scanning {
+        if self.git_busy.holds_refs() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if let Some(t) = self.status_message_time {
@@ -850,10 +865,11 @@ impl MyApp {
             // (#3 Badge) → dirty, damit der nächste Throttle-Sync übernimmt.
             self.mark_tray_dirty();
         }
-        // K1: während des Auscheckens angefragten Scan nachholen – erst nach
-        // dem Wechsel oben, sonst liest er den alten Stand. Ein Fehler des
-        // Auscheckens bleibt bis zum Scan-Ergebnis stehen (wie nach Abort).
-        if self.pending_scan && !self.scanning && !self.auto_fetching {
+        // Gemerkten Scan nachholen, sobald nichts mehr die Refs hält und kein
+        // Auto-Fetch läuft (P2b nach dem Auto-Fetch, F1#F2 nach Abort, K1 nach
+        // dem Auschecken) – erst nach dem Wechsel oben, sonst liest er den
+        // alten Stand. Ein Fehler bleibt bis zum Scan-Ergebnis stehen.
+        if self.pending_scan && !self.git_busy.holds_refs() && !self.auto_fetching {
             self.pending_scan = false;
             let error = self.error.take();
             self.start_scan();
@@ -999,13 +1015,13 @@ impl MyApp {
         }
         if self.auto_fetching {
             // Läuft bereits: Ergebnis zeitnah anwenden (stiller Lauf ohne
-            // `scanning`, daher kein automatischer Repaint-Loop).
+            // `git_busy`, daher kein automatischer Repaint-Loop).
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
             return;
         }
-        if self.scanning {
-            // Manueller Scan/Fetch läuft: Auto auslassen statt blockieren
-            // (Finding D1) — nächster Tick holt es nach.
+        if self.git_busy.holds_refs() {
+            // Manueller Scan/Fetch oder Auschecken läuft: Auto auslassen
+            // statt blockieren (Finding D1) — nächster Tick holt es nach.
             ctx.request_repaint_after(std::time::Duration::from_secs(60));
             return;
         }
@@ -1016,7 +1032,7 @@ impl MyApp {
         }
         // I6: Timestamp erst im FetchDone-Arm (Ende) setzen — nicht hier am
         // Start, sonst Back-to-Back bei Fetch-Dauer > Intervall.
-        // Finding D1: bewusst NICHT `scanning` — Refresh/Fetch bleiben klickbar.
+        // Finding D1: bewusst NICHT `git_busy` — Refresh/Fetch bleiben klickbar.
         self.auto_fetching = true;
         let paths: Vec<PathBuf> = self.repos.iter().map(|r| r.path.clone()).collect();
         let cfg = self.config.clone();
@@ -1214,8 +1230,11 @@ impl MyApp {
             let mr_badge = merge_requests::mr_badge(self.mr_snapshot.as_deref());
             // Fetch-Buttons im Tray: gesperrt während Scan/Fetch, Spinner am Repo
             let fetching = crate::ui::tray_popup::TrayFetching {
-                busy: self.scanning || self.auto_fetching,
-                repo: self.fetching_repo.clone(),
+                busy: self.git_busy.holds_refs() || self.auto_fetching,
+                repo: match &self.git_busy {
+                    GitBusy::Fetch { repo } => Some(repo.clone()),
+                    _ => None,
+                },
             };
             // Poison-tolerant: recover from poisoned mutex instead of staling forever.
             let locked = match shared.try_lock() {
@@ -1494,9 +1513,9 @@ impl MyApp {
             self.status_message_time = Some(std::time::Instant::now());
             return;
         }
-        // Ein Scan/Fetch läuft schon (Tray-Stand kann veraltet sein): kein
-        // zweiter Fetch auf dieselben Refs
-        if self.scanning {
+        // Ein Scan/Fetch/Checkout läuft schon (Tray-Stand kann veraltet sein):
+        // kein zweiter Fetch auf dieselben Refs
+        if self.git_busy.holds_refs() {
             self.status_message = Some(tr(lang, "fetch_busy"));
             self.status_message_time = Some(std::time::Instant::now());
             return;
@@ -1504,7 +1523,6 @@ impl MyApp {
         let path_clone = repo_path.clone();
         let cfg = self.config.clone();
         let tx = self.scan_tx.clone();
-        self.scanning = true;
         // Manueller Fetch = frische Refs: Auto-Timer zurücksetzen,
         // damit der periodische Fetch nicht Sekunden später doppelt läuft.
         self.last_auto_fetch = Some(std::time::Instant::now());
@@ -1515,7 +1533,7 @@ impl MyApp {
         ));
         self.status_message_time = Some(std::time::Instant::now());
         std::thread::spawn(move || {
-            // H3: Panic vor send darf `scanning` nicht hängen
+            // H3: Panic vor send darf `git_busy` nicht hängen
             // lassen — FetchAborted resettet Flags ohne Listen-Wipe.
             let msg = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let fetch_res = crate::git::fetch_all(&path_clone);
@@ -1548,7 +1566,7 @@ impl MyApp {
             };
             let _ = tx.send(msg);
         });
-        self.fetching_repo = Some(repo_path);
+        self.git_busy = GitBusy::Fetch { repo: repo_path };
         // Spinner/gesperrte Fetch-Buttons auch im Tray
         self.mark_tray_dirty();
         self.sync_tray_service();
@@ -2099,15 +2117,14 @@ impl MyApp {
                         ui.add_space(8.0);
                         // E19: in der MR-Ansicht lädt „Aktualisieren“ die MRs neu.
                         let mr_view = self.main_view == MainView::MergeRequests;
+                        let checkout = matches!(self.git_busy, GitBusy::Checkout { .. });
                         let busy = if mr_view {
-                            self.mr_loading
-                                || self.mr_discovering
-                                || self.mr_checkout_busy.is_some()
+                            self.mr_loading || self.mr_discovering || checkout
                         } else {
-                            self.scanning
+                            self.git_busy.holds_refs()
                         };
-                        // Auschecken hält `scanning` nur als Ref-Lock: kein „Scanne…“
-                        let refresh_label = if busy && !mr_view && self.mr_checkout_busy.is_none() {
+                        // Beim Auschecken kein „Scanne…“
+                        let refresh_label = if !mr_view && self.git_busy.scans_repos() {
                             tr(lang, "scanning")
                         } else {
                             tr(lang, "refresh")
@@ -2261,9 +2278,7 @@ impl MyApp {
                                 .size(11.0)
                                 .color(Color32::from_rgb(60, 120, 60)),
                         );
-                    } else if let Some(text) =
-                        repo_busy_text(lang, self.scanning, self.mr_checkout_busy)
-                    {
+                    } else if let Some(text) = repo_busy_text(lang, &self.git_busy) {
                         ui.label(
                             RichText::new(text)
                                 .size(11.0)
@@ -2593,7 +2608,7 @@ impl eframe::App for MyApp {
                     return;
                 }
 
-                if self.config.roots.is_empty() && !self.scanning {
+                if self.config.roots.is_empty() && !self.git_busy.scans_repos() {
                     let frame = egui::Frame::new()
                         .fill(Color32::from_rgb(255, 248, 220))
                         .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 180, 80)))
@@ -2631,14 +2646,14 @@ impl eframe::App for MyApp {
 
                 // Wir brauchen &mut für repo_list, um selektierte Werte zu zeigen, aber hier clonen wir mut
                 // repo_list wird &mut repos erwarten, wir haben &mut self.repos
-                // scanning → Fetch-/Refresh-Buttons disabled + Spinner während Fetch/Scan
+                // Lauf hält die Refs → Fetch-/Refresh-Buttons disabled + Spinner
                 // Task 4: Sortierung im View (Scanner bleibt alphabetisch)
                 // Finding A: nur bei dirty sortieren statt pro Frame (60fps).
                 if self.repo_sort_dirty {
                     sort_main_repos(&mut self.repos, &self.config);
                     self.repo_sort_dirty = false;
                 }
-                let fetching = self.scanning;
+                let fetching = self.git_busy.holds_refs();
                 // K1: „In Repo-Liste zeigen“ hebt eine Karte kurz hervor
                 let highlight = self.repo_highlight_frame(&ctx);
                 show_repo_list(
@@ -2945,7 +2960,7 @@ mod tests {
         MyApp {
             config,
             repos: Vec::new(),
-            scanning: false,
+            git_busy: GitBusy::Idle,
             error: None,
             show_settings: false,
             settings_state: None,
@@ -3007,8 +3022,6 @@ mod tests {
             mr_view,
             mr_glab_missing: false,
             mr_glab_error: None,
-            mr_checkout_busy: None,
-            fetching_repo: None,
             mr_switch: None,
             pending_after_checkout: None,
             mr_notice: None,
@@ -3145,7 +3158,7 @@ mod tests {
     fn poll_scan_fetch_done_error_sets_error_and_status() {
         // UI-Error-Pfad: Fetch-Fehler landet in self.error + Status (statt eprintln-only)
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.scan_tx
             .send(ScanResult::FetchDone {
                 repos: vec![],
@@ -3157,7 +3170,7 @@ mod tests {
             .expect("send fetch done");
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
-        assert!(!app.scanning, "fetch done must clear spinner");
+        assert_eq!(app.git_busy, GitBusy::Idle, "fetch done must clear spinner");
         let err = app.error.expect("error must be set");
         assert!(
             err.contains("'origin': auth failed"),
@@ -3179,7 +3192,7 @@ mod tests {
     #[test]
     fn poll_scan_fetch_done_partial_uses_partial_key() {
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.scan_tx
             .send(ScanResult::FetchDone {
                 repos: vec![],
@@ -3192,7 +3205,7 @@ mod tests {
             .expect("send fetch done");
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
         let err = app.error.expect("error must be set");
         assert!(
             err.contains("'bad'"),
@@ -3214,7 +3227,7 @@ mod tests {
         // I1: EN-UI darf kein Deutsch einbetten (Wrapper + Hint + Detail EN).
         let mut app = test_app();
         assert_eq!(app.config.language, crate::i18n::Language::En);
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.scan_tx
             .send(ScanResult::FetchDone {
                 repos: vec![],
@@ -3251,7 +3264,7 @@ mod tests {
     #[test]
     fn poll_scan_fetch_done_ok_clears_error() {
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.auto_fetching = true;
         app.error = Some("stale".to_string());
         app.scan_tx
@@ -3266,9 +3279,9 @@ mod tests {
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
         // L4: Auto-FetchDone räumt eigenen Flag/Timestamp, lässt aber einen
-        // parallelen manuellen Lauf (scanning) in Ruhe.
+        // parallelen manuellen Lauf (git_busy) in Ruhe.
         assert!(
-            app.scanning,
+            app.git_busy.holds_refs(),
             "auto FetchDone must not clear manual scanning"
         );
         assert!(!app.auto_fetching);
@@ -3307,12 +3320,12 @@ mod tests {
         // I1: manueller Scan (Repos) darf einen laufenden Auto-Fetch nicht
         // als fertig markieren — sonst zwei parallele fetch_all (Ref-Race).
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.auto_fetching = true;
         app.scan_tx.send(ScanResult::Repos(vec![])).unwrap();
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
         assert!(app.auto_fetching, "Repos must not clear auto_fetching");
     }
 
@@ -3342,9 +3355,9 @@ mod tests {
     fn repo_fetch_from_tray_refused_while_busy() {
         // Tray-Stand kann veraltet sein: kein zweiter Fetch auf dieselben Refs
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.start_repo_fetch(PathBuf::from("/repos/a"));
-        assert_eq!(app.fetching_repo, None);
+        assert_eq!(app.git_busy, GitBusy::Scan);
         assert_eq!(
             app.status_message.as_deref(),
             Some(tr(app.config.language, "fetch_busy").as_str())
@@ -3352,8 +3365,7 @@ mod tests {
         let mut app = test_app();
         app.auto_fetching = true;
         app.start_repo_fetch(PathBuf::from("/repos/a"));
-        assert!(!app.scanning);
-        assert_eq!(app.fetching_repo, None);
+        assert_eq!(app.git_busy, GitBusy::Idle);
     }
 
     #[test]
@@ -3361,8 +3373,12 @@ mod tests {
         let mut app = test_app();
         let dir = tempfile::tempdir().unwrap();
         app.start_repo_fetch(dir.path().to_path_buf());
-        assert!(app.scanning);
-        assert_eq!(app.fetching_repo.as_deref(), Some(dir.path()));
+        assert_eq!(
+            app.git_busy,
+            GitBusy::Fetch {
+                repo: dir.path().to_path_buf()
+            }
+        );
         // Der Worker meldet sich auf dem alten Kanal; der kommt erst nach
         // dem Auto-FetchDone zurück (sonst wertet poll_scan beide zugleich aus)
         let (tx, rx) = mpsc::channel();
@@ -3378,16 +3394,15 @@ mod tests {
         .unwrap();
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
-        assert!(app.fetching_repo.is_some());
+        assert!(matches!(app.git_busy, GitBusy::Fetch { .. }));
         app.scan_rx = worker_rx;
         // Ende des manuellen Fetch (Worker oder Abbruch) gibt das Repo frei
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while app.fetching_repo.is_some() && std::time::Instant::now() < until {
+        while app.git_busy.holds_refs() && std::time::Instant::now() < until {
             app.poll_scan(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(app.fetching_repo, None);
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
     }
 
     #[test]
@@ -3417,9 +3432,9 @@ mod tests {
     #[test]
     fn poll_scan_auto_fetch_done_keeps_manual_scanning() {
         // L4: Auto-FetchDone darf den Spinner eines parallelen manuellen
-        // Laufs nicht löschen (nur is_auto=false setzt scanning zurück).
+        // Laufs nicht löschen (nur is_auto=false setzt git_busy zurück).
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.scan_tx
             .send(ScanResult::FetchDone {
                 repos: vec![],
@@ -3432,7 +3447,7 @@ mod tests {
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
         assert!(
-            app.scanning,
+            app.git_busy.holds_refs(),
             "auto FetchDone must not clear manual scanning"
         );
         // Manueller FetchDone räumt auf wie bisher.
@@ -3446,7 +3461,7 @@ mod tests {
             })
             .unwrap();
         app.poll_scan(&ctx);
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
     }
 
     #[test]
@@ -3456,8 +3471,9 @@ mod tests {
         let mut app = test_app();
         app.auto_fetching = true;
         app.start_scan();
-        assert!(
-            !app.scanning,
+        assert_eq!(
+            app.git_busy,
+            GitBusy::Idle,
             "must not spawn manual scan during auto-fetch"
         );
         assert!(
@@ -3470,7 +3486,7 @@ mod tests {
         // Ohne Auto-Lauf normaler Start.
         app.auto_fetching = false;
         app.start_scan();
-        assert!(app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Scan);
     }
 
     #[test]
@@ -3565,7 +3581,11 @@ mod tests {
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
         assert!(!app.pending_scan);
-        assert!(app.scanning, "pending refresh must start after abort");
+        assert_eq!(
+            app.git_busy,
+            GitBusy::Scan,
+            "pending refresh must start after abort"
+        );
         assert!(app.error.is_some());
     }
 
@@ -3576,7 +3596,7 @@ mod tests {
         app.auto_fetching = true;
         app.start_scan();
         assert!(app.pending_scan);
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
         let ctx = egui::Context::default();
         app.scan_tx
             .send(ScanResult::FetchDone {
@@ -3589,14 +3609,18 @@ mod tests {
             .unwrap();
         app.poll_scan(&ctx);
         assert!(!app.pending_scan);
-        assert!(app.scanning, "pending refresh must start after auto done");
+        assert_eq!(
+            app.git_busy,
+            GitBusy::Scan,
+            "pending refresh must start after auto done"
+        );
     }
 
     #[test]
     fn fetch_aborted_resets_flags_keeps_repos() {
         // H3: Abort resettet Flags + zeigt Fehler, wischt Liste nicht.
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.auto_fetching = true;
         app.repos = vec![crate::git::RepoInfo::new(
             PathBuf::from("/tmp/repo"),
@@ -3611,7 +3635,7 @@ mod tests {
             .unwrap();
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
         assert!(!app.auto_fetching);
         assert_eq!(app.repos.len(), 1);
         assert!(app.error.is_some());
@@ -3620,16 +3644,77 @@ mod tests {
     #[test]
     fn repo_busy_text_names_mr_checkout() {
         let lang = Language::De;
-        assert_eq!(repo_busy_text(lang, false, None), None);
+        assert_eq!(repo_busy_text(lang, &GitBusy::Idle), None);
+        let fetch = GitBusy::Fetch {
+            repo: PathBuf::from("/repos/a"),
+        };
+        for busy in [GitBusy::Scan, fetch] {
+            assert_eq!(
+                repo_busy_text(lang, &busy),
+                Some(tr(lang, "scanning_repos"))
+            );
+        }
+        // Auschecken hält nur die Refs: kein „Scanne …“
         assert_eq!(
-            repo_busy_text(lang, true, None),
-            Some(tr(lang, "scanning_repos"))
-        );
-        // Auschecken hält `scanning` als Ref-Lock: kein „Scanne …“
-        assert_eq!(
-            repo_busy_text(lang, true, Some(5)).as_deref(),
+            repo_busy_text(lang, &GitBusy::Checkout { iid: 5 }).as_deref(),
             Some("Auschecken für !5 läuft …")
         );
+    }
+
+    #[test]
+    fn git_busy_tells_ref_lock_from_scan() {
+        assert!(!GitBusy::Idle.holds_refs() && !GitBusy::Idle.scans_repos());
+        let fetch = GitBusy::Fetch {
+            repo: PathBuf::from("/repos/a"),
+        };
+        for busy in [GitBusy::Scan, fetch] {
+            assert!(busy.holds_refs() && busy.scans_repos(), "{busy:?}");
+        }
+        // K1: das Auschecken endet ohne Scan
+        let checkout = GitBusy::Checkout { iid: 5 };
+        assert!(checkout.holds_refs() && !checkout.scans_repos());
+    }
+
+    /// Ohne GitLab-Host zeigt die MR-Ansicht „Laden“ nur, solange ein Scan
+    /// noch Hosts liefern kann, nicht während eines (ggf. minutenlangen)
+    /// Auscheckens (K1).
+    #[test]
+    fn mr_view_loading_card_only_while_scanning() {
+        let loading = tr(Language::En, "mr_loading");
+        let fetch = GitBusy::Fetch {
+            repo: PathBuf::from("/repos/a"),
+        };
+        for (busy, shows_loading) in [
+            (GitBusy::Scan, true),
+            (fetch, true),
+            (GitBusy::Checkout { iid: 5 }, false),
+            (GitBusy::Idle, false),
+        ] {
+            let mut app = test_app();
+            app.main_view = MainView::MergeRequests;
+            app.git_busy = busy.clone();
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            let output = ctx.run_ui(raw, |ui| app.show_mr_view(ui));
+            let nodes = output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .map(|u| u.nodes.clone())
+                .unwrap_or_default();
+            output.drop_without_applying_deltas();
+            let shown = nodes
+                .iter()
+                .any(|(_, n)| n.value().or(n.label()) == Some(loading.as_str()));
+            assert_eq!(shown, shows_loading, "{busy:?}");
+        }
     }
 
     #[test]
@@ -3651,7 +3736,7 @@ mod tests {
     fn poll_scan_plain_error_has_no_auth_hint() {
         // I2: Open-/Setup-Fehler ohne auth_hint (irreführend sonst).
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.scan_tx
             .send(ScanResult::FetchDone {
                 repos: vec![],
@@ -3858,7 +3943,7 @@ mod tests {
             Some("Lokaler Branch feature um 1 Commit vorgespult")
         );
         assert!(app.pending_scan, "Folge-Scan nach dem Auto-Fetch gemerkt");
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
     }
 
     #[test]

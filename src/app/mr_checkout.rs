@@ -2,11 +2,11 @@
 //! Worktree“, „Neuer Klon“ und das Vorbereiten eines bestehenden Klons
 //! (`git.rs`), der Wechsel über den bestehenden Ablauf
 //! `pending_branch_switches` (Dialog bei Änderungen), „Danach öffnen“ und das
-//! Menü „Bereits ausgecheckt“. Der Worker hält `scanning` als Ref-Lock (kein
+//! Menü „Bereits ausgecheckt“. Der Worker hält den Ref-Lock (`GitBusy`, kein
 //! paralleler Scan oder Auto-Fetch); Fehler gehen wie beim Fetch über
 //! `self.error` und damit ins Banner beider Ansichten (E20).
 
-use super::{fetch_error_i18n_key, fetch_error_parts, MainView, MyApp, ScanResult};
+use super::{fetch_error_i18n_key, fetch_error_parts, GitBusy, MainView, MyApp, ScanResult};
 use super::{ICON_CROSS, ICON_WARNING};
 use crate::config::{AfterAction, AppConfig};
 use crate::git::{self, CheckoutError, MrPrep, MrPrepOutcome, RepoInfo};
@@ -84,7 +84,7 @@ struct IdeLaunch {
 impl MyApp {
     /// Startet das Auschecken aus dem Menü K1 im Hintergrund. Nicht während
     /// eines Scans oder Fetches (Ref-Race wie beim manuellen Fetch); danach
-    /// hält es `scanning` bis `MrCheckoutReady`.
+    /// hält es `GitBusy::Checkout` bis `MrCheckoutReady`.
     pub(super) fn start_mr_checkout(&mut self, choice: MrCheckoutChoice) {
         let lang = self.config.language;
         // Vorbelegung fürs nächste Menü; gespeichert wird gebatcht
@@ -104,7 +104,7 @@ impl MyApp {
                 .merge_requests
                 .remember_after_checkout(&choice.after);
         }
-        if self.scanning || self.auto_fetching {
+        if self.git_busy.holds_refs() || self.auto_fetching {
             self.set_status(tr(lang, "mr_checkout_blocked"));
             return;
         }
@@ -155,11 +155,10 @@ impl MyApp {
         self.set_status(busy);
         self.mr_notice = None;
         // Ref-Lock wie beim manuellen Fetch: kein Scan, kein Auto-Fetch
-        self.scanning = true;
-        self.mr_checkout_busy = Some(choice.iid);
+        self.git_busy = GitBusy::Checkout { iid: choice.iid };
         let tx = self.scan_tx.clone();
         std::thread::spawn(move || {
-            // H3: Panic vor send darf `scanning` nicht hängen lassen
+            // H3: Panic vor send darf `git_busy` nicht hängen lassen
             let msg = match catch_unwind(AssertUnwindSafe(|| run_job(&job))) {
                 Ok(result) => ScanResult::MrCheckoutReady {
                     choice: Box::new(choice),
@@ -232,7 +231,7 @@ impl MyApp {
         })
     }
 
-    /// Ergebnis des Workers (aus `poll_scan`, `scanning` ist schon frei):
+    /// Ergebnis des Workers (aus `poll_scan`, der Ref-Lock ist schon frei):
     /// Worktree/Klon → Rescan und „Danach öffnen“, bestehender Klon →
     /// `pending_branch_switches`, Fehler → Banner (E20).
     pub(super) fn on_mr_checkout_ready(
@@ -874,7 +873,7 @@ mod tests {
         let until = Instant::now() + Duration::from_secs(10);
         loop {
             app.poll_scan(&ctx);
-            if !app.scanning && app.mr_checkout_busy.is_none() {
+            if !app.git_busy.holds_refs() {
                 return;
             }
             assert!(Instant::now() < until, "Checkout-Worker hängt");
@@ -967,8 +966,11 @@ mod tests {
         app.main_view = MainView::MergeRequests;
         app.mr_notice = Some("alt".to_string());
         app.start_mr_checkout(worktree(&target, &clone, AfterAction::Shell));
-        assert!(app.scanning, "Ref-Lock während des Auscheckens");
-        assert_eq!(app.mr_checkout_busy, Some(5));
+        assert_eq!(
+            app.git_busy,
+            GitBusy::Checkout { iid: 5 },
+            "Ref-Lock während des Auscheckens"
+        );
         assert_eq!(
             app.status_message.as_deref(),
             Some("Fetching feature/x for !5 …")
@@ -1041,7 +1043,7 @@ mod tests {
             worktree(&target, &base, agent),
             prep(MrPrepOutcome::Created),
         );
-        assert!(app.scanning, "Rescan angestoßen");
+        assert_eq!(app.git_busy, GitBusy::Scan, "Rescan angestoßen");
         assert!(app.pending_after_checkout.is_none(), "Agent startet sofort");
         assert_eq!(
             app.status_message,
@@ -1267,7 +1269,7 @@ mod tests {
             app.status_message.is_none(),
             "Meldung erst nach dem Wechsel"
         );
-        assert!(!app.scanning, "Rescan erst nach dem Wechsel");
+        assert_eq!(app.git_busy, GitBusy::Idle, "Rescan erst nach dem Wechsel");
         // Anderer Branch im selben Klon: kein MR-Wechsel
         app.mr_switch_succeeded(&clone, "main");
         assert!(app.mr_switch.is_some());
@@ -1389,7 +1391,7 @@ mod tests {
                 "Fetch failed: 'origin': auth failed. Note: check Credentials/SSH (auth may be required)"
             )
         );
-        assert!(!app.scanning, "kein Rescan");
+        assert_eq!(app.git_busy, GitBusy::Idle, "kein Rescan");
         assert!(app.pending_branch_switches.is_empty() && app.mr_switch.is_none());
         assert_eq!(app.main_view, MainView::MergeRequests);
         let taken = MrCheckoutFailure::Checkout {
@@ -1446,7 +1448,7 @@ mod tests {
             app.error.as_deref(),
             Some("Checking out !5 failed: Klonen fehlgeschlagen: denied. Note: check Credentials/SSH (auth may be required)")
         );
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
         // Deutsch: Remote-Branch fehlt
         app.config.language = Language::De;
         let missing = MrCheckoutFailure::Checkout {
@@ -1465,16 +1467,14 @@ mod tests {
     #[test]
     fn fetch_aborted_clears_checkout_busy() {
         let mut app = app_with(Vec::new());
-        app.scanning = true;
-        app.mr_checkout_busy = Some(5);
+        app.git_busy = GitBusy::Checkout { iid: 5 };
         app.scan_tx
             .send(ScanResult::FetchAborted {
                 reason_key: "fetch_aborted",
             })
             .unwrap();
         app.poll_scan(&egui::Context::default());
-        assert!(!app.scanning);
-        assert_eq!(app.mr_checkout_busy, None);
+        assert_eq!(app.git_busy, GitBusy::Idle);
         assert!(app.error.is_some());
     }
 
@@ -1483,19 +1483,19 @@ mod tests {
     fn no_checkout_while_scan_or_auto_fetch() {
         let clone = PathBuf::from("/tmp/gm-mr/app");
         let mut app = app_with(vec![clone_info(&clone, "main")]);
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.start_mr_checkout(switch(&clone, AfterAction::Explorer));
         assert_eq!(
             app.status_message.as_deref(),
             Some("Checkout not possible while a scan or fetch is running")
         );
-        assert_eq!(app.mr_checkout_busy, None);
+        assert_eq!(app.git_busy, GitBusy::Scan);
         // Die Wahl „Danach öffnen“ bleibt trotzdem gemerkt
         assert_eq!(
             app.config.merge_requests.after_checkout_last,
             AfterAction::Explorer
         );
-        app.scanning = false;
+        app.git_busy = GitBusy::Idle;
         app.auto_fetching = true;
         app.status_message = None;
         app.start_mr_checkout(switch(&clone, AfterAction::Explorer));
@@ -1503,19 +1503,17 @@ mod tests {
             app.status_message.as_deref(),
             Some("Checkout not possible while a scan or fetch is running")
         );
-        assert!(!app.scanning);
-        assert_eq!(app.mr_checkout_busy, None);
+        assert_eq!(app.git_busy, GitBusy::Idle);
     }
 
-    /// Das Auschecken hält `scanning`: der Auto-Fetch wartet.
+    /// Das Auschecken hält den Ref-Lock: der Auto-Fetch wartet.
     #[test]
     fn auto_fetch_waits_for_mr_checkout() {
         let clone = PathBuf::from("/tmp/gm-mr-missing/app");
         let mut app = app_with(vec![clone_info(&clone, "main")]);
         app.last_auto_fetch = None;
         app.start_mr_checkout(switch(&clone, AfterAction::Nothing));
-        assert!(app.scanning);
-        assert_eq!(app.mr_checkout_busy, Some(5));
+        assert_eq!(app.git_busy, GitBusy::Checkout { iid: 5 });
         app.maybe_auto_fetch(&egui::Context::default());
         assert!(
             !app.auto_fetching,
@@ -1540,17 +1538,17 @@ mod tests {
         let clone = PathBuf::from("/tmp/gm-mr-missing/app");
         let mut app = app_with(vec![clone_info(&clone, "main")]);
         app.start_mr_checkout(switch(&clone, AfterAction::Nothing));
-        assert_eq!(app.mr_checkout_busy, Some(5));
+        assert_eq!(app.git_busy, GitBusy::Checkout { iid: 5 });
         app.start_scan();
         assert!(app.pending_scan, "Scan-Wunsch gemerkt");
         let ctx = egui::Context::default();
         let until = Instant::now() + Duration::from_secs(10);
-        while app.mr_checkout_busy.is_some() {
+        while matches!(app.git_busy, GitBusy::Checkout { .. }) {
             assert!(Instant::now() < until, "Checkout-Worker hängt");
             std::thread::sleep(Duration::from_millis(5));
             app.poll_scan(&ctx);
         }
-        assert!(app.scanning, "Scan nachgeholt");
+        assert_eq!(app.git_busy, GitBusy::Scan, "Scan nachgeholt");
         assert!(!app.pending_scan);
         assert!(app.error.is_some(), "Fehler bleibt bis zum Scan-Ergebnis");
         settle(&mut app);
@@ -1568,7 +1566,7 @@ mod tests {
             AfterAction::Explorer
         );
         // Nur merken: während eines Scans startet kein Auschecken
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.start_mr_checkout(switch(Path::new("/tmp/gm-x/app"), AfterAction::Explorer));
         let draft = &app.settings_state.as_ref().expect("offen").draft;
         assert_eq!(
@@ -1602,8 +1600,7 @@ mod tests {
             app.status_message.as_deref(),
             Some("!5 is no longer in the current list – checkout skipped")
         );
-        assert!(!app.scanning);
-        assert_eq!(app.mr_checkout_busy, None);
+        assert_eq!(app.git_busy, GitBusy::Idle);
     }
 
     /// Ein MR-Wechsel wartet im Dialog (Änderungen im Klon): ein zweiter
@@ -1628,7 +1625,7 @@ mod tests {
             app.status_message.as_deref(),
             Some("A branch switch is still waiting for your decision – finish that dialog first")
         );
-        assert!(!app.scanning, "kein zweiter Worker");
+        assert_eq!(app.git_busy, GitBusy::Idle, "kein zweiter Worker");
         assert_eq!(
             app.branch_dialog.as_ref().map(|d| &d.repo_path),
             Some(&clone)
@@ -1782,7 +1779,8 @@ mod tests {
         let mut app = app_with(vec![clone_info(&clone, "feature/x")]);
         let target = PathBuf::from("/tmp/gm-review/app-mr-5");
         app.start_mr_checkout(worktree(&target, &clone, AfterAction::Explorer));
-        assert_eq!(app.mr_checkout_busy, None, "kein Worker");
+        // Nur der Rescan, kein Worker
+        assert_eq!(app.git_busy, GitBusy::Scan, "kein Worker");
         assert_eq!(
             app.status_message,
             Some(format!(
