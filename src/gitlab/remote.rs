@@ -394,7 +394,8 @@ fn resolve_one(key: &str, host: &str, hosts: &Hosts) -> HostTarget {
     HostTarget::NotGitLab
 }
 
-fn norm_host(host: &str) -> String {
+/// Host-Schlüssel zum Vergleichen: ohne Leerraum am Rand, kleingeschrieben.
+pub(super) fn norm_host(host: &str) -> String {
     host.trim().to_lowercase()
 }
 

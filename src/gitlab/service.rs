@@ -17,7 +17,7 @@ use super::model::{
     build_snapshot, sort_uninvolved, HostRaw, HostStatus, MergeRequest, MergedHostPage, MrPart,
     MrSnapshot, UninvolvedCursor,
 };
-use super::remote::{strip_port, GlabHost, HostMap, LocalProject};
+use super::remote::{norm_host, strip_port, GlabHost, HostMap, LocalProject};
 use super::secret::SecretString;
 use super::time::{format_rfc3339, now_unix, parse_date};
 use crate::config::MrConfig;
@@ -1019,16 +1019,20 @@ fn transport_error(detail: &str) -> Option<GlabErrorKind> {
 }
 
 /// Eintrag des Hosts aus `{"hosts":[{host,state,user,error,token_source,…}]}`.
+/// `None` ohne `hosts`-Liste (dann zählt der Text). Fehlt der Host in der
+/// Liste, ist der Status unbekannt: Einträge anderer Hosts (Schlüssel anders
+/// geschrieben, glab ohne Filter) sagen nichts über diesen.
 fn auth_status_entry(json: &Value, host: &str) -> Option<AuthStatus> {
     let hosts = json.get("hosts")?.as_array()?;
-    let entry = hosts
-        .iter()
-        .find(|h| {
-            h.get("host")
-                .and_then(Value::as_str)
-                .is_some_and(|k| k.eq_ignore_ascii_case(host))
-        })
-        .or_else(|| hosts.first())?;
+    let host = norm_host(host);
+    let entry = hosts.iter().find(|h| {
+        h.get("host")
+            .and_then(Value::as_str)
+            .is_some_and(|k| norm_host(k) == host)
+    });
+    let Some(entry) = entry else {
+        return Some(AuthStatus::default());
+    };
     let field = |key: &str| {
         entry
             .get(key)
@@ -1753,12 +1757,32 @@ mod tests {
 
     /// `glab auth status -F json` für `HOST`.
     fn auth_status(state: &str, user: &str, source: &str) -> FakeReply {
-        let mut v: Value = serde_json::from_str(AUTH_STATUS).expect("Fixture");
-        v["hosts"][0]["state"] = json!(state);
-        v["hosts"][0]["user"] = json!(user);
-        v["hosts"][0]["token_source"] = json!(source);
-        let exit = i32::from(state != "success");
-        FakeReply::stdout(exit, &v.to_string(), "")
+        auth_status_hosts(&[(HOST, state, user, source)])
+    }
+
+    /// `glab auth status -F json` mit diesen Hosts; Exit 1, wenn einer
+    /// fehlschlägt.
+    fn auth_status_hosts(hosts: &[(&str, &str, &str, &str)]) -> FakeReply {
+        let exit = i32::from(hosts.iter().any(|(_, state, ..)| *state != "success"));
+        FakeReply::stdout(exit, &auth_status_json(hosts).to_string(), "")
+    }
+
+    /// Status-JSON mit einem Eintrag der Fixture je `(host, state, user,
+    /// token_source)`, in dieser Reihenfolge.
+    fn auth_status_json(hosts: &[(&str, &str, &str, &str)]) -> Value {
+        let fixture: Value = serde_json::from_str(AUTH_STATUS).expect("Fixture");
+        let entries: Vec<Value> = hosts
+            .iter()
+            .map(|(host, state, user, source)| {
+                let mut entry = fixture["hosts"][0].clone();
+                entry["host"] = json!(host);
+                entry["state"] = json!(state);
+                entry["user"] = json!(user);
+                entry["token_source"] = json!(source);
+                entry
+            })
+            .collect();
+        json!({ "hosts": entries })
     }
 
     /// ACCESS nur mit `currentUser` (ohne Projekte).
@@ -3247,6 +3271,75 @@ mod tests {
     }
 
     #[test]
+    fn auth_status_entry_only_for_requested_host() {
+        // Mehrere Hosts, ein anderer zuerst: es zählt der Eintrag des Hosts,
+        // der Schlüssel ohne Groß-/Kleinschreibung und Leerraum verglichen
+        let json = auth_status_json(&[
+            (HOST_B, "success", "jemand-anders", "keyring"),
+            (" GitLab.Example.com ", "success", ME, "config_file"),
+        ]);
+        let status = auth_status_entry(&json, HOST).expect("JSON-Status");
+        assert_eq!(status.signed_in, Some(true));
+        assert_eq!(status.user.as_deref(), Some(ME));
+        assert_eq!(status.source, Some(TokenSource::ConfigFile));
+
+        // Host fehlt in der Liste: unbekannt statt des ersten Eintrags
+        for json in [
+            auth_status_json(&[(HOST_B, "success", "jemand-anders", "keyring")]),
+            auth_status_json(&[(HOST_B, "error", "", "none")]),
+            auth_status_json(&[]),
+        ] {
+            let status = auth_status_entry(&json, HOST).expect("JSON-Status");
+            assert_eq!(status.signed_in, None, "{json}");
+            assert_eq!(status.user, None, "{json}");
+            assert_eq!(status.source, None, "{json}");
+            assert_eq!(status.error, None, "{json}");
+        }
+        // ohne `hosts`-Liste kein JSON-Status: dann zählt der Text
+        assert!(auth_status_entry(&json!({ "error": "kaputt" }), HOST).is_none());
+    }
+
+    #[test]
+    fn probe_ignores_auth_status_of_other_host() {
+        // glab listet nur einen anderen Host (z. B. ohne `--hostname`-Filter):
+        // dessen Anmeldung, Benutzer und Speicherort gelten nicht für HOST,
+        // die Prüfung fragt GitLab
+        let runner = gated();
+        let fake = runner.inner();
+        fake.push(version_reply("1.123.0"));
+        fake.push(auth_status_hosts(&[(
+            HOST_B,
+            "success",
+            "jemand-anders",
+            "keyring",
+        )]));
+        fake.push(FakeReply::http(200, &pat_self(&["api"])));
+        fake.push(gql(&access_user(ME)));
+        let probe = probe_as(&runner, HOST, &[], ProbeEnv::Inherit(None));
+        assert_eq!(
+            ops(&fake.take_calls()),
+            vec![
+                "version",
+                "auth status",
+                "personal_access_tokens/self",
+                "GmAccess"
+            ]
+        );
+        assert_eq!(probe.error, None);
+        assert_eq!(probe.logged_in_as.as_deref(), Some(ME));
+        assert_eq!(probe.token_source, TokenSource::Unknown);
+
+        // „nicht angemeldet“ eines anderen Hosts beendet die Prüfung nicht
+        fake.push(version_reply("1.123.0"));
+        fake.push(auth_status_hosts(&[(HOST_B, "error", "", "none")]));
+        fake.push(FakeReply::http(200, &pat_self(&["api"])));
+        fake.push(gql(&access_user(ME)));
+        let probe = probe_as(&runner, HOST, &[], ProbeEnv::Inherit(None));
+        assert_eq!(probe.error, None);
+        assert_eq!(probe.logged_in_as.as_deref(), Some(ME));
+    }
+
+    #[test]
     fn probe_old_glab_reads_text_status_and_keyring_flag() {
         let runner = gated();
         let fake = runner.inner();
@@ -3804,7 +3897,12 @@ mod tests {
             |r| r.kind == CallKind::Write,
             FakeReply::stdout(0, "", "✓ Logged in as taltmann\n"),
         );
-        fake.push(auth_status("success", ME, "keyring"));
+        fake.push(auth_status_hosts(&[(
+            "git.firma.de",
+            "success",
+            ME,
+            "keyring",
+        )]));
         fake.push(FakeReply::http(200, &pat_self(&["api"])));
         fake.push(gql(&access_user(ME)));
         assert_eq!(
@@ -3845,6 +3943,47 @@ mod tests {
             .all(|c| c.request.host_key.as_deref() == Some("git.firma.de")));
         assert_eq!(login_key(PORT_HOST), "git.firma.de");
         assert_eq!(login_key(HOST), HOST);
+    }
+
+    #[test]
+    fn save_token_compares_user_of_own_host() {
+        let push_save = |fake: &FakeGlab, status: FakeReply| {
+            fake.push(version_reply("1.123.0"));
+            fake.push(FakeReply::http(200, &pat_self(&["api"])));
+            fake.push(gql(&access_user(ME)));
+            fake.push_when(
+                |r| r.kind == CallKind::Write,
+                FakeReply::stdout(0, "", "✓ Logged in as taltmann\n"),
+            );
+            fake.push(status);
+            fake.push(FakeReply::http(200, &pat_self(&["api"])));
+            fake.push(gql(&access_user(ME)));
+        };
+        // anderer Host mit anderem Benutzer zuerst: Benutzer und Speicherort
+        // aus dem Eintrag von HOST
+        let runner = gated();
+        push_save(
+            runner.inner(),
+            auth_status_hosts(&[
+                (HOST_B, "success", "jemand-anders", "keyring"),
+                (HOST, "success", ME, "config_file"),
+            ]),
+        );
+        assert_eq!(
+            save_token(&runner, HOST, secret(TOKEN), Protocol::Https),
+            Ok(SavedWhere::ConfigFile)
+        );
+
+        // nur ein anderer Host: Benutzer aus GitLab, Speicherort unbekannt
+        let runner = gated();
+        push_save(
+            runner.inner(),
+            auth_status_hosts(&[(HOST_B, "success", "jemand-anders", "keyring")]),
+        );
+        assert_eq!(
+            save_token(&runner, HOST, secret(TOKEN), Protocol::Https),
+            Ok(SavedWhere::Unknown)
+        );
     }
 
     #[test]
