@@ -1274,8 +1274,7 @@ fn resolve_checkout_target<'r>(
     repo: &'r Repository,
     branch_name: &str,
 ) -> anyhow::Result<CheckoutTarget<'r>> {
-    let (object, reference) = repo
-        .revparse_ext(branch_name)
+    let (object, reference) = revparse_branch_first(repo, branch_name)
         .map_err(|e| anyhow::anyhow!("Branch '{branch_name}' nicht gefunden: {e}"))?;
     let full = reference
         .as_ref()
@@ -1370,6 +1369,29 @@ fn resolve_checkout_target<'r>(
         update,
         outcome,
     })
+}
+
+/// `revparse_ext`, aber Branches zuerst: `revparse_ext` prüft
+/// `refs/tags/<name>` vor `refs/heads/<name>` und `refs/remotes/<name>`,
+/// ein gleichnamiger Tag (`release-1.2`) landete so als Detached HEAD statt
+/// auf dem Branch. Übergeben werden Namen aus der Branch-Liste (`x`,
+/// `origin/x`) und der MR-Branch; Tags, Commits und Ausdrücke laufen weiter
+/// über `revparse_ext`.
+fn revparse_branch_first<'r>(
+    repo: &'r Repository,
+    name: &str,
+) -> Result<(git2::Object<'r>, Option<git2::Reference<'r>>), git2::Error> {
+    for prefix in ["refs/heads/", "refs/remotes/"] {
+        // Wie `revparse_ext` aufgelöst (`origin/HEAD` → `origin/main`)
+        let found = repo
+            .find_reference(&format!("{prefix}{name}"))
+            .and_then(|r| r.resolve());
+        if let Ok(reference) = found {
+            let object = reference.peel(git2::ObjectType::Any)?;
+            return Ok((object, Some(reference)));
+        }
+    }
+    repo.revparse_ext(name)
 }
 
 fn ensure_not_checked_out_elsewhere(repo: &Repository, branch: &str) -> anyhow::Result<()> {
@@ -4506,6 +4528,28 @@ mod tests {
             );
             assert_eq!(head_target(&c1), "refs/heads/main");
         }
+    }
+
+    #[test]
+    fn checkout_prefers_branch_over_same_named_tag() {
+        // Gleichnamige Tags auf `main`: Wechsel landet trotzdem auf dem
+        // Branch (lokal bzw. remote), nicht als Detached HEAD auf dem Tag.
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["tag", "feature/x", "main"]);
+        git_cmd(&c1, &["tag", "origin/feature/x", "main"]);
+        let feature = ref_oid(&c1, "refs/heads/feature/x");
+        assert_ne!(feature, ref_oid(&c1, "refs/tags/feature/x"));
+        checkout_branch(&c1, "feature/x").unwrap();
+        assert_eq!(head_target(&c1), "refs/heads/feature/x");
+        assert_eq!(ref_oid(&c1, "HEAD"), feature);
+        // Remote-Name ohne lokalen Branch: angelegt am Remote-Stand
+        checkout_branch(&c1, "main").unwrap();
+        git_cmd(&c1, &["branch", "-D", "feature/x"]);
+        checkout_branch(&c1, "origin/feature/x").unwrap();
+        assert_eq!(head_target(&c1), "refs/heads/feature/x");
+        assert_eq!(ref_oid(&c1, "HEAD"), feature);
+        assert!(c1.join("x.txt").exists());
     }
 
     // --- K1: MR auschecken (fetch_refspecs, prepare_mr_branch, add_worktree, clone_repo) ---
