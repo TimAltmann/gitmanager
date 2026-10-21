@@ -1,24 +1,33 @@
 # GitManager
 
-> Lightweight Git repository manager for Windows — written in Rust, ships as a single portable `.exe` (<15 MB, <60 MB RAM, <300 ms startup).
+> Lightweight Git repository manager for Windows — written in Rust, ships as a single portable `.exe` (~15 MB, no installer). Keeps the overview over many repos, clones and worktrees, and shows your GitLab merge requests next to them.
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-blue.svg)
 [![Build](https://img.shields.io/github/actions/workflow/status/TimAltmann/gitmanager/ci.yml?branch=main&label=build)](https://github.com/TimAltmann/gitmanager/actions)
 
-**Language / Sprache:** English | [Deutsch](#-spracheinstellung) — the app itself supports **English and German** (switch in the top bar or `Settings → Language`). This README is in English.
+**Language / Sprache:** the app supports **English and German** (switch in the top bar or `Settings → Language`, see [Language Settings](#-language-settings)). This README is in English.
 
 ## 🎬 Demo
 
-![GitManager Demo](assets/demo.png)
-*Main window – repo list, branch & solution dropdowns, IDE/agent buttons (dirty indicator, profile override, one-click open in VS / VS Code / Rider & AI agents).*
+![Repository list](assets/media/repo-list.png)
+*Repository list: two clones and a review worktree of the same project, branch and solution dropdowns, dirty and behind indicators, one-click buttons for Explorer, shell, IDEs and AI agents.*
 
-**Demo-Video:** [▶ assets/demo.mp4](assets/demo.mp4) · Direkt-Link: https://github.com/TimAltmann/gitmanager/blob/main/assets/demo.mp4
+**Branches** — search, switch, and the `Stash & Switch` / `Force Discard` dialog when a repo has changes ([MP4](assets/media/demo-repos.mp4)):
 
-<video src="assets/demo.mp4" controls width="800" poster="assets/demo.png">
-  Your browser does not support the video tag. <a href="https://github.com/TimAltmann/gitmanager/blob/main/assets/demo.mp4">Watch demo.mp4</a>
-</video>
+![Searching and switching branches](assets/media/demo-repos.gif)
+
+**Merge Requests** — approvals, filter chips, search, checkout menu and merged MRs ([MP4](assets/media/demo-merge-requests.mp4)):
+
+![Merge Requests view](assets/media/demo-merge-requests.gif)
+
+| | |
+|---|---|
+| ![Merge Requests](assets/media/merge-requests.png)<br>*My merge requests and those from others* | ![Checkout menu](assets/media/mr-checkout.png)<br>*Checkout into a worktree, a new clone or an existing clone* |
+| ![Merged merge requests](assets/media/mr-merged.png)<br>*Merged MRs of the last 7/30/90 days* | ![Settings → Merge Requests](assets/media/settings-merge-requests.png)<br>*`Settings → Merge Requests`: glab, token, repositories* |
+
+> All screenshots and videos use invented demo data (`gitlab.example.com`, `acme/*` projects, fictional people). They are recorded with the Linux build in Docker (see [Screenshots & videos](#screenshots--videos)), so paths look like `/home/demo/Code/…` — on Windows you see `C:\…` and the Windows title bar. The tray popup is Windows-only and therefore not shown.
 
 ---
 
@@ -74,8 +83,10 @@ After building: double-click `gitmanager.exe`. On first launch go to `⚙ Settin
 | Area | What it does |
 |------|--------------|
 | **🔍 Fast scan** | Scans configurable root paths (1–10 depth) for Git repos. `WalkDir + rayon` → ~500 repos in <1s. |
-| **🌿 Branch management** | Dropdown with search + `↻` refresh (local + remote `origin/*`). `git fetch --all` via button. Switch only when clean; if dirty: dialog `Stash & Switch` / `Force Discard`; if in merge/rebase: error only. |
-| **🔀 Merge Requests** | Second view next to the repo list (switch in the top bar, badge = reviews waiting for you): *My merge requests* (most approvals first) and *From others* (chips `Reviewer` / `Mentioned` / `All open`) with approvals, pipeline (click opens it in the browser), threads and review state. Data comes from the GitLab CLI `glab`. Check out a MR branch into a new worktree, a new clone or an existing clone, then open an agent, shell, Explorer or IDE. The tray popup has a `Merge Requests` button. See [Merge Requests](#-merge-requests). |
+| **🌿 Branch management** | Dropdown with search + `↻` refresh (local + remote `origin/*`). `git fetch --all` via button. Switch only when clean; if dirty: dialog `Stash & Switch` / `Force Discard`; if in merge/rebase: error only. Switching to a remote branch fast-forwards a local branch that is behind and never resets one with own commits. |
+| **🔄 Fetch & behind indicator** | Background fetch of all repos every 10 min (`Settings → General → Auto-fetch interval`, 0 = off); worktrees of the same repository are fetched once. A ▲ next to the branch shows *Behind by n commit(s)*. SSH uses the ssh-agent / Pageant or your keys in `%USERPROFILE%\.ssh`, HTTPS the Git credential manager; if that fails, the system `git` takes over. |
+| **🔀 Merge Requests** | Second view next to the repo list (switch in the top bar, badge = reviews waiting for you): *My merge requests* (most approvals first, open or merged) and *From others* (chips `Reviewer` / `Mentioned` / `All open`) with approval bar, pipeline (click opens it in the browser), threads and review state, plus a search per column. Data comes from the GitLab CLI `glab`. Check out a MR branch into a new worktree, a new clone or an existing clone, then open an agent, shell, Explorer or IDE. See [Merge Requests](#-merge-requests). |
+| **🖥 Tray popup** | Left-click the tray icon: compact popup with your repos (most recently used first, `Settings → Tray Icons → Max repos`), branch dropdown with filter, fetch button and the IDE / agent / shell / Explorer icons. Footer: `Main window` · `Merge Requests` (with badge) · `Quit`. Icon order and visibility in `Settings → Tray Icons`, tray icon for dark or light taskbars, optional `Minimize to tray on close`. |
 | **● Dirty indicator** | `●` dirty / `○` clean (staged, unstaged, untracked — respects `.gitignore`). |
 | **📄 Project files** | Per-repo solution/project files (e.g. `.sln` for .NET, `Cargo.toml` for Rust) — dropdown with search, depth 3, cap 20, per-repo profile override possible. |
 | **🚀 Open in IDE** | One-click open via official brand icons: **Visual Studio** (`devenv` via `vswhere`), **VS Code** (`code`), **Rider** (`rider`). Fully configurable per language profile (`program` + `args` with `{file}` `{dir}` `{repo}` placeholders). |
@@ -83,9 +94,11 @@ After building: double-click `gitmanager.exe`. On first launch go to `⚙ Settin
 | **📂 Explorer** | Icon button (`explorer` / `xdg-open`). |
 | **🔧 Config dropdowns** | Per-profile XML `key=value` switching (`App.config` `<add key="Database" value="...">`) – define `file`, `key`, options in `Settings → Languages/Profiles`, shown as dropdown per repo row. |
 | **⚙ Profiles** | Language profiles (e.g. `.NET` → `*.sln`, `Rust` → `Cargo.toml`) + agents + terminal preference. Stored as `config.json` v15. |
+| **↕ Sorting** | Repo list sorted by last used (default) or by name — menu next to `Refresh` or `Settings → General → Sorting`. |
 | **🎨 Theming** | 5 themes: Light, Dark, Nord, Dracula, Solarized Light. Instant preview. |
+| **⏻ Autostart & updates** | Optional start with Windows (`Settings → General`, Registry Run key) and optional update check against GitHub Releases on startup (can be turned off for offline / corporate networks). |
 | **🌐 Languages** | App UI in **English** and **German** — switch in the top bar (`Language`) or `Settings → Language`. |
-| **🪶 Portable** | Single `.exe` ~5.4 MB (with icon + SVGs), no installer, config in `%APPDATA%\gitmanager\config\config.json` (atomic write, auto-migration from legacy `repomanager`). |
+| **🪶 Portable** | Single `.exe` ~15 MB (with icon + SVGs), no installer, config in `%APPDATA%\gitmanager\config\config.json` (atomic write, auto-migration from legacy `repomanager`). |
 
 ---
 
@@ -116,6 +129,9 @@ The `Merge Requests` view shows the open merge requests of the GitLab projects b
 
 - **My merge requests:** sorted by most approvals; `ready to merge` when GitLab reports the MR as mergeable. The approval bar fills up to the project's approval rule and turns green when it is reached; for projects without a rule, `Settings → Merge Requests → Number of approvals for a full bar` sets the goal (default 2, 0 = off).
 - **From others:** review requests (`Reviewer`) and mentions (`Mentioned`); `All open` adds open MRs of your local projects you are not involved in. `Approved by you` also shows when you approved without being a reviewer; those MRs are listed below the ones you have not approved yet.
+- **Search:** each column has a search field (magnifier, `X` or `Esc` clears). It filters live over title, `!iid`, branches, project and author (all words must match, case-insensitive) and also covers *All open*.
+- **Merged:** `Open | Merged` switches *My merge requests* to your MRs merged in the last 7, 30 or 90 days (`merged … by …`, pipeline, approvals; `Load more` pages further).
+- If GitLab hides your to-dos from the token (fine-grained token without *Todo: Read*), mentions are missing — *From others* shows a banner with a link to the settings.
 - `Settings → Merge Requests → Repositories for merge requests` selects the projects (new projects are included automatically). The selection applies to all groups and the badge. `Also show MRs from projects without a local clone` is on by default.
 - Clicking the title or `Open in browser` opens the MR; clicking the pipeline status opens the pipeline. `Refresh` reloads the MRs; automatic refresh every 3 min (0 = off).
 
@@ -203,6 +219,11 @@ Config lives at `%APPDATA%\gitmanager\config\config.json` (resolved via `directo
   "active_agent_ids": ["claude"],
   "theme": "light",
   "terminal": {"preference":"auto","fallback":"cmd"},
+  "auto_fetch_interval_min": 10,
+  "main_sort_mode": "last_used",
+  "minimize_to_tray": true,
+  "autostart": false,
+  "check_for_updates": true,
   "repo_state": {
     "C:\\Dev\\MyApp": {"selected_solution":"C:\\Dev\\MyApp\\MyApp.sln","profile_override":null}
   }
@@ -247,19 +268,32 @@ src/
   scanner.rs    # WalkDir + rayon, scan_repos + scan_solutions_for_repo (depth 3, cap 20)
   gitlab/       # Merge Requests without UI: remotes/hosts, glab runner, GraphQL, model, service, checkout menu
   app/          # MyApp parts for Merge Requests: view wiring, checkout, settings workers
+  tray.rs / tray_service.rs  # Windows tray icon, menu and popup service
+  autostart.rs  # Windows autostart (Registry Run key)
+  updater.rs    # Update check against GitHub Releases
   ui/
     merge_requests.rs  # Merge Requests view (two columns, chips, checkout menu)
     settings/merge_requests.rs  # Settings tab "Merge Requests"
     repo_list.rs  # Row: 📁 + dirty + branch combo (search+refresh) + solution combo + profile override + IDE/agent icons
-    settings.rs   # Tabbed window: General, Languages/Profiles, AI Agents, Terminal, Appearance, Language
+    settings.rs   # Tabbed window: General, Languages/Profiles, AI Agents, Terminal, Appearance, Language, Icons, Tray Icons
+    tray_popup.rs # Tray popup (repo cards, branch filter, footer buttons)
     theme.rs      # Light/Dark/Nord/Dracula/Solarized themes
 assets/
   icon.ico/icon.png (6 sizes, winres)
-  demo.png / demo.mp4 (Demo screenshot & screencast)
+  media/ (README screenshots & videos, generated by scripts/demo/run.sh)
   icons/*.svg (Simple Icons CC0 + Phosphor MIT)
 scripts/
   build.sh / build.ps1 (Docker → gitmanager.exe)
+  demo/ (demo repos, fake glab, recording → assets/media)
 ```
+
+### Screenshots & videos
+
+`scripts/demo/run.sh` regenerates everything in `assets/media/` (needs Docker, run from the repo root; optional scene names `shots`, `repos`, `mrs`):
+
+- builds the Linux release in the dev container and runs it on a virtual display (Xvfb) in a container **without network**;
+- creates invented demo repos (`make-demo-repos.sh`) and answers GitManager's `glab` calls with invented merge requests (`fake-glab.py`);
+- drives the UI with `xdotool` (`record.sh`, one function per scene) and records with `ffmpeg` — PNG screenshots, MP4 videos and GIF loops for this README.
 
 ---
 
@@ -267,7 +301,7 @@ scripts/
 
 - **GNU (`x86_64-pc-windows-gnu`):** `mingw-w64` + `windres` symlink, simple, works everywhere. `strip=true` + `whole-archive` for `.rsrc`.
 - **MSVC (`x86_64-pc-windows-msvc`):** `cargo-xwin` (fetches Windows SDK), smaller, preferred for Store/AV.
-- **Release profile:** `opt-level="z"`, `lto=true`, `strip=true`, `panic="abort"` → ~5.4 MB (with icon+SVGs).
+- **Release profile:** `opt-level="z"`, `lto=true`, `strip=true`, `panic="abort"` → ~15 MB (GNU, with icon+SVGs).
 
 CI builds the GNU artifact on every push (see `.github/workflows/ci.yml`).
 
@@ -316,13 +350,16 @@ A: Uses `explorer <path>` (Windows) or `xdg-open` (Linux). Path must exist.
 A: Check profile (extension `.sln`, depth 3). `.sln` is often in subfolders — increase depth or keep `file_pattern` `*.sln`. Cap is 20, use search to filter.
 
 **Q: Where is the `.exe`?**  
-A: After Docker build at `./gitmanager.exe` (~5.4 MB, 11 sections incl. `.rsrc` for icon) and `target/x86_64-pc-windows-gnu/release/gitmanager.exe`. CI also publishes it as an artifact.
+A: After Docker build at `./gitmanager.exe` (~15 MB, incl. `.rsrc` for the icon) and `target/x86_64-pc-windows-gnu/release/gitmanager.exe`. CI also publishes it as an artifact.
 
 **Q: App language stuck in German / English?**  
 A: Change via top bar `Language` dropdown or `Settings → Language`. The value is stored in `config.json` (`"language": "en"`). Delete the config file to reset to English.
 
 **Q: Config from `repomanager` not showing?**  
 A: On first launch GitManager imports the legacy config from `%APPDATA%\repomanager\config\config.json` if its own config does not exist yet, then saves to the new path.
+
+**Q: Fetch fails with *remote rejected authentication* (SSH)?**  
+A: GitManager offers the ssh-agent / Pageant once, then each key in `%USERPROFILE%\.ssh` (`id_ed25519`, `id_rsa`, `id_ecdsa`, `id_dsa`, without passphrase), then falls back to the system `git`. A key with a passphrase needs a running agent (`Get-Service ssh-agent`, `ssh-add`). Host aliases from `~/.ssh/config` are only used by the system `git` fallback.
 
 **Q: Merge Requests view says *No GitLab host detected*?**  
 A: glab is not signed in to any of your remote hosts. Use `Add token` on the card (or `glab auth login --hostname <host>` in a terminal); the view reloads without a restart. For a GitLab host glab doesn't know yet, use `Add as GitLab host` in `Settings → Merge Requests`.
