@@ -462,17 +462,7 @@ mod imp {
         // Send actions to main app and wake main viewport (service is throttled, main needs instant)
         // #10: Sender unter kurzem Lock klonen, dann ohne gehaltenen Lock senden —
         // der Main-Thread verwirft bei WouldBlock sonst den ganzen Sync.
-        let needs_root_repaint = tray_actions.open_main
-            || tray_actions.open_mrs
-            || tray_actions.open_settings
-            || tray_actions.quit
-            || tray_actions.refresh
-            || tray_actions.branch_switch.is_some()
-            || tray_actions.solution_select.is_some()
-            || tray_actions.ide_open.is_some()
-            || tray_actions.agent_open.is_some()
-            || tray_actions.explorer_open.is_some()
-            || tray_actions.shell_open.is_some();
+        let needs_root_repaint = tray_popup::needs_root_repaint(&tray_actions);
         let action_tx = {
             let guard = lock_shared(shared);
             guard.action_tx.clone()

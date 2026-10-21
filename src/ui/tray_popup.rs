@@ -262,6 +262,24 @@ pub fn should_close_tray_popup(a: &TrayPopupActions) -> bool {
         || a.shell_open.is_some()
 }
 
+/// Weckt das Hauptfenster: jede Action, die als `TrayAction` an die App geht.
+/// Bei verstecktem Fenster läge sie sonst bis zu dessen nächstem Repaint
+/// (bis 60 s) im Kanal; nur „Schließen“ bleibt im Tray.
+pub fn needs_root_repaint(a: &TrayPopupActions) -> bool {
+    a.open_main
+        || a.open_mrs
+        || a.open_settings
+        || a.quit
+        || a.refresh
+        || a.branch_switch.is_some()
+        || a.solution_select.is_some()
+        || a.ide_open.is_some()
+        || a.agent_open.is_some()
+        || a.explorer_open.is_some()
+        || a.shell_open.is_some()
+        || a.fetch_repo.is_some()
+}
+
 /// E21: Aktion eines Buttons der Tray-Fußzeile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FooterAction {
@@ -1295,6 +1313,41 @@ mod tests {
             repo: None,
         };
         assert_eq!(tray_fetch_button(&busy, a), TrayFetchButton::Disabled);
+    }
+
+    /// Jede Action für die App weckt das (ggf. versteckte) Hauptfenster,
+    /// auch der Fetch-Button; „Schließen“ bleibt im Tray.
+    #[test]
+    fn actions_for_main_wake_root_viewport() {
+        let cases: [fn(&mut TrayPopupActions); 12] = [
+            |a| a.open_main = true,
+            |a| a.open_mrs = true,
+            |a| a.open_settings = true,
+            |a| a.quit = true,
+            |a| a.refresh = true,
+            |a| a.branch_switch = Some((PathBuf::from("/tmp/r"), "main".into())),
+            |a| a.solution_select = Some((PathBuf::from("/tmp/r"), PathBuf::from("/tmp/r/a.sln"))),
+            |a| {
+                a.ide_open = Some((
+                    PathBuf::from("/tmp/r"),
+                    "vscode".into(),
+                    PathBuf::from("/tmp/r"),
+                ))
+            },
+            |a| a.agent_open = Some((PathBuf::from("/tmp/r"), "claude".into())),
+            |a| a.explorer_open = Some(PathBuf::from("/tmp/r")),
+            |a| a.shell_open = Some(PathBuf::from("/tmp/r")),
+            |a| a.fetch_repo = Some(PathBuf::from("/tmp/r")),
+        ];
+        for (i, set) in cases.iter().enumerate() {
+            let mut a = TrayPopupActions::default();
+            set(&mut a);
+            assert!(needs_root_repaint(&a), "Action {i}");
+        }
+        assert!(!needs_root_repaint(&TrayPopupActions::default()));
+        let mut a = TrayPopupActions::default();
+        a.close_popup = true;
+        assert!(!needs_root_repaint(&a));
     }
 
     #[test]

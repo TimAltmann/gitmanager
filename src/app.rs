@@ -286,7 +286,8 @@ impl GitBusy {
 pub struct MyApp {
     config: AppConfig,
     repos: Vec<RepoInfo>,
-    /// Scan, manueller Fetch oder MR-Checkout (Ref-Lock, Spinner)
+    /// Scan, manueller Fetch oder MR-Checkout (Ref-Lock, Spinner); nur über
+    /// `set_git_busy` ändern (Tray)
     git_busy: GitBusy,
     error: Option<String>,
     show_settings: bool,
@@ -334,7 +335,8 @@ pub struct MyApp {
     last_auto_fetch: Option<std::time::Instant>,
     /// Finding D1: eigener Busy-Zustand für den periodischen Auto-Fetch.
     /// Der Auto-Fetch setzt bewusst NICHT `git_busy`, damit Refresh/Fetch
-    /// währenddessen klickbar bleiben (stiller Hintergrundlauf).
+    /// währenddessen klickbar bleiben (stiller Hintergrundlauf). Nur über
+    /// `set_auto_fetching` ändern (Tray).
     auto_fetching: bool,
     /// P2b/L2: manueller Refresh während Auto-Fetch — Intent merken statt
     /// verwerfen; der `FetchDone(is_auto)`-Arm holt ihn nach.
@@ -638,7 +640,7 @@ impl MyApp {
             self.status_message_time = Some(std::time::Instant::now());
             return;
         }
-        self.git_busy = GitBusy::Scan;
+        self.set_git_busy(GitBusy::Scan);
         self.error = None;
         let cfg = self.config.clone();
         let tx = self.scan_tx.clone();
@@ -663,7 +665,7 @@ impl MyApp {
         while let Ok(result) = self.scan_rx.try_recv() {
             match result {
                 ScanResult::Repos(repos) => {
-                    self.git_busy = GitBusy::Idle;
+                    self.set_git_busy(GitBusy::Idle);
                     // I1: auto_fetching NICHT hier löschen — ein laufender
                     // Auto-Fetch würde sonst als fertig gelten und sofort ein
                     // zweiter Auto-Fetch starten (Ref-Race). Nur FetchDone
@@ -698,13 +700,13 @@ impl MyApp {
                     // parallel eintreffendes Auto-FetchDone darf den Spinner
                     // eines noch laufenden manuellen Laufs nicht löschen.
                     if !is_auto {
-                        self.git_busy = GitBusy::Idle;
+                        self.set_git_busy(GitBusy::Idle);
                     }
                     // I1: nur Auto-FetchDone löscht auto_fetching — manueller
                     // Fetch (is_auto=false) lässt einen laufenden Auto-Fetch in Ruhe.
                     // P2b: einen gemerkten Refresh holt das Ende von `poll_scan` nach.
                     if is_auto {
-                        self.auto_fetching = false;
+                        self.set_auto_fetching(false);
                         // I6: Timestamp = Ende statt Start — bei langsamem Fetch
                         // (> Intervall) kein Back-to-Back-Dauerfeuer.
                         self.last_auto_fetch = Some(std::time::Instant::now());
@@ -743,8 +745,8 @@ impl MyApp {
                     // Spinner), Fehler persistent zeigen, Liste behalten.
                     // Wie Auto-FetchDone als Intervall-Ende werten (kein
                     // sofortiges Back-to-Back mit Panic-Loop).
-                    self.git_busy = GitBusy::Idle;
-                    self.auto_fetching = false;
+                    self.set_git_busy(GitBusy::Idle);
+                    self.set_auto_fetching(false);
                     self.last_auto_fetch = Some(std::time::Instant::now());
                     // F1#F2: einen gemerkten Refresh holt auch nach Abort das
                     // Ende von `poll_scan` nach — sonst wartet er bis Intervall.
@@ -762,7 +764,7 @@ impl MyApp {
                 }
                 ScanResult::MrCheckoutReady { choice, result } => {
                     // K1: Ref-Lock lösen; dann Rescan, Wechsel oder Fehler
-                    self.git_busy = GitBusy::Idle;
+                    self.set_git_busy(GitBusy::Idle);
                     self.on_mr_checkout_ready(*choice, result);
                     self.mark_tray_dirty();
                     ctx.request_repaint();
@@ -995,6 +997,23 @@ impl MyApp {
         self.tray_dirty = true;
     }
 
+    /// Setzt, was die Refs hält. Jeder Wechsel sperrt oder löst die
+    /// Fetch-Buttons im Tray (`TrayFetching`), daher dirty.
+    fn set_git_busy(&mut self, busy: GitBusy) {
+        if self.git_busy != busy {
+            self.git_busy = busy;
+            self.mark_tray_dirty();
+        }
+    }
+
+    /// Wie `set_git_busy` für den Auto-Fetch (D1).
+    fn set_auto_fetching(&mut self, running: bool) {
+        if self.auto_fetching != running {
+            self.auto_fetching = running;
+            self.mark_tray_dirty();
+        }
+    }
+
     /// Task 5: Periodischer Auto-Fetch im Hintergrund (throttled).
     /// Scope: ALLE gescannten Repos (Default-Intervall 10 min, 0 = aus) —
     /// der Veraltet-Indikator im Hauptfenster braucht frische Counts überall,
@@ -1033,7 +1052,7 @@ impl MyApp {
         // I6: Timestamp erst im FetchDone-Arm (Ende) setzen — nicht hier am
         // Start, sonst Back-to-Back bei Fetch-Dauer > Intervall.
         // Finding D1: bewusst NICHT `git_busy` — Refresh/Fetch bleiben klickbar.
-        self.auto_fetching = true;
+        self.set_auto_fetching(true);
         let paths: Vec<PathBuf> = self.repos.iter().map(|r| r.path.clone()).collect();
         let cfg = self.config.clone();
         let tx = self.scan_tx.clone();
@@ -1566,9 +1585,8 @@ impl MyApp {
             };
             let _ = tx.send(msg);
         });
-        self.git_busy = GitBusy::Fetch { repo: repo_path };
-        // Spinner/gesperrte Fetch-Buttons auch im Tray
-        self.mark_tray_dirty();
+        // Spinner/gesperrte Fetch-Buttons auch im Tray, sofort statt per Throttle
+        self.set_git_busy(GitBusy::Fetch { repo: repo_path });
         self.sync_tray_service();
     }
 
@@ -3067,6 +3085,39 @@ mod tests {
         app.poll_scan(&ctx);
         assert!(app.tray_dirty, "launch error must mark tray dirty");
         assert!(app.error.is_some());
+    }
+
+    /// Start von Scan und Auto-Fetch sperrt die Fetch-Buttons im Tray
+    /// (`TrayFetching.busy`) → dirty, sonst zeigt das Popup sie bis zum
+    /// Ergebnis klickbar und ein Klick ginge still verloren.
+    #[test]
+    fn scan_and_auto_fetch_start_mark_tray_dirty() {
+        let mut app = test_app();
+        app.config.roots.clear();
+        app.start_scan();
+        assert_eq!(app.git_busy, GitBusy::Scan);
+        assert!(app.tray_dirty, "Scan-Start");
+
+        let dir = tempdir().unwrap();
+        let mut app = test_app();
+        app.config.roots.clear();
+        app.repos = vec![crate::git::RepoInfo::new(
+            dir.path().to_path_buf(),
+            "main".to_string(),
+            false,
+            false,
+        )];
+        app.maybe_auto_fetch(&egui::Context::default());
+        assert!(app.auto_fetching);
+        assert!(app.tray_dirty, "Auto-Fetch-Start");
+        app.tray_dirty = false;
+        app.set_auto_fetching(false);
+        assert!(app.tray_dirty, "Auto-Fetch-Ende");
+        // Ohne Wechsel kein neuer Sync
+        app.tray_dirty = false;
+        app.set_auto_fetching(false);
+        app.set_git_busy(GitBusy::Idle);
+        assert!(!app.tray_dirty);
     }
 
     #[test]

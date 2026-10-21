@@ -155,7 +155,7 @@ impl MyApp {
         self.set_status(busy);
         self.mr_notice = None;
         // Ref-Lock wie beim manuellen Fetch: kein Scan, kein Auto-Fetch
-        self.git_busy = GitBusy::Checkout { iid: choice.iid };
+        self.set_git_busy(GitBusy::Checkout { iid: choice.iid });
         let tx = self.scan_tx.clone();
         std::thread::spawn(move || {
             // H3: Panic vor send darf `git_busy` nicht hängen lassen
