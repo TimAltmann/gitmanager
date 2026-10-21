@@ -363,15 +363,83 @@ pub struct CheckoutBrief {
 
 /// Wie `build_checkout_menu`, aber ohne Worktree-Vorschlag (Pfadschlüssel
 /// aller Repos und Worktrees), Klon-Zustände und MRU: die braucht erst das
-/// geöffnete Menü.
+/// geöffnete Menü. Nur in Tests genutzt: Maßstab für `CloneIndex::brief`,
+/// mit dem die Zeilen je Frame nachschlagen.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn checkout_brief(mr: &MrRefInfo, repos: &[RepoInfo], hosts: &HostMap) -> CheckoutBrief {
+    brief_of(mr, &source_candidates(mr, repos, hosts))
+}
+
+fn brief_of(mr: &MrRefInfo, candidates: &[Candidate]) -> CheckoutBrief {
     let names = mr.local_names();
     let names = [names[0].as_str(), names[1].as_str()];
-    let candidates = source_candidates(mr, repos, hosts);
     CheckoutBrief {
-        already: checked_out_in(&candidates, &names),
+        already: checked_out_in(candidates, &names),
         unavailable: mr.unavailable(),
         has_clone: !candidates.is_empty(),
+    }
+}
+
+/// Klone je Projekt für die Checkout-Buttons: einmal aus Repos und
+/// Host-Zuordnung gebaut, statt je Zeile und Frame alle Repos und Remotes
+/// zu durchsuchen. Hält Positionen in `repos`, muss also nach jedem Scan,
+/// Umsortieren und jeder neuen Host-Zuordnung neu gebaut werden.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CloneIndex {
+    /// (glab-Host-Schlüssel, Projektpfad), ASCII-klein → (Repo, Remote) in
+    /// Scan-Reihenfolge; je Repo der Remote wie bei `ProjectRef::remote_of`
+    by_project: HashMap<(String, String), Vec<(usize, usize)>>,
+}
+
+impl CloneIndex {
+    pub fn new(repos: &[RepoInfo], hosts: &HostMap) -> Self {
+        let mut by_project: HashMap<(String, String), Vec<(usize, usize)>> = HashMap::new();
+        for (i, repo) in repos.iter().enumerate() {
+            for (j, remote) in repo.remotes.iter().enumerate() {
+                let Some(parsed) = &remote.parsed else {
+                    continue;
+                };
+                let Some(host_key) = hosts.glab_key(parsed) else {
+                    continue;
+                };
+                // ASCII-klein wie `eq_ignore_ascii_case` in `remote_of`
+                let key = (
+                    host_key.to_ascii_lowercase(),
+                    parsed.full_path.to_ascii_lowercase(),
+                );
+                let entries = by_project.entry(key).or_default();
+                match entries.last_mut() {
+                    // Weiterer Remote des Klons auf das Projekt: der erste
+                    // `origin` gewinnt, sonst der erste
+                    Some((r, x)) if *r == i => {
+                        if remote.name == "origin" && repo.remotes[*x].name != "origin" {
+                            *x = j;
+                        }
+                    }
+                    _ => entries.push((i, j)),
+                }
+            }
+        }
+        Self { by_project }
+    }
+
+    /// Wie `checkout_brief` mit den Repos und Hosts, aus denen der Index
+    /// gebaut ist.
+    pub fn brief(&self, mr: &MrRefInfo, repos: &[RepoInfo]) -> CheckoutBrief {
+        let entries = mr.source_project_path.and_then(|path| {
+            let key = (mr.host_key.to_ascii_lowercase(), path.to_ascii_lowercase());
+            self.by_project.get(&key)
+        });
+        let candidates: Vec<Candidate> = entries
+            .into_iter()
+            .flatten()
+            .filter_map(|&(i, j)| {
+                let repo = repos.get(i)?;
+                let remote = repo.remotes.get(j)?;
+                Some(Candidate { repo, remote })
+            })
+            .collect();
+        brief_of(mr, &candidates)
     }
 }
 
@@ -1511,6 +1579,102 @@ mod tests {
                 // noch Klon anbietet
                 let offers = m.new_worktree.is_some() || !m.clones.is_empty();
                 assert_eq!(brief.has_clone, offers, "{repos:?}");
+            }
+        }
+    }
+
+    /// Der Index liefert je Zeile dieselbe Kurzfassung wie der Weg über alle
+    /// Repos und Remotes, auch nach dem Umsortieren (neu gebaut).
+    #[test]
+    fn clone_index_brief_matches_checkout_brief() {
+        let mut on_branch = backend("/dev/backend-api-2", "feature/x");
+        on_branch.behind = 2;
+        let mut detached = backend("/dev/backend-api-3", "feature/x");
+        detached.is_detached = true;
+        let mut with_worktree = backend("/dev/backend-api", "main");
+        with_worktree.worktrees = vec![worktree("/dev/Reviews/backend-api-mr-418", Some("mr-418"))];
+        // Zwei Remotes auf das Projekt (`origin` als zweiter) und ein Fork
+        let both = repo(
+            "/dev/both",
+            "feature/x",
+            &[
+                ("https", "https://gitlab.example.com/kern/backend-api.git"),
+                ("tim", "git@gitlab.example.com:tim/backend-api.git"),
+                ("origin", BACKEND),
+            ],
+        );
+        let mirror = repo(
+            "/dev/mirror",
+            "main",
+            &[("mirror", "https://GitLab.example.com/Kern/Backend-API.git")],
+        );
+        let github = repo(
+            "/dev/rust",
+            "feature/x",
+            &[("origin", "https://github.com/kern/backend-api.git")],
+        );
+        let local = repo("/dev/local", "feature/x", &[("origin", "/srv/git/api.git")]);
+        let repos = vec![
+            github,
+            local,
+            with_worktree,
+            detached,
+            mirror,
+            both,
+            on_branch,
+        ];
+        let mut fork = mr(419, "feature/y");
+        fork.source_project_path = Some("Tim/Backend-API".to_string());
+        let mut no_source = mr(420, "feature/x");
+        no_source.source_project_path = None;
+        let mut deleted = mr(421, "feature/x");
+        deleted.source_branch_exists = Some(false);
+        let mut upper_host = mr(418, "feature/x");
+        upper_host.host_key = HOST.to_uppercase();
+        let mut other_host = mr(418, "feature/x");
+        other_host.host_key = "gitlab.firma.example".to_string();
+        let mrs = [
+            mr(418, "feature/x"),
+            // nur der Ausweich-Branch im Worktree
+            mr(418, "feature/q"),
+            mr(422, "main"),
+            mr(423, "feature/nirgends"),
+            fork,
+            no_source,
+            deleted,
+            upper_host,
+            other_host,
+        ];
+        let mut reversed = repos.clone();
+        reversed.reverse();
+        // Die Fälle treffen Klone, Reihenfolge, Worktrees und Forks
+        let hosts = hosts_for(&repos);
+        let brief = |repos: &[RepoInfo], mr: &MergeRequest| {
+            CloneIndex::new(repos, &hosts).brief(&MrRefInfo::from_mr(mr), repos)
+        };
+        let already = |b: CheckoutBrief| b.already.map(|a| (a.path, a.behind));
+        let at = |path: &str, behind| Some((PathBuf::from(path), behind));
+        assert_eq!(already(brief(&repos, &mrs[0])), at("/dev/both", 0));
+        assert_eq!(
+            already(brief(&reversed, &mrs[0])),
+            at("/dev/backend-api-2", 2)
+        );
+        let in_worktree = at("/dev/Reviews/backend-api-mr-418", 0);
+        assert_eq!(already(brief(&repos, &mrs[1])), in_worktree);
+        assert!(brief(&repos, &mrs[4]).has_clone);
+        assert!(!brief(&repos, &mrs[8]).has_clone);
+        for repos in [repos.clone(), reversed, repos[2..5].to_vec(), Vec::new()] {
+            let hosts = hosts_for(&repos);
+            let index = CloneIndex::new(&repos, &hosts);
+            for mr in &mrs {
+                let info = MrRefInfo::from_mr(mr);
+                assert_eq!(
+                    index.brief(&info, &repos),
+                    checkout_brief(&info, &repos, &hosts),
+                    "!{} {} {repos:?}",
+                    mr.iid,
+                    mr.source_branch
+                );
             }
         }
     }

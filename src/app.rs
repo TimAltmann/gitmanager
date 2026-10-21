@@ -364,6 +364,8 @@ pub struct MyApp {
     /// GitLab-Hosts und lokale Projekte aus Repos, Erkennung und Config
     mr_hosts: HostMap,
     mr_locals: Vec<LocalProject>,
+    /// Klone je Projekt für die Checkout-Buttons (`update_mr_clones`)
+    mr_clones: crate::gitlab::checkout::CloneIndex,
     /// Letzter Stand der MR-Ansicht; bleibt beim Neuladen sichtbar
     mr_snapshot: Option<Box<MrSnapshot>>,
     mr_loading: bool,
@@ -488,6 +490,7 @@ impl MyApp {
             glab_hosts: Vec::new(),
             mr_hosts: HostMap::default(),
             mr_locals: Vec::new(),
+            mr_clones: Default::default(),
             mr_snapshot: None,
             mr_loading: false,
             mr_pending_refresh: false,
@@ -2678,6 +2681,7 @@ impl eframe::App for MyApp {
                 // Finding A: nur bei dirty sortieren statt pro Frame (60fps).
                 if self.repo_sort_dirty {
                     sort_main_repos(&mut self.repos, &self.config);
+                    self.update_mr_clones();
                     self.repo_sort_dirty = false;
                 }
                 let fetching = self.git_busy.holds_refs();
@@ -3033,6 +3037,7 @@ mod tests {
             glab_hosts: Vec::new(),
             mr_hosts: HostMap::default(),
             mr_locals: Vec::new(),
+            mr_clones: Default::default(),
             mr_snapshot: None,
             mr_loading: false,
             mr_pending_refresh: false,

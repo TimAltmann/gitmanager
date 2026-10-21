@@ -9,8 +9,8 @@
 use crate::config::{AfterAction, AfterCheckoutPref, AgentProfile, IdeConfig, MrConfig, Theme};
 use crate::git::RepoInfo;
 use crate::gitlab::checkout::{
-    build_checkout_menu, checkout_brief, mr_folder_name, review_root_dir, safe_folder_name,
-    BlockReason, CheckoutBrief, CheckoutMenu, CloneOption, CloneState, MenuLookup, MrRefInfo,
+    build_checkout_menu, mr_folder_name, review_root_dir, safe_folder_name, BlockReason,
+    CheckoutBrief, CheckoutMenu, CloneIndex, CloneOption, CloneState, MenuLookup, MrRefInfo,
     OpenBranches, UnavailableReason,
 };
 use crate::gitlab::glab::{GlabErrorKind, GlabOutput};
@@ -237,6 +237,9 @@ pub struct MrViewInput<'a> {
     pub repos: &'a [RepoInfo],
     pub hosts: &'a HostMap,
     pub locals: &'a [LocalProject],
+    /// Klone je Projekt aus `repos` und `hosts` (`CloneIndex::new`); der
+    /// Checkout-Button jeder Zeile schlägt dort nach
+    pub clones: &'a CloneIndex,
     /// Aktive Agenten des Profils („Danach öffnen“, „{Agent} starten“)
     pub agents: &'a [&'a AgentProfile],
     /// IDE des aktiven Profils (Chip „Danach öffnen“: neue Ordner haben
@@ -566,7 +569,6 @@ pub fn show_merge_requests(
             input,
             p,
             snap,
-            open: OpenBranches::from_snapshot(snap),
             multi_host: snap.per_host.len() > 1,
             has_data: snap.per_host.is_empty() || snap.per_host.iter().any(|h| h.error.is_none()),
         };
@@ -579,7 +581,6 @@ struct View<'v> {
     input: &'v MrViewInput<'v>,
     p: MrPalette,
     snap: &'v MrSnapshot,
-    open: OpenBranches,
     /// Banner nennen den Host
     multi_host: bool,
     /// Mindestens ein Host lieferte Daten; sonst keine Leerzustände
@@ -591,8 +592,8 @@ impl View<'_> {
         self.input.lang
     }
 
-    /// Checkout-Menü einer Zeile, nur beim Öffnen (`MenuCache`); je Frame
-    /// reicht `checkout_brief`.
+    /// Checkout-Menü einer Zeile, nur beim Öffnen (`MenuCache`), samt den
+    /// offenen Branches aller MRs; je Frame reicht `CloneIndex::brief`.
     fn menu(&self, mr: &MergeRequest, is_own: bool, lookup: &MenuLookup) -> CheckoutMenu {
         build_checkout_menu(
             &MrRefInfo::from_mr(mr),
@@ -601,7 +602,7 @@ impl View<'_> {
             self.input.cfg,
             is_own,
             lookup,
-            &self.open,
+            &OpenBranches::from_snapshot(self.snap),
         )
     }
 
@@ -1476,7 +1477,7 @@ enum RowKind {
 }
 
 fn show_row(ui: &mut Ui, v: &View, mr: &MergeRequest, kind: RowKind, actions: &mut MrViewActions) {
-    let brief = checkout_brief(&MrRefInfo::from_mr(mr), v.input.repos, v.input.hosts);
+    let brief = v.input.clones.brief(&MrRefInfo::from_mr(mr), v.input.repos);
     let button = checkout_button(&brief);
     draw_row(ui, v, mr, None, kind, &button, actions);
 }
@@ -3807,6 +3808,7 @@ mod tests {
         let hosts = sample_hosts(&repos);
         let cfg = MrConfig::default();
         let locals = crate::gitlab::remote::local_projects(&repos, &hosts, &cfg);
+        let clones = CloneIndex::new(&repos, &hosts);
         let claude = agent("claude", "Claude Code");
         let agents = [&claude];
         let ide = vscode();
@@ -3825,6 +3827,7 @@ mod tests {
                     repos: &repos,
                     hosts: &hosts,
                     locals: &locals,
+                    clones: &clones,
                     agents: &agents,
                     ide: Some(&ide),
                     ide_for: &vscode_for,
@@ -3849,6 +3852,7 @@ mod tests {
         let hosts = sample_hosts(&repos);
         let cfg = MrConfig::default();
         let locals = crate::gitlab::remote::local_projects(&repos, &hosts, &cfg);
+        let clones = CloneIndex::new(&repos, &hosts);
         let theme = crate::config::Theme::Dark;
         let old = GlabErrorKind::TooOld(Version::new(1, 90, 0));
         let signed_out = MrSnapshot {
@@ -3882,6 +3886,7 @@ mod tests {
                     repos: &repos,
                     hosts,
                     locals: &locals,
+                    clones: &clones,
                     agents: &[],
                     ide: None,
                     ide_for: &vscode_for,
@@ -3972,6 +3977,7 @@ mod tests {
         let hosts = sample_hosts(&repos);
         let cfg = MrConfig::default();
         let locals = crate::gitlab::remote::local_projects(&repos, &hosts, &cfg);
+        let clones = CloneIndex::new(&repos, &hosts);
         let merged = sample_merged(&locals, &cfg);
         assert_eq!(merged.mrs.len(), 2);
         let theme = crate::config::Theme::Dark;
@@ -3988,6 +3994,7 @@ mod tests {
             repos: &repos,
             hosts: &hosts,
             locals: &locals,
+            clones: &clones,
             agents: &[],
             ide: None,
             ide_for: &vscode_for,
@@ -4049,6 +4056,7 @@ mod tests {
         let hosts = sample_hosts(&repos);
         let cfg = MrConfig::default();
         let locals = crate::gitlab::remote::local_projects(&repos, &hosts, &cfg);
+        let clones = CloneIndex::new(&repos, &hosts);
         let merged = sample_merged(&locals, &cfg);
         let theme = crate::config::Theme::Dark;
         let input = MrViewInput {
@@ -4064,6 +4072,7 @@ mod tests {
             repos: &repos,
             hosts: &hosts,
             locals: &locals,
+            clones: &clones,
             agents: &[],
             ide: None,
             ide_for: &vscode_for,
@@ -4077,7 +4086,6 @@ mod tests {
             input: &input,
             p: mr_palette(&theme, &egui::Visuals::dark()),
             snap: &snap,
-            open: OpenBranches::from_snapshot(&snap),
             multi_host: false,
             has_data: true,
         };
@@ -4125,6 +4133,7 @@ mod tests {
         let hosts = sample_hosts(&repos);
         let cfg = MrConfig::default();
         let locals = crate::gitlab::remote::local_projects(&repos, &hosts, &cfg);
+        let clones = CloneIndex::new(&repos, &hosts);
         let shown = sample_merged(&locals, &cfg);
         let theme = crate::config::Theme::Dark;
         let input = MrViewInput {
@@ -4140,6 +4149,7 @@ mod tests {
             repos: &repos,
             hosts: &hosts,
             locals: &locals,
+            clones: &clones,
             agents: &[],
             ide: None,
             ide_for: &vscode_for,
@@ -4160,7 +4170,6 @@ mod tests {
                 input: &input,
                 p: mr_palette(&theme, &egui::Visuals::dark()),
                 snap: &snap,
-                open: OpenBranches::from_snapshot(&snap),
                 multi_host: false,
                 has_data: true,
             };
@@ -4194,6 +4203,7 @@ mod tests {
         let hosts = sample_hosts(&repos);
         let cfg = MrConfig::default();
         let locals = crate::gitlab::remote::local_projects(&repos, &hosts, &cfg);
+        let clones = CloneIndex::new(&repos, &hosts);
         let theme = crate::config::Theme::Dark;
         for loading in [false, true] {
             let input = MrViewInput {
@@ -4209,6 +4219,7 @@ mod tests {
                 repos: &repos,
                 hosts: &hosts,
                 locals: &locals,
+                clones: &clones,
                 agents: &[],
                 ide: None,
                 ide_for: &vscode_for,
@@ -4238,6 +4249,7 @@ mod tests {
             ..MrConfig::default()
         };
         let locals = crate::gitlab::remote::local_projects(&repos, &hosts, &cfg);
+        let clones = CloneIndex::new(&repos, &hosts);
         let claude = agent("claude", "Claude Code");
         let agents = [&claude];
         let ide = vscode();
@@ -4255,6 +4267,7 @@ mod tests {
             repos: &repos,
             hosts: &hosts,
             locals: &locals,
+            clones: &clones,
             agents: &agents,
             ide: Some(&ide),
             ide_for: &vscode_for,
@@ -4268,7 +4281,6 @@ mod tests {
             input: &input,
             p: mr_palette(&theme, &egui::Visuals::light()),
             snap: &snap,
-            open: OpenBranches::from_snapshot(&snap),
             multi_host: false,
             has_data: true,
         };
@@ -4301,7 +4313,7 @@ mod tests {
             .collect();
         assert_eq!(states, ["frei", "3 Änderungen", "in Arbeit für !87"]);
         // Fork-MR: deaktiviert (E6)
-        let brief = |mr| checkout_brief(&MrRefInfo::from_mr(mr), &repos, &hosts);
+        let brief = |mr| clones.brief(&MrRefInfo::from_mr(mr), &repos);
         assert_eq!(
             checkout_button(&brief(&snap.others[2])),
             ButtonKind::Disabled(UnavailableReason::Fork)
@@ -4323,6 +4335,7 @@ mod tests {
         let hosts = sample_hosts(&repos);
         let cfg = MrConfig::default();
         let locals = crate::gitlab::remote::local_projects(&repos, &hosts, &cfg);
+        let clones = CloneIndex::new(&repos, &hosts);
         let ide = vscode();
         let theme = crate::config::Theme::Light;
         let rider_for = |p: &Path| (p == Path::new("/dev/api-3")).then(|| "Rider".to_string());
@@ -4339,6 +4352,7 @@ mod tests {
             repos: &repos,
             hosts: &hosts,
             locals: &locals,
+            clones: &clones,
             agents: &[],
             ide: Some(&ide),
             ide_for: &rider_for,
@@ -4352,7 +4366,6 @@ mod tests {
             input: &input,
             p: mr_palette(&theme, &egui::Visuals::light()),
             snap: &snap,
-            open: OpenBranches::from_snapshot(&snap),
             multi_host: false,
             has_data: true,
         };

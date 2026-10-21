@@ -10,7 +10,7 @@
 use super::{should_auto_fetch, MainView, MyApp};
 use crate::config::MrConfig;
 use crate::git::RepoInfo;
-use crate::gitlab::checkout::MenuLookup;
+use crate::gitlab::checkout::{CloneIndex, MenuLookup};
 use crate::gitlab::glab::{glab_version, GlabErrorKind, GlabRunner};
 use crate::gitlab::model::{
     sort_others, sort_uninvolved, MergedHostPage, MergedList, MrPart, MrSnapshot, Reason,
@@ -90,6 +90,14 @@ impl MyApp {
             .flat_map(|r| r.remotes.iter().filter_map(|x| x.parsed.as_ref()));
         self.mr_hosts = resolve_hosts(remotes, &self.glab_hosts, cfg);
         self.mr_locals = local_projects(&self.repos, &self.mr_hosts, cfg);
+        self.update_mr_clones();
+    }
+
+    /// Klon-Index der MR-Zeilen neu: nach neuer Host-Zuordnung und jedem
+    /// Umsortieren von `repos` (er hält Positionen darin). Je Frame
+    /// schlagen die Zeilen nur noch nach.
+    pub(super) fn update_mr_clones(&mut self) {
+        self.mr_clones = CloneIndex::new(&self.repos, &self.mr_hosts);
     }
 
     /// Nach jedem Scan: Hosts neu zuordnen, neue Kandidaten lokal erkennen
@@ -750,6 +758,7 @@ impl MyApp {
                 repos: &self.repos,
                 hosts: &self.mr_hosts,
                 locals: &self.mr_locals,
+                clones: &self.mr_clones,
                 agents: &agents,
                 ide: config
                     .get_active_profile()
