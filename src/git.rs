@@ -440,12 +440,11 @@ fn libgit2_fetch(
     prune: bool,
 ) -> Result<(), git2::Error> {
     // Repo-Config für credential.helper (https) — Snapshot vor Callbacks.
-    let repo_config = repo.config().ok();
-    let remote_url = remote_url.to_string();
     let mut callbacks = git2::RemoteCallbacks::new();
-    callbacks.credentials(move |url, username_from_url, allowed| {
-        fetch_credentials(&repo_config, url, username_from_url, allowed, &remote_url)
-    });
+    callbacks.credentials(credentials_callback(
+        repo.config().ok(),
+        remote_url.to_string(),
+    ));
     // Zertifikatsprüfung NICHT deaktivieren (TLS bleibt verifiziert).
     let mut opts = git2::FetchOptions::new();
     opts.prune(if prune {
@@ -501,11 +500,11 @@ fn with_fetch_retries(
     }
 }
 
-/// Abbruch in der SSH- oder Netzwerkschicht, der beim nächsten Versuch meist
-/// weg ist: Der Server trennt z. B. beim Handshake, wenn viele Verbindungen
-/// gleichzeitig ankommen (libssh2 „Failed getting response“ bzw. „Failed
-/// getting banner“, von libgit2 als `class=Ssh`, `code=Auth` gemeldet). Ein
-/// abgelehntes HTTP-Login ist endgültig.
+/// Abbruch in der SSH-, Netzwerk- oder OS-Schicht (Verbindung getrennt,
+/// Timeout, Lock-Datei eines gleichzeitigen Fetches), der beim nächsten
+/// Versuch meist weg ist. Ein abgelehntes Login ist endgültig: über HTTP
+/// (`code=Auth`) und wenn der Credential-Callback alles probiert hat
+/// (`class=Callback`, [`CredState::exhausted`]).
 fn is_transient_fetch_error(e: &git2::Error) -> bool {
     match e.class() {
         git2::ErrorClass::Ssh | git2::ErrorClass::Net | git2::ErrorClass::Os => true,
@@ -514,69 +513,128 @@ fn is_transient_fetch_error(e: &git2::Error) -> bool {
     }
 }
 
-/// Credential-Callback für libgit2: SSH-Agent → Default-Keys → credential.helper → default.
-///
-/// `repo_config` ist der Snapshot der Repo-Config (für `credential.helper` bei https).
-/// `callback_url` ist die URL aus dem Callback, `remote_url` der konfigurierte
-/// Remote (Fallback wenn Callback-URL leer).
-fn fetch_credentials(
-    repo_config: &Option<git2::Config>,
-    callback_url: &str,
-    username_from_url: Option<&str>,
-    allowed: git2::CredentialType,
-    remote_url: &str,
-) -> Result<git2::Cred, git2::Error> {
-    let url = if callback_url.is_empty() {
-        remote_url
-    } else {
-        callback_url
-    };
-    let username = username_from_url.unwrap_or("git");
-    // 1) SSH-Key via Agent (typisch für git@github.com:... mit laufendem Agent).
-    if allowed.is_ssh_key() {
-        if let Ok(cred) = git2::Cred::ssh_key_from_agent(username) {
-            return Ok(cred);
+/// Anmeldeart, die der Credential-Callback libgit2 anbietet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CredChoice {
+    SshAgent,
+    /// Default-Key aus `~/.ssh` (ohne Passphrase)
+    SshKeyFile(PathBuf),
+    /// `credential.helper` (https, z. B. Windows Credential Manager)
+    CredentialHelper,
+    /// NTLM/Kerberos u. ä.
+    Default,
+    Username,
+}
+
+/// Gedächtnis des Credential-Callbacks für eine Verbindung. libgit2 fragt
+/// nach jedem abgelehnten Login erneut; ohne Gedächtnis bekam es endlos
+/// dasselbe (etwa den SSH-Agent, auch wenn keiner läuft), bis der Server
+/// wegen zu vieler Fehlversuche trennte („remote rejected authentication:
+/// Failed getting response“) und die Default-Keys nie an die Reihe kamen.
+#[derive(Debug, Default)]
+struct CredState {
+    offered: Vec<CredChoice>,
+}
+
+impl CredState {
+    /// Nächste noch nicht angebotene Anmeldeart in der Reihenfolge
+    /// SSH-Agent → Default-Keys → credential.helper → default; `None`, wenn
+    /// alles probiert ist. Der Benutzername (libgit2 fragt ihn einmal, wenn
+    /// die URL keinen nennt) zählt nicht als Versuch.
+    fn next(&mut self, allowed: git2::CredentialType, key_files: &[PathBuf]) -> Option<CredChoice> {
+        let mut candidates = Vec::new();
+        if allowed.is_ssh_key() {
+            candidates.push(CredChoice::SshAgent);
+            candidates.extend(key_files.iter().cloned().map(CredChoice::SshKeyFile));
         }
-        // 2) Default-Keys aus ~/.ssh (ohne Passphrase; mit Passphrase schlägt
-        // libgit2 hier fehl → dann greift der System-git-Fallback mit Prompt/Agent).
-        for key_path in default_ssh_key_paths() {
-            if key_path.exists() {
-                let pub_path = key_path.with_extension("pub");
-                let pub_opt = if pub_path.exists() {
-                    Some(pub_path.as_path())
-                } else {
-                    None
-                };
-                if let Ok(cred) = git2::Cred::ssh_key(username, pub_opt, &key_path, None) {
-                    return Ok(cred);
-                }
-            }
+        if allowed.is_user_pass_plaintext() {
+            candidates.push(CredChoice::CredentialHelper);
         }
+        if allowed.is_default() {
+            candidates.push(CredChoice::Default);
+        }
+        if let Some(next) = candidates.into_iter().find(|c| !self.offered.contains(c)) {
+            self.offered.push(next.clone());
+            return Some(next);
+        }
+        allowed.is_username().then_some(CredChoice::Username)
     }
-    // 3) https via git-credential-helper (Windows Credential Manager etc.).
-    if allowed.is_user_pass_plaintext() {
-        if let Some(cfg) = repo_config {
-            if let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url) {
+
+    /// Fehler, wenn alles probiert ist: Klasse `Callback`, damit
+    /// [`with_fetch_retries`] nicht noch mehr Fehlversuche erzeugt.
+    fn exhausted(&self) -> git2::Error {
+        let tried: Vec<String> = self
+            .offered
+            .iter()
+            .map(|c| match c {
+                CredChoice::SshAgent => "ssh-agent".to_string(),
+                CredChoice::SshKeyFile(path) => path.display().to_string(),
+                CredChoice::CredentialHelper => "credential helper".to_string(),
+                CredChoice::Default => "default credentials".to_string(),
+                CredChoice::Username => "username".to_string(),
+            })
+            .collect();
+        let message = if tried.is_empty() {
+            "no credentials available for this remote".to_string()
+        } else {
+            format!("authentication failed (tried: {})", tried.join(", "))
+        };
+        git2::Error::new(git2::ErrorCode::Auth, git2::ErrorClass::Callback, message)
+    }
+}
+
+/// Credential-Callback für libgit2 (Fetch, Klon) mit eigenem
+/// [`CredState`]; jede Anmeldeart kommt höchstens einmal.
+///
+/// `config` ist der Snapshot der Repo- bzw. globalen Config (für
+/// `credential.helper` bei https), `remote_url` der konfigurierte Remote
+/// (Fallback, wenn die Callback-URL leer ist).
+fn credentials_callback(
+    config: Option<git2::Config>,
+    remote_url: String,
+) -> impl FnMut(&str, Option<&str>, git2::CredentialType) -> Result<git2::Cred, git2::Error> {
+    let key_files: Vec<PathBuf> = default_ssh_key_paths()
+        .into_iter()
+        .filter(|p| p.exists())
+        .collect();
+    credentials_with_keys(config, remote_url, key_files)
+}
+
+/// [`credentials_callback`] mit fester Liste vorhandener Default-Keys.
+fn credentials_with_keys(
+    config: Option<git2::Config>,
+    remote_url: String,
+    key_files: Vec<PathBuf>,
+) -> impl FnMut(&str, Option<&str>, git2::CredentialType) -> Result<git2::Cred, git2::Error> {
+    let mut state = CredState::default();
+    move |callback_url, username_from_url, allowed| {
+        let url = if callback_url.is_empty() {
+            remote_url.as_str()
+        } else {
+            callback_url
+        };
+        let username = username_from_url.unwrap_or("git");
+        while let Some(choice) = state.next(allowed, &key_files) {
+            let cred = match &choice {
+                CredChoice::SshAgent => git2::Cred::ssh_key_from_agent(username),
+                CredChoice::SshKeyFile(key) => {
+                    let pub_path = key.with_extension("pub");
+                    let pub_opt = pub_path.exists().then_some(pub_path.as_path());
+                    git2::Cred::ssh_key(username, pub_opt, key, None)
+                }
+                CredChoice::CredentialHelper => match &config {
+                    Some(cfg) => git2::Cred::credential_helper(cfg, url, username_from_url),
+                    None => continue,
+                },
+                CredChoice::Default => git2::Cred::default(),
+                CredChoice::Username => git2::Cred::username(username),
+            };
+            if let Ok(cred) = cred {
                 return Ok(cred);
             }
         }
+        Err(state.exhausted())
     }
-    // 4) Default (NTLM/Kerberos u.ä.).
-    if allowed.is_default() {
-        if let Ok(cred) = git2::Cred::default() {
-            return Ok(cred);
-        }
-    }
-    // 5) Username-only (z.B. SSH-User-Abfrage).
-    if allowed.is_username() {
-        return git2::Cred::username(username);
-    }
-    // Letzter Versuch: SSH-Agent auch wenn Typ nicht exakt passt (libgit2 meldet
-    // Typen nicht immer präzise), dann Default.
-    if let Ok(cred) = git2::Cred::ssh_key_from_agent(username) {
-        return Ok(cred);
-    }
-    git2::Cred::default()
 }
 
 /// Kandidaten für Default-SSH-Keys (ohne Passphrase versucht).
@@ -1822,17 +1880,16 @@ fn worktree_add_with_git_cli(
 
 /// K1: klont `url` nach `target_path` und checkt `branch` aus. Der Zielordner
 /// darf fehlen oder leer sein. libgit2 mit den Credentials wie beim Fetch
-/// ([`fetch_credentials`], globale Config für `credential.helper`), Fallback
+/// ([`credentials_callback`], globale Config für `credential.helper`), Fallback
 /// `git clone --branch <branch> <url> <target>`. Ein halber Klon wird
 /// wieder entfernt.
 pub fn clone_repo(url: &str, target_path: &Path, branch: &str) -> Result<(), CheckoutError> {
     prepare_target_dir(target_path)?;
-    let config = git2::Config::open_default().ok();
-    let remote_url = url.to_string();
     let mut callbacks = git2::RemoteCallbacks::new();
-    callbacks.credentials(move |cb_url, username_from_url, allowed| {
-        fetch_credentials(&config, cb_url, username_from_url, allowed, &remote_url)
-    });
+    callbacks.credentials(credentials_callback(
+        git2::Config::open_default().ok(),
+        url.to_string(),
+    ));
     let mut fetch_opts = git2::FetchOptions::new();
     fetch_opts.remote_callbacks(callbacks);
     let result = git2::build::RepoBuilder::new()
@@ -3246,6 +3303,65 @@ mod tests {
             assert!(res.is_err());
             assert_eq!(calls, 1, "{class:?}");
         }
+    }
+
+    #[test]
+    fn credentials_each_choice_once_then_give_up() {
+        use git2::CredentialType as T;
+        let keys = vec![
+            PathBuf::from("/home/u/.ssh/id_ed25519"),
+            PathBuf::from("/home/u/.ssh/id_rsa"),
+        ];
+        // SSH: Agent → Keys → Schluss (früher endlos der Agent)
+        let mut state = CredState::default();
+        assert_eq!(state.next(T::SSH_KEY, &keys), Some(CredChoice::SshAgent));
+        assert_eq!(
+            state.next(T::SSH_KEY, &keys),
+            Some(CredChoice::SshKeyFile(keys[0].clone()))
+        );
+        assert_eq!(
+            state.next(T::SSH_KEY, &keys),
+            Some(CredChoice::SshKeyFile(keys[1].clone()))
+        );
+        assert_eq!(state.next(T::SSH_KEY, &keys), None);
+        assert_eq!(state.next(T::SSH_KEY, &keys), None);
+        let err = state.exhausted();
+        assert_eq!(err.class(), git2::ErrorClass::Callback);
+        assert_eq!(err.code(), git2::ErrorCode::Auth);
+        assert_eq!(
+            err.message(),
+            "authentication failed (tried: ssh-agent, /home/u/.ssh/id_ed25519, /home/u/.ssh/id_rsa)"
+        );
+        assert!(!is_transient_fetch_error(&err));
+        // https: Helper, dann default
+        let mut state = CredState::default();
+        let https = T::USER_PASS_PLAINTEXT | T::DEFAULT;
+        assert_eq!(state.next(https, &keys), Some(CredChoice::CredentialHelper));
+        assert_eq!(state.next(https, &keys), Some(CredChoice::Default));
+        assert_eq!(state.next(https, &keys), None);
+        // Benutzername zählt nicht als Versuch
+        let mut state = CredState::default();
+        assert_eq!(state.next(T::USERNAME, &[]), Some(CredChoice::Username));
+        assert_eq!(state.next(T::USERNAME, &[]), Some(CredChoice::Username));
+        assert_eq!(state.next(T::SSH_KEY, &[]), Some(CredChoice::SshAgent));
+        assert_eq!(state.next(T::SSH_KEY, &[]), None);
+        assert_eq!(
+            CredState::default().exhausted().message(),
+            "no credentials available for this remote"
+        );
+    }
+
+    #[test]
+    fn credentials_callback_stops_after_all_choices() {
+        // Ohne Keys: einmal Agent, dann Fehler statt Endlosschleife
+        let url = "ssh://git@h.example.com/g/p.git".to_string();
+        let mut callback = credentials_with_keys(None, url, Vec::new());
+        assert!(callback("", Some("git"), git2::CredentialType::SSH_KEY).is_ok());
+        let Err(err) = callback("", Some("git"), git2::CredentialType::SSH_KEY) else {
+            panic!("zweiter Aufruf muss aufgeben");
+        };
+        assert_eq!(err.class(), git2::ErrorClass::Callback);
+        assert_eq!(err.message(), "authentication failed (tried: ssh-agent)");
     }
 
     #[test]
