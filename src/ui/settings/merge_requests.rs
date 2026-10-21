@@ -657,35 +657,24 @@ fn unrecognized_hosts(
         .collect()
 }
 
-/// API-Protokoll eines Hosts (E17): Einstellung, glab-Config, sonst aus dem
-/// Remote-Schema (`http://` → HTTP).
+/// API-Protokoll eines Hosts (E17): `api_protocol` der glab-Config (dort
+/// speichert es `save_token`), sonst aus dem Remote-Schema (`http://` → HTTP).
 fn host_protocol(
     host: &str,
     repos: &[RepoInfo],
     hosts: &HostMap,
     glab_hosts: &[GlabHost],
-    cfg: &MrConfig,
 ) -> Protocol {
-    let parse = |p: &str| {
-        if p.trim().eq_ignore_ascii_case("http") {
-            Protocol::Http
-        } else {
-            Protocol::Https
-        }
-    };
-    if let Some(p) = cfg
-        .api_protocols
-        .iter()
-        .find(|p| p.host.trim().eq_ignore_ascii_case(host))
-    {
-        return parse(&p.protocol);
-    }
     if let Some(p) = glab_hosts
         .iter()
         .find(|h| h.key.eq_ignore_ascii_case(host))
         .and_then(|h| h.api_protocol.as_deref())
     {
-        return parse(p);
+        return if p.trim().eq_ignore_ascii_case("http") {
+            Protocol::Http
+        } else {
+            Protocol::Https
+        };
     }
     let http = remote_refs(repos).any(|r| r.scheme == RemoteScheme::Http && serves(hosts, r, host));
     if http {
@@ -1289,7 +1278,7 @@ fn host_card(
         return;
     }
     let probe = t.probe(host);
-    let protocol = host_protocol(host, t.input.repos, &t.hosts, t.input.glab_hosts, cfg);
+    let protocol = host_protocol(host, t.input.repos, &t.hosts, t.input.glab_hosts);
     let extra = cfg
         .extra_hosts
         .iter()
@@ -2617,12 +2606,18 @@ mod tests {
             ]
         );
         assert_eq!(
-            host_protocol("git.intern.example", &repos, &hosts, &glab, &cfg),
+            host_protocol("git.intern.example", &repos, &hosts, &glab),
             Protocol::Http
         );
+        assert_eq!(host_protocol(HOST, &repos, &hosts, &glab), Protocol::Https);
+        // `api_protocol` der glab-Config geht vor dem Remote-Schema
+        let glab_http = vec![GlabHost {
+            api_protocol: Some(" HTTP ".to_string()),
+            ..signed_in(HOST)
+        }];
         assert_eq!(
-            host_protocol(HOST, &repos, &hosts, &glab, &cfg),
-            Protocol::Https
+            host_protocol(HOST, &repos, &hosts, &glab_http),
+            Protocol::Http
         );
         // „gehört zu …“ im Entwurf: Host verschwindet aus der Liste, seine
         // Projekte zählen zum Ziel

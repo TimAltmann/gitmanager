@@ -147,7 +147,6 @@ The settings live in `config.json` under `merge_requests` (config v15):
   "excluded_projects": ["gitlab.example.com/group/app"],
   "extra_hosts": [],
   "host_aliases": [{"from": "ssh.gitlab.example.com", "to": "gitlab.example.com"}],
-  "api_protocols": [],
   "review_root": "C:\\Dev\\Reviews",
   "after_checkout_default": "last_used",
   "after_checkout_last": {"agent": "claude"}

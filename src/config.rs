@@ -128,15 +128,6 @@ pub struct HostAlias {
     pub to: String,
 }
 
-/// API-Protokoll je GitLab-Host (E17), aus dem Remote-Schema vorbelegt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct HostProtocol {
-    pub host: String,
-    /// "http" oder "https" – andere Werte entfernt `MrConfig::normalize`
-    pub protocol: String,
-}
-
 /// Was nach dem Auschecken eines MR-Branches geöffnet wird („Danach öffnen“, E5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -184,7 +175,6 @@ pub struct MrConfig {
     /// Manuell hinzugefügte GitLab-Hosts (`host` oder `host:port`, E16)
     pub extra_hosts: Vec<String>,
     pub host_aliases: Vec<HostAlias>,
-    pub api_protocols: Vec<HostProtocol>,
     /// Ordner für Reviews (MRs von anderen); None → neben dem Basis-Klon
     pub review_root: Option<String>,
     #[serde(deserialize_with = "de_after_checkout_default")]
@@ -209,7 +199,6 @@ impl Default for MrConfig {
             excluded_projects: Vec::new(),
             extra_hosts: Vec::new(),
             host_aliases: Vec::new(),
-            api_protocols: Vec::new(),
             review_root: None,
             after_checkout_default: AfterCheckoutPref::LastUsed,
             after_checkout_last: default_after_checkout_last(),
@@ -242,14 +231,6 @@ impl MrConfig {
             .retain(|a| !a.from.is_empty() && !a.to.is_empty());
         self.host_aliases.sort_by(|a, b| a.from.cmp(&b.from));
         self.host_aliases.dedup_by(|a, b| a.from == b.from);
-        for p in &mut self.api_protocols {
-            p.host = p.host.trim().to_lowercase();
-            p.protocol = p.protocol.trim().to_lowercase();
-        }
-        self.api_protocols
-            .retain(|p| !p.host.is_empty() && (p.protocol == "http" || p.protocol == "https"));
-        self.api_protocols.sort_by(|a, b| a.host.cmp(&b.host));
-        self.api_protocols.dedup_by(|a, b| a.host == b.host);
         // Pfad nur trimmen (Groß-/Kleinschreibung bleibt), leer = nicht gesetzt
         self.review_root = self
             .review_root
@@ -3328,7 +3309,6 @@ mod tests {
         assert!(mr.excluded_projects.is_empty());
         assert!(mr.extra_hosts.is_empty());
         assert!(mr.host_aliases.is_empty());
-        assert!(mr.api_protocols.is_empty());
         assert_eq!(mr.review_root, None);
         assert_eq!(mr.after_checkout_default, AfterCheckoutPref::LastUsed);
         // Mockup K1: Vorbelegung = aktiver Standard-Agent (Claude Code)
@@ -3424,6 +3404,27 @@ mod tests {
     }
 
     #[test]
+    fn mr_config_old_api_protocols_still_loads() {
+        // Früher dokumentiert: `api_protocols` (Protokoll je Host). Das
+        // Protokoll steht in der glab-Config; alte Dateien laden weiter, das
+        // Feld entfällt beim nächsten Speichern.
+        let json = r#"{"roots":["C:\\Dev"],"max_depth":3,"config_version":15,
+            "merge_requests":{"refresh_interval_min":7,
+            "extra_hosts":["gitlab.local:8443"],
+            "api_protocols":[{"host":"gitlab.local:8443","protocol":"http"}],
+            "review_root":"C:\\Dev\\Reviews"}}"#;
+        let mut cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.roots, vec![PathBuf::from(r"C:\Dev")]);
+        let mr = &cfg.merge_requests;
+        assert_eq!(mr.refresh_interval_min, 7);
+        assert_eq!(mr.extra_hosts, vec!["gitlab.local:8443".to_string()]);
+        assert_eq!(mr.review_root.as_deref(), Some(r"C:\Dev\Reviews"));
+        assert!(!cfg.merge_requests.normalize());
+        let saved = serde_json::to_string(&cfg).unwrap();
+        assert!(!saved.contains("api_protocols"), "{saved}");
+    }
+
+    #[test]
     fn mr_config_serde_roundtrip() {
         let mr = MrConfig {
             glab_program: r"C:\Tools\glab.exe".to_string(),
@@ -3438,10 +3439,6 @@ mod tests {
                 from: "ssh.gitlab.local".to_string(),
                 to: "gitlab.local:8443".to_string(),
             }],
-            api_protocols: vec![HostProtocol {
-                host: "gitlab.local:8443".to_string(),
-                protocol: "http".to_string(),
-            }],
             review_root: Some(r"C:\Dev\Reviews".to_string()),
             after_checkout_default: AfterCheckoutPref::Fixed(AfterAction::Shell),
             after_checkout_last: AfterAction::Agent("codex".to_string()),
@@ -3452,7 +3449,6 @@ mod tests {
         // JSON-Form der Enums (snake_case, extern getaggt)
         assert!(json.contains(r#""after_checkout_default":{"fixed":"shell"}"#));
         assert!(json.contains(r#""after_checkout_last":{"agent":"codex"}"#));
-        assert!(json.contains(r#""protocol":"http""#));
         for action in [
             AfterAction::Agent("claude".to_string()),
             AfterAction::Shell,
@@ -3572,30 +3568,6 @@ mod tests {
                     to: "a.example.com".to_string(),
                 },
             ],
-            api_protocols: vec![
-                HostProtocol {
-                    host: "Gitlab.Local:8443".to_string(),
-                    protocol: "HTTP".to_string(),
-                },
-                HostProtocol {
-                    host: "a.example.com".to_string(),
-                    protocol: " https ".to_string(),
-                },
-                // doppelter Host: der erste Eintrag gewinnt
-                HostProtocol {
-                    host: "gitlab.local:8443".to_string(),
-                    protocol: "https".to_string(),
-                },
-                // ungültiges Protokoll bzw. leerer Host -> entfernt
-                HostProtocol {
-                    host: "b.example.com".to_string(),
-                    protocol: "ftp".to_string(),
-                },
-                HostProtocol {
-                    host: " ".to_string(),
-                    protocol: "http".to_string(),
-                },
-            ],
             ..Default::default()
         };
         assert!(mr.normalize());
@@ -3620,19 +3592,6 @@ mod tests {
                 HostAlias {
                     from: "ssh.gitlab.local".to_string(),
                     to: "gitlab.local:8443".to_string(),
-                },
-            ]
-        );
-        assert_eq!(
-            mr.api_protocols,
-            vec![
-                HostProtocol {
-                    host: "a.example.com".to_string(),
-                    protocol: "https".to_string(),
-                },
-                HostProtocol {
-                    host: "gitlab.local:8443".to_string(),
-                    protocol: "http".to_string(),
                 },
             ]
         );
