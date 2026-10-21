@@ -490,6 +490,40 @@ fn libgit2_fetch(
     remote.fetch(refspecs, Some(&mut opts), None)
 }
 
+/// Obergrenzen für Verbindungen von libgit2 (Fetch, Klon): ohne sie wartet
+/// eine hängende Verbindung (VPN weg, halb offene TCP-Verbindung) für immer
+/// und hält den Worker und damit den Ref-Lock (`scanning`, K1) für die
+/// ganze Sitzung, wie bei System-`git` (`GIT_CLI_FETCH_TIMEOUT`). Die
+/// Stille gilt je Lese- oder Schreibaufruf, nicht für den ganzen Transfer:
+/// Ein langer Klon, der Daten bekommt, läuft weiter (der Server meldet auch
+/// beim Packen Fortschritt oder Keepalives).
+///
+/// Wirkt für SSH (libssh2, auch Handshake und Anmeldung), für http(s)
+/// außer unter Windows und für git://. WinHTTP (https unter Windows)
+/// nimmt feste Werte von libgit2: Verbindung 60 s, Empfang ohne Grenze.
+const LIBGIT2_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const LIBGIT2_IDLE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+
+/// Setzt [`LIBGIT2_CONNECT_TIMEOUT`] und [`LIBGIT2_IDLE_TIMEOUT`]
+/// prozessweit. Nur beim Start aufrufen, bevor Threads laufen: libgit2
+/// liest die Werte ohne Synchronisierung.
+pub fn init_libgit2_timeouts() {
+    set_libgit2_timeouts(LIBGIT2_CONNECT_TIMEOUT, LIBGIT2_IDLE_TIMEOUT);
+}
+
+/// Beide Werte gemeinsam: Mit Connect-Timeout allein lässt libgit2 den
+/// Socket nicht blockierend, wartet beim Lesen aber nicht, und http bricht
+/// sofort mit „Resource temporarily unavailable“ ab.
+fn set_libgit2_timeouts(connect: Duration, idle: Duration) {
+    let ms = |d: Duration| i32::try_from(d.as_millis()).unwrap_or(i32::MAX);
+    // Kann nicht fehlschlagen (siehe git2::opts); unsafe nur wegen der
+    // fehlenden Synchronisierung
+    unsafe {
+        let _ = git2::opts::set_server_connect_timeout_in_milliseconds(ms(connect));
+        let _ = git2::opts::set_server_timeout_in_milliseconds(ms(idle));
+    }
+}
+
 /// Wartezeiten vor dem 2. und 3. Versuch, mit bis zu 1 s Streuung: Worker,
 /// die gemeinsam abgebrochen sind, sollen nicht wieder gleichzeitig ankommen.
 /// Tests warten nicht (ihre `invalid.example.com`-Remotes scheitern im Netz).
@@ -3524,6 +3558,52 @@ mod tests {
         for (code, class, message) in permanent {
             let err = git2::Error::new(code, class, message);
             assert!(!is_transient_fetch_error(&err), "{err}");
+        }
+    }
+
+    /// Eine hängende Verbindung (Server nimmt an und schweigt) endet nach
+    /// der Stille-Grenze mit einem vorübergehenden Fehler, statt Worker und
+    /// Ref-Lock für immer zu halten. SSH über libssh2; http nur außerhalb
+    /// von Windows (WinHTTP nimmt die Grenze nicht).
+    #[test]
+    fn libgit2_timeouts_end_stalled_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            // Verbindungen offen halten, nie antworten
+            let mut open = Vec::new();
+            for stream in listener.incoming() {
+                open.push(stream);
+            }
+        });
+        set_libgit2_timeouts(LIBGIT2_CONNECT_TIMEOUT, Duration::from_secs(1));
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let mut urls = vec![format!("ssh://git@127.0.0.1:{port}/g/p.git")];
+        if cfg!(not(windows)) {
+            urls.push(format!("http://127.0.0.1:{port}/g/p.git"));
+        }
+        for url in &urls {
+            let mut remote = repo.remote_anonymous(url).unwrap();
+            let start = Instant::now();
+            let err = libgit2_fetch(&repo, &mut remote, url, &[], false).expect_err(url);
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "{url}: {:?}",
+                start.elapsed()
+            );
+            assert!(is_transient_fetch_error(&err), "{url}: {err}");
+        }
+        init_libgit2_timeouts();
+        unsafe {
+            assert_eq!(
+                git2::opts::get_server_connect_timeout_in_milliseconds().unwrap(),
+                30_000
+            );
+            assert_eq!(
+                git2::opts::get_server_timeout_in_milliseconds().unwrap(),
+                120_000
+            );
         }
     }
 

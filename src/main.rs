@@ -82,13 +82,9 @@ pub fn start_minimized_flag() -> bool {
 }
 
 fn main() -> eframe::Result<()> {
-    // P2a: globaler Connect-Timeout für libgit2 (Default: OS-TCP, bei
-    // Blackhole-Remotes minutenlang). Gilt prozessweit für alle Fetches;
-    // betrifft nur die Connect-Phase, nicht langsame Transfers.
-    // P2a: globaler Connect-Timeout für libgit2 (Default: OS-TCP, bei
-    // Blackhole-Remotes minutenlang). Gilt prozessweit für alle Fetches;
-    // betrifft nur die Connect-Phase, nicht langsame Transfers.
-    let _ = unsafe { git2::opts::set_server_connect_timeout_in_milliseconds(30_000) };
+    // P2a: Connect- und Stille-Timeout für libgit2 (Default: OS-TCP bzw.
+    // ohne Grenze), prozessweit für Fetches und Klone. Vor allen Threads.
+    git::init_libgit2_timeouts();
     // Panic hook für Tray-Crashes (F-17): vorherigen Hook chainen, Crash-Log mit
     // Millisekunden-Timestamp + PID (keine Kollision pro Sekunde) nach
     // ProjectDirs::from("com","gitmanager","gitmanager").data_local_dir()
@@ -220,19 +216,6 @@ mod tests {
             dir.path().join("other.txt").exists(),
             "foreign files untouched"
         );
-    }
-
-    #[test]
-    fn libgit2_connect_timeout_roundtrips() {
-        // P2a: Timeout-Optik existiert und ist setzbar (schützt vor
-        // Blackhole-Hängern); main() setzt 30 s, hier Roundtrip prüfen.
-        unsafe {
-            git2::opts::set_server_connect_timeout_in_milliseconds(30_000).unwrap();
-            assert_eq!(
-                git2::opts::get_server_connect_timeout_in_milliseconds().unwrap(),
-                30_000
-            );
-        }
     }
 
     #[test]
