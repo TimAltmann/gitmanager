@@ -1875,15 +1875,28 @@ impl MyApp {
     ) {
         let result = if stash {
             crate::git::stash_and_checkout(&repo_path, &target_branch)
+                .map(|switch| (switch.outcome, switch.pop_failed))
         } else if force {
-            crate::git::checkout_branch_force(&repo_path, &target_branch)
+            crate::git::checkout_branch_force(&repo_path, &target_branch).map(|o| (o, None))
         } else {
-            crate::git::checkout_branch(&repo_path, &target_branch)
+            crate::git::checkout_branch(&repo_path, &target_branch).map(|o| (o, None))
         };
 
         let lang = self.config.language;
         match result {
-            Ok(outcome) => {
+            Ok((_, Some(pop_failed))) => {
+                // Gewechselt, aber Stash pop gescheitert (Stash bleibt
+                // erhalten): Hinweis im Dialog wie bisher und neu scannen.
+                // Ein MR-Wechsel ist trotzdem erledigt (Meldung, „Danach öffnen“).
+                let hint = pop_failed.to_string();
+                match &mut self.branch_dialog {
+                    Some(dlg) => dlg.error = Some(hint),
+                    None => self.error = Some(hint),
+                }
+                self.start_scan();
+                self.mr_switch_succeeded(&repo_path, &target_branch);
+            }
+            Ok((outcome, None)) => {
                 self.status_message = Some(tr_fmt(
                     lang,
                     "branch_switched",
@@ -1914,11 +1927,6 @@ impl MyApp {
                     self.error = Some(tr_fmt(lang, "branch_switch_failed", &[&detail]));
                     // K1: ohne Dialog kein zweiter Versuch
                     self.cancel_mr_switch(&repo_path, &target_branch);
-                }
-                // Bei stash_and_checkout kann es sein dass stash pop fehlgeschlagen ist, aber checkout ok – dann trotzdem neu scannen
-                // M4: typisiert statt String-Match.
-                if crate::git::is_stash_pop_failed(&e) {
-                    self.start_scan();
                 }
             }
         }

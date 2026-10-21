@@ -1374,6 +1374,43 @@ mod tests {
         settle(&mut app);
     }
 
+    /// „Stash & Switch“, dessen Stash sich danach nicht poppen lässt: der
+    /// Wechsel zählt (MR-Meldung, „Danach öffnen“), der Dialog zeigt wie
+    /// beim normalen Wechsel zusätzlich den Pop-Hinweis.
+    #[test]
+    fn switch_with_failed_stash_pop_still_succeeds() {
+        let dir = tempdir().unwrap();
+        let clone = upstream_and_clone(dir.path());
+        std::fs::write(clone.join("a.txt"), "local\n").unwrap();
+        // Lock-Ordner auf dem Stash-Reflog: Pop scheitert nach dem Wechsel
+        std::fs::create_dir_all(clone.join(".git/logs/refs/stash.lock")).unwrap();
+        let mut info = clone_info(&clone, "main");
+        info.dirty = true;
+        let mut app = app_with(vec![info]);
+        app.start_mr_checkout(switch(&clone, AfterAction::Shell));
+        settle(&mut app);
+        let dlg = app.branch_dialog.as_ref().expect("Dialog");
+        let (path, branch) = (dlg.repo_path.clone(), dlg.target_branch.clone());
+        app.execute_branch_switch(path, branch, false, true);
+        assert_eq!(head_of(&clone), "feature/x");
+        assert!(app.mr_switch.is_none());
+        assert_eq!(
+            app.status_message,
+            Some(format!(
+                "!5 checked out: feature/x in {} – opening shell",
+                clone.display()
+            ))
+        );
+        let hint = app.branch_dialog.as_ref().and_then(|d| d.error.as_deref());
+        assert!(
+            hint.is_some_and(|h| h.contains("Stash bleibt unter stash@{0}")),
+            "{hint:?}"
+        );
+        assert!(app.error.is_none(), "{:?}", app.error);
+        app.close_branch_dialog();
+        settle(&mut app);
+    }
+
     /// Fehler gehen ins Banner (`self.error`, beide Ansichten), ohne Rescan.
     #[test]
     fn checkout_errors_go_to_banner() {

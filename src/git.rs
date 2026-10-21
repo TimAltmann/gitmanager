@@ -1511,9 +1511,8 @@ pub fn checkout_branch_force(path: &Path, branch_name: &str) -> anyhow::Result<C
     switch_branch(path, branch_name, true)
 }
 
-/// M4: typisierter Stash-Pop-Konflikt — statt String-Match
-/// (`contains("Stash pop fehlgeschlagen")`, fragil bei Text/i18n) prüft die
-/// UI via `is_stash_pop_failed()` per Downcast. Display-Text bleibt kompatibel.
+/// M4: typisiert: Stash pop nach erfolgreichem Wechsel gescheitert (Teil von
+/// [`StashSwitch`]); der Display-Text ist der Hinweis im Dialog.
 #[derive(Debug)]
 pub struct StashPopFailed {
     pub detail: String,
@@ -1529,16 +1528,18 @@ impl std::fmt::Display for StashPopFailed {
     }
 }
 
-impl std::error::Error for StashPopFailed {}
-
-/// True wenn `err` ein Stash-Pop-Konflikt nach erfolgreichem Checkout ist
-/// (Checkout ok, Pop gescheitert — Rescan trotzdem sinnvoll).
-pub fn is_stash_pop_failed(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<StashPopFailed>().is_some()
+/// Ergebnis von [`stash_and_checkout`]: der Branch ist gewechselt.
+/// `pop_failed`, wenn sich der Stash danach nicht poppen ließ und erhalten
+/// bleibt – kein `Err`, sonst gälte ein erledigter Wechsel (MR) als
+/// gescheitert.
+#[derive(Debug)]
+pub struct StashSwitch {
+    pub outcome: CheckoutOutcome,
+    pub pop_failed: Option<StashPopFailed>,
 }
 
 /// Stash + Checkout (für Dirty-Dialog Option)
-pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<CheckoutOutcome> {
+pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<StashSwitch> {
     // E15: deterministische Abbrüche (Merge/Rebase, Branch fehlt, anderer
     // Upstream, Worktree) vor dem Stash — sonst liefe das Arbeitsverzeichnis
     // durch Stash + Pop, und `stash_pop` stellt den Index nicht wieder her.
@@ -1571,21 +1572,27 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<Chec
             // Nur poppen wenn tatsächlich gestasht wurde — sonst würde
             // stash_pop(0) einen alten, bewusst aufgehobenen Stash poppen (K1).
             if !stashed {
-                return Ok(outcome);
+                return Ok(StashSwitch {
+                    outcome,
+                    pop_failed: None,
+                });
             }
             // Versuche stash pop, aber ignoriere Konflikte (lasse stash bestehen)
             let mut repo2 = Repository::open(path)
                 .map_err(|e| anyhow::anyhow!("Repo erneut öffnen fehlgeschlagen: {e}"))?;
-            if let Err(e) = repo2.stash_pop(0, None) {
+            let pop_failed = repo2.stash_pop(0, None).err().map(|e| {
                 eprintln!(
                     "Stash pop nach Checkout fehlgeschlagen (Konflikt), Stash bleibt erhalten: {e}"
                 );
                 // Lasse stash bestehen, informiere Nutzer (M4: typisiert).
-                return Err(anyhow::Error::new(StashPopFailed {
+                StashPopFailed {
                     detail: format!("{e}"),
-                }));
-            }
-            Ok(outcome)
+                }
+            });
+            Ok(StashSwitch {
+                outcome,
+                pop_failed,
+            })
         }
         Err(e) => {
             // Checkout fehlgeschlagen → versuche stash wiederherzustellen
@@ -4090,17 +4097,6 @@ mod tests {
     }
 
     #[test]
-    fn stash_pop_failed_typed_detection() {
-        // M4: typisiert statt String-Match.
-        let err = anyhow::Error::new(StashPopFailed {
-            detail: "conflict".to_string(),
-        });
-        assert!(is_stash_pop_failed(&err));
-        let other = anyhow::anyhow!("plain");
-        assert!(!is_stash_pop_failed(&other));
-    }
-
-    #[test]
     fn stash_and_checkout_preserves_on_failure() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path(), "main");
@@ -4528,6 +4524,40 @@ mod tests {
             );
             assert_eq!(head_target(&c1), "refs/heads/main");
         }
+    }
+
+    #[test]
+    fn stash_and_checkout_pop_failure_still_switched() {
+        // Wechsel erledigt, Pop gescheitert: kein Err, sondern `pop_failed`,
+        // der Stash bleibt. Ein Lock-Ordner auf dem Stash-Reflog lässt das
+        // Droppen scheitern (wie eine gesperrte Datei unter Windows).
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let lock = c1.join(".git/logs/refs/stash.lock");
+        fs::create_dir_all(&lock).unwrap();
+        fs::write(c1.join("a.txt"), "local\n").unwrap();
+        let switch = stash_and_checkout(&c1, "feature/x").expect("Wechsel erledigt");
+        assert_eq!(switch.outcome, CheckoutOutcome::Switched);
+        let pop_failed = switch.pop_failed.expect("Pop-Fehler gemeldet");
+        assert!(
+            pop_failed
+                .to_string()
+                .contains("Stash bleibt unter stash@{0}"),
+            "{pop_failed}"
+        );
+        assert_eq!(head_target(&c1), "refs/heads/feature/x");
+        let stash = |dir: &Path| {
+            let repo = Repository::open(dir).unwrap();
+            repo.revparse_single("stash@{0}").map(|o| o.id()).ok()
+        };
+        let kept = stash(&c1).expect("Stash bleibt erhalten");
+        // Ohne Lock zurück: sauber gepoppt, der alte Stash bleibt liegen
+        fs::remove_dir(&lock).unwrap();
+        let switch = stash_and_checkout(&c1, "main").expect("Wechsel erledigt");
+        assert!(switch.pop_failed.is_none(), "{:?}", switch.pop_failed);
+        assert_eq!(head_target(&c1), "refs/heads/main");
+        assert_eq!(fs::read_to_string(c1.join("a.txt")).unwrap(), "local\n");
+        assert_eq!(stash(&c1), Some(kept));
     }
 
     #[test]
