@@ -1019,6 +1019,7 @@ pub(super) mod tests {
     use crate::gitlab::model::{HostStatus, MergeRequest, MyReview, UninvolvedList};
     use crate::gitlab::remote::RemoteInfo;
     use std::path::PathBuf;
+    use std::sync::mpsc;
 
     const HOST: &str = "gitlab.example.com";
     const HOST_B: &str = "git.intern.example";
@@ -1686,11 +1687,16 @@ pub(super) mod tests {
         assert_eq!(app.mr_auth_epoch, 1);
         assert!(app.mr_pending_refresh, "läuft schon → gemerkt");
         glab.inner().push(not_installed());
-        app.mr_tx.send(loaded(0, 5)).expect("send");
+        // Der Worker des Neustarts meldet sich auf dem alten Kanal; der kommt
+        // erst nach der Prüfung zurück (sonst wertet poll_mr beides zugleich aus)
+        let (tx, rx) = mpsc::channel();
+        let worker_rx = std::mem::replace(&mut app.mr_rx, rx);
+        tx.send(loaded(0, 5)).expect("send");
         app.poll_mr(&egui::Context::default());
         assert!(app.mr_snapshot.is_none(), "alte Epoche verworfen");
         assert!(app.mr_loading, "Neustart");
         assert!(!app.mr_pending_refresh);
+        app.mr_rx = worker_rx;
         settle(&mut app);
     }
 
@@ -1708,17 +1714,19 @@ pub(super) mod tests {
         app.bump_mr_auth_epoch();
         assert_eq!(app.mr_more_pending, 1);
         assert!(!app.mr_loading && app.mr_pending_refresh);
-        app.mr_tx
-            .send(MrResult::MorePage {
-                epoch: 0,
+        // Wie oben: der Refresh-Worker antwortet auf dem alten Kanal
+        let (tx, rx) = mpsc::channel();
+        let worker_rx = std::mem::replace(&mut app.mr_rx, rx);
+        tx.send(MrResult::MorePage {
+            epoch: 0,
+            host_key: HOST.to_string(),
+            page: Ok(UninvolvedPage {
                 host_key: HOST.to_string(),
-                page: Ok(UninvolvedPage {
-                    host_key: HOST.to_string(),
-                    mrs: vec![mr(7)],
-                    ..UninvolvedPage::default()
-                }),
-            })
-            .expect("send");
+                mrs: vec![mr(7)],
+                ..UninvolvedPage::default()
+            }),
+        })
+        .expect("send");
         glab.inner().push(not_installed());
         app.poll_mr(&egui::Context::default());
         assert_eq!(app.mr_more_pending, 0);
@@ -1731,6 +1739,7 @@ pub(super) mod tests {
             "alte Seite verworfen"
         );
         assert!(app.mr_loading, "Refresh nach der letzten alten Seite");
+        app.mr_rx = worker_rx;
         settle(&mut app);
     }
 
