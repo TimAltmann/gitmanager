@@ -7,6 +7,7 @@ mod config_parser;
 mod git;
 mod gitlab;
 mod i18n;
+mod process;
 mod scanner;
 mod tray;
 mod tray_service;

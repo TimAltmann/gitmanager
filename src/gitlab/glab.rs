@@ -5,13 +5,13 @@
 //! Kind-Env (E3), nie in argv.
 
 use super::secret::SecretString;
+use crate::process::{self, Keep, Limits, RunError, CREATE_NO_WINDOW};
 use semver::Version;
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex, PoisonError, RwLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::time::Duration;
 
 /// Mindestversion (E18): Keyring als Standard ab 1.111.
 pub const MIN_GLAB_VERSION: Version = Version::new(1, 111, 0);
@@ -21,11 +21,6 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(45);
 pub const MAX_OUTPUT: usize = 16 * 1024 * 1024;
 /// Behaltenes Ende von stderr (für `classify`, Anzeige nur gekürzt).
 const STDERR_KEEP: usize = 8 * 1024;
-/// Abfrageintervall für `try_wait`.
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
-/// Nachlauf für die Pipe-Leser nach dem Exit.
-const PIPE_GRACE: Duration = Duration::from_millis(500);
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Env-Tokens: glab schickt sie an jeden Host (E16). Entfernen bei lokaler
 /// Erkennung, Speichern und Prüfen mit der gespeicherten Anmeldung.
@@ -76,8 +71,9 @@ pub enum StdinBody {
     Secret(SecretString),
 }
 
-impl StdinBody {
-    fn as_bytes(&self) -> &[u8] {
+/// Für den stdin-Thread von `process::finish`.
+impl AsRef<[u8]> for StdinBody {
+    fn as_ref(&self) -> &[u8] {
         match self {
             Self::Json(s) => s.as_bytes(),
             Self::Secret(s) => s.expose().as_bytes(),
@@ -717,11 +713,21 @@ impl GlabRunner for SystemGlab {
             std::io::ErrorKind::NotFound => GlabError::NotFound,
             _ => GlabError::Io(e),
         })?;
-        let (exit, stdout, stderr) = finish(child, stdin, req.timeout)?;
+        // stdout ganz (höchstens `MAX_OUTPUT`), von stderr nur das Ende
+        let limits = Limits {
+            timeout: req.timeout,
+            stdout: Keep::Head(MAX_OUTPUT),
+            stderr: Keep::Tail(STDERR_KEEP),
+        };
+        let out = process::finish(child, stdin, limits).map_err(|e| match e {
+            RunError::Timeout(timeout) => GlabError::Timeout(timeout),
+            RunError::OutputTooLarge => GlabError::OutputTooLarge,
+            RunError::Spawn(e) | RunError::Wait(e) => GlabError::Io(e),
+        })?;
         Ok(GlabOutput::from_raw(
-            exit,
-            &stdout,
-            &stderr,
+            out.status.code().unwrap_or(-1),
+            &out.stdout,
+            &out.stderr,
             req.includes_head(),
         ))
     }
@@ -733,115 +739,6 @@ fn is_real_glab(program: &str) -> bool {
     std::path::Path::new(program)
         .file_stem()
         .is_some_and(|stem| stem.eq_ignore_ascii_case("glab"))
-}
-
-/// Liest stdout und stderr parallel (eine volle Pipe blockiert sonst glab),
-/// schreibt stdin in einem eigenen Thread und wartet höchstens `timeout`;
-/// danach `kill()` und Ernten.
-fn finish(
-    mut child: Child,
-    stdin: Option<StdinBody>,
-    timeout: Duration,
-) -> Result<(i32, Vec<u8>, Vec<u8>), GlabError> {
-    let deadline = Instant::now() + timeout;
-    let stdout = read_pipe(child.stdout.take(), Keep::Head(MAX_OUTPUT));
-    let stderr = read_pipe(child.stderr.take(), Keep::Tail(STDERR_KEEP));
-    if let (Some(mut pipe), Some(body)) = (child.stdin.take(), stdin) {
-        std::thread::spawn(move || {
-            // Endet glab vor dem Lesen, scheitert das Schreiben (BrokenPipe);
-            // dann zählen Exit-Code und stderr. Drop schließt stdin (EOF).
-            let _ = pipe.write_all(body.as_bytes());
-        });
-    }
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
-            Ok(None) => {
-                kill_and_reap(&mut child);
-                return Err(GlabError::Timeout(timeout));
-            }
-            Err(e) => {
-                kill_and_reap(&mut child);
-                return Err(GlabError::Io(e));
-            }
-        }
-    };
-    // Ein Enkelprozess mit geerbter Pipe darf den Aufruf nicht über den
-    // Timeout hinaus festhalten.
-    let wait = deadline
-        .saturating_duration_since(Instant::now())
-        .max(PIPE_GRACE);
-    let out = stdout
-        .recv_timeout(wait)
-        .map_err(|_| GlabError::Timeout(timeout))?;
-    let err = stderr.recv_timeout(PIPE_GRACE).unwrap_or_default();
-    if out.overflow {
-        return Err(GlabError::OutputTooLarge);
-    }
-    Ok((status.code().unwrap_or(-1), out.bytes, err.bytes))
-}
-
-fn kill_and_reap(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-/// Was ein Pipe-Leser behält.
-#[derive(Clone, Copy)]
-enum Keep {
-    /// Anfang bis zur Grenze; mehr Daten → Abbruch (`overflow`)
-    Head(usize),
-    /// Nur das Ende; alles wird gelesen
-    Tail(usize),
-}
-
-#[derive(Default)]
-struct PipeData {
-    bytes: Vec<u8>,
-    overflow: bool,
-}
-
-/// Liest eine Pipe in einem eigenen Thread; das Ergebnis kommt über den Kanal.
-fn read_pipe<R: Read + Send + 'static>(pipe: Option<R>, keep: Keep) -> mpsc::Receiver<PipeData> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut data = PipeData::default();
-        if let Some(mut pipe) = pipe {
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = match pipe.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
-                };
-                match keep {
-                    Keep::Head(limit) => {
-                        let room = limit - data.bytes.len();
-                        data.bytes.extend_from_slice(&buf[..n.min(room)]);
-                        if n > room {
-                            // Pipe schließen: glab bekommt EPIPE und endet.
-                            data.overflow = true;
-                            break;
-                        }
-                    }
-                    Keep::Tail(limit) => {
-                        data.bytes.extend_from_slice(&buf[..n]);
-                        if data.bytes.len() > 2 * limit {
-                            data.bytes.drain(..data.bytes.len() - limit);
-                        }
-                    }
-                }
-            }
-            if let Keep::Tail(limit) = keep {
-                let excess = data.bytes.len().saturating_sub(limit);
-                data.bytes.drain(..excess);
-            }
-        }
-        let _ = tx.send(data);
-    });
-    rx
 }
 
 /// Aktueller PATH aus der Registry (Windows): Ein GUI- oder Autostart-
@@ -990,6 +887,7 @@ pub mod fake {
     use super::*;
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::MutexGuard;
+    use std::time::Instant;
 
     /// Platzhalter für Secrets im protokollierten Env.
     pub const SECRET_SHOWN: &str = "***";
@@ -2116,6 +2014,7 @@ mod tests {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
         use std::path::{Path, PathBuf};
+        use std::time::Instant;
 
         const STUB: &str = r#"#!/bin/sh
 printf 'ARGV:%s\n' "$*" >&2

@@ -1,5 +1,6 @@
 use crate::gitlab::checkout::MrCheckoutPlan;
 use crate::gitlab::remote::RemoteInfo;
+use crate::process::{self, Keep, Limits, CREATE_NO_WINDOW};
 use git2::{BranchType, Repository, StatusOptions};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -724,17 +725,22 @@ const GIT_CLI_FETCH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const GIT_CLI_WORKTREE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Ein Klon über eine langsame Leitung darf länger dauern.
 const GIT_CLI_CLONE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-/// Nachlauf für die Pipe-Leser nach dem Exit: ein Enkelprozess (ssh) mit
-/// geerbter Pipe darf den Aufruf nicht festhalten.
-const GIT_CLI_PIPE_GRACE: Duration = Duration::from_secs(1);
+/// Behaltenes Ende von stdout/stderr: nur fürs Log, die Fehlermeldung steht
+/// am Ende.
+const GIT_CLI_OUTPUT_KEEP: usize = 8 * 1024;
 
 /// System-`git` ohne Konsolenfenster und ohne Terminal-Prompt, höchstens
 /// `timeout` lang (danach `kill`). `Ok` nur bei Exit-Code 0, sonst `Err`
 /// mit stderr/stdout (nur fürs Log, siehe [`fetch_with_git_cli`]).
 fn run_git_cli(args: &[&str], what: &str, timeout: Duration) -> anyhow::Result<()> {
-    let out = output_with_timeout(&mut git_cli_command(args), timeout)
+    let limits = Limits {
+        timeout,
+        stdout: Keep::Tail(GIT_CLI_OUTPUT_KEEP),
+        stderr: Keep::Tail(GIT_CLI_OUTPUT_KEEP),
+    };
+    let out = process::output(&mut git_cli_command(args), limits)
         .map_err(|e| anyhow::anyhow!("git {what} {e}"))?;
-    if out.success {
+    if out.status.success() {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -765,69 +771,8 @@ fn git_cli_command(args: &[&str]) -> std::process::Command {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    set_creation_flags(&mut cmd, 0x08000000);
+    set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
     cmd
-}
-
-/// Ergebnis von [`output_with_timeout`].
-struct CliOutput {
-    success: bool,
-    status: std::process::ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-/// Wie `Command::output`, aber höchstens `timeout`: danach wird der Prozess
-/// beendet und geerntet (`Err`). stdout/stderr lesen eigene Threads (kein
-/// Pipe-Stau); nach dem Exit wartet der Aufruf höchstens
-/// `GIT_CLI_PIPE_GRACE` auf sie (Enkelprozess mit geerbter Pipe).
-fn output_with_timeout(
-    cmd: &mut std::process::Command,
-    timeout: Duration,
-) -> Result<CliOutput, String> {
-    let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
-    let stdout = read_pipe_async(child.stdout.take());
-    let stderr = read_pipe_async(child.stderr.take());
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("timed out after {timeout:?}"));
-            }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("wait failed: {e}"));
-            }
-        }
-    };
-    Ok(CliOutput {
-        success: status.success(),
-        status,
-        stdout: stdout.recv_timeout(GIT_CLI_PIPE_GRACE).unwrap_or_default(),
-        stderr: stderr.recv_timeout(GIT_CLI_PIPE_GRACE).unwrap_or_default(),
-    })
-}
-
-/// Liest eine Pipe bis EOF in einem eigenen Thread.
-fn read_pipe_async<R: std::io::Read + Send + 'static>(
-    pipe: Option<R>,
-) -> std::sync::mpsc::Receiver<Vec<u8>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        let _ = tx.send(buf);
-    });
-    rx
 }
 
 /// Strukturierter Fetch-Fehler (alle Remotes failed UND partielle Fehlschläge).
@@ -2557,7 +2502,7 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
         let mut cmd = std::process::Command::new(prog);
         cmd.args(args);
         cmd.current_dir(repo_path);
-        set_creation_flags(&mut cmd, 0x08000000);
+        set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
         cmd.spawn()
     };
 
@@ -2615,7 +2560,7 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
                 let mut cmd = std::process::Command::new("cmd");
                 cmd.args(&shell_args);
                 cmd.current_dir(repo_path);
-                set_creation_flags(&mut cmd, 0x08000000);
+                set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
                 cmd.spawn().map(|_| ()).map_err(|e2| {
                     anyhow::anyhow!(
                         "IDE nicht gefunden (weder '{}' noch 'cmd /C'): {} / {}",
@@ -2726,7 +2671,7 @@ fn spawn_cmd_shell(repo_str: &str, repo_path: &Path) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new("cmd");
     cmd.args(["/C", "start", "", "/D", repo_str, "cmd", "/K", ""]);
     cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, 0x08000000);
+    set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
     cmd.spawn()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("cmd starten fehlgeschlagen: {e}"))
@@ -2737,7 +2682,7 @@ fn spawn_cmd(agent_string: &str, repo_str: &str, repo_path: &Path) -> anyhow::Re
     let mut cmd = std::process::Command::new("cmd");
     cmd.args(["/C", "start", "", "/D", repo_str, "cmd", "/K", agent_string]);
     cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, 0x08000000);
+    set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
     cmd.spawn()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("cmd starten fehlgeschlagen: {e}"))
@@ -2853,51 +2798,6 @@ mod tests {
             key == "GIT_TERMINAL_PROMPT" && value == Some(std::ffi::OsStr::new("0"))
         }));
         assert_eq!(cmd.get_program(), "git");
-    }
-
-    /// Ein hängender Prozess endet nach dem Timeout (`kill`) mit Fehler,
-    /// statt den Worker samt Ref-Lock für immer zu halten; ein Enkelprozess
-    /// mit geerbter Pipe hält den Aufruf nach dem Exit nicht fest.
-    #[cfg(unix)]
-    #[test]
-    fn git_cli_output_is_bounded() {
-        let sh = |script: &str| {
-            let mut cmd = std::process::Command::new("sh");
-            cmd.args(["-c", script])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            cmd
-        };
-        let start = Instant::now();
-        let err = output_with_timeout(&mut sh("sleep 5"), Duration::from_millis(200))
-            .err()
-            .expect("Timeout");
-        assert!(err.starts_with("timed out after"), "{err}");
-        assert!(
-            start.elapsed() < Duration::from_secs(4),
-            "{:?}",
-            start.elapsed()
-        );
-
-        let start = Instant::now();
-        let out = output_with_timeout(
-            &mut sh("echo fehler >&2; sleep 5 & exit 3"),
-            Duration::from_secs(20),
-        )
-        .expect("beendet");
-        assert!(!out.success);
-        assert_eq!(out.status.code(), Some(3));
-        assert!(
-            start.elapsed() < Duration::from_secs(4),
-            "{:?}",
-            start.elapsed()
-        );
-
-        let out = output_with_timeout(&mut sh("echo ok; echo warn >&2"), Duration::from_secs(20))
-            .expect("beendet");
-        assert!(out.success);
-        assert_eq!(out.stdout, b"ok\n");
-        assert_eq!(out.stderr, b"warn\n");
     }
 
     fn init_repo_with_commit(dir: &Path, branch: &str) -> Repository {
