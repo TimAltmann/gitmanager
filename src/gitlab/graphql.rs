@@ -484,8 +484,9 @@ fn project_mrs(after: Option<&str>) -> Field {
         .opt_arg("not", "{authorUsername: $me}")
 }
 
-/// Pfade ohne Dubletten; GitLab vergleicht ohne Groß-/Kleinschreibung.
-fn unique_paths(paths: &[String]) -> Vec<String> {
+/// Pfade ohne Dubletten, Reihenfolge bleibt; GitLab vergleicht ohne
+/// Groß-/Kleinschreibung.
+pub(super) fn unique_paths(paths: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
     paths
         .iter()

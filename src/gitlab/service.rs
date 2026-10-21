@@ -6,12 +6,12 @@
 
 use super::glab::{
     classify, glab_version, EnvValue, GlabErrorKind, GlabOutput, GlabRequest, GlabRunner,
-    StdinBody, CI_ENV, DEFAULT_TIMEOUT, TOKEN_ENV,
+    StdinBody, CI_ENV, DEFAULT_TIMEOUT, SECRET_ENV, TOKEN_ENV,
 };
 use super::graphql::{
     self, parse_access, parse_dashboard, parse_mentions, parse_merged, parse_uninvolved,
-    parse_uninvolved_page, run_query, run_query_with, GqlData, HostSchema, MergedPage, ProjectMrs,
-    ProjectNode, SchemaErrorCode, UserNode,
+    parse_uninvolved_page, run_query, run_query_with, unique_paths, GqlData, HostSchema,
+    MergedPage, ProjectMrs, ProjectNode, SchemaErrorCode, UserNode,
 };
 use super::model::{
     build_snapshot, sort_uninvolved, HostRaw, HostStatus, MergeRequest, MergedHostPage, MrPart,
@@ -28,9 +28,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-/// Env-Tokens in glabs Reihenfolge (`GITLAB_TOKEN` vor `GITLAB_ACCESS_TOKEN`
-/// vor `OAUTH_TOKEN`); glab schickt sie an jeden Host.
-const ENV_TOKENS: [&str; 3] = ["GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN"];
 /// Beim Prüfen eines neuen Tokens entfernt; `GITLAB_TOKEN` setzt die Prüfung
 /// selbst (als `EnvValue::Secret`).
 const VERIFY_ENV_REMOVE: [&str; 3] = ["GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "GLAB_IS_OAUTH2"];
@@ -1282,16 +1279,6 @@ fn token_kind(info: &SelfInfo, bot: Option<bool>, env_var: Option<&'static str>)
     }
 }
 
-/// Pfade ohne Dubletten (ohne Groß-/Kleinschreibung), Reihenfolge bleibt.
-fn unique_paths(paths: &[String]) -> Vec<String> {
-    let mut seen = HashSet::new();
-    paths
-        .iter()
-        .filter(|p| seen.insert(p.to_lowercase()))
-        .cloned()
-        .collect()
-}
-
 fn unknown_access(paths: &[String]) -> Vec<ProjectAccess> {
     unique_paths(paths)
         .into_iter()
@@ -1644,7 +1631,7 @@ pub fn env_token_override() -> Option<&'static str> {
 }
 
 fn env_token_in(lookup: impl Fn(&str) -> Option<OsString>) -> Option<&'static str> {
-    ENV_TOKENS
+    SECRET_ENV
         .into_iter()
         .find(|key| lookup(key).is_some_and(|v| !v.is_empty()))
 }

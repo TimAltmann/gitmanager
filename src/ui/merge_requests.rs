@@ -24,7 +24,7 @@ use crate::gitlab::model::{
 use crate::gitlab::remote::{HostMap, LocalProject};
 use crate::gitlab::service::{error_text, is_auth_error};
 use crate::gitlab::time::{format_date, relative_time};
-use crate::i18n::{tr, tr_fmt, Language};
+use crate::i18n::{count_text, tr, tr_fmt, Language};
 use crate::ui::theme::{mr_palette, MrPalette};
 use egui::{
     vec2, Align, Align2, Atoms, Button, Color32, ComboBox, CursorIcon, FontId, Frame, Id, Image,
@@ -342,15 +342,6 @@ pub fn after_preselection(cfg: &MrConfig) -> &AfterAction {
     match &cfg.after_checkout_default {
         AfterCheckoutPref::Fixed(action) => action,
         AfterCheckoutPref::LastUsed => &cfg.after_checkout_last,
-    }
-}
-
-/// Einzahl/Mehrzahl über getrennte Schlüssel (`…_one` ohne Platzhalter).
-fn count_text(lang: Language, n: usize, one: &str, many: &str) -> String {
-    if n == 1 {
-        tr(lang, one)
-    } else {
-        tr_fmt(lang, many, &[&n.to_string()])
     }
 }
 

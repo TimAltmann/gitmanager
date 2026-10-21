@@ -25,7 +25,7 @@ use crate::gitlab::service::{
     GlabRights, HostProbe, Protocol, SavedWhere, TokenCheck, TokenKind, TokenSource,
 };
 use crate::gitlab::time::format_date;
-use crate::i18n::{tr, tr_fmt, Language};
+use crate::i18n::{count_text, tr, tr_fmt, Language};
 use crate::ui::theme::{mr_palette, MrPalette};
 use egui::text_edit::TextEditState;
 use egui::{
@@ -903,14 +903,6 @@ fn after_options(lang: Language, cfg: &AppConfig) -> Vec<(AfterCheckoutPref, Str
 fn fmt(lang: Language, key: &str, args: &[String]) -> String {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     tr_fmt(lang, key, &args)
-}
-
-fn count_text(lang: Language, n: usize, one: &str, many: &str) -> String {
-    if n == 1 {
-        tr(lang, one)
-    } else {
-        tr_fmt(lang, many, &[&n.to_string()])
-    }
 }
 
 // --- Tab ----------------------------------------------------------------------

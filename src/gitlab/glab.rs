@@ -32,8 +32,10 @@ pub const TOKEN_ENV: [&str; 4] = [
 ];
 /// Bei `auth login` zusätzlich: CI-Variablen erzwingen Klartext-Speicherung.
 pub const CI_ENV: [&str; 2] = ["CI", "GITLAB_CI"];
-/// Env-Variablen mit einem Token als Wert: nur als `EnvValue::Secret`.
-const SECRET_ENV: [&str; 3] = ["GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN"];
+/// Env-Variablen mit einem Token als Wert, in glabs Reihenfolge
+/// (`GITLAB_TOKEN` vor `GITLAB_ACCESS_TOKEN` vor `OAUTH_TOKEN`): glab
+/// schickt sie an jeden Host; im Kind nur als `EnvValue::Secret`.
+pub const SECRET_ENV: [&str; 3] = ["GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN"];
 /// Immer gesetzt: keine Rückfragen, kein Update-Check, keine Telemetrie,
 /// keine Hinweise, keine Farben.
 const ENV_SET: [(&str, &str); 6] = [

@@ -1179,6 +1179,16 @@ pub fn tr_fmt(lang: Language, key: &str, args: &[&str]) -> String {
     s
 }
 
+/// Einzahl/Mehrzahl über getrennte Schlüssel: `one` ohne Platzhalter,
+/// `many` mit `{}` für die Anzahl.
+pub fn count_text(lang: Language, n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        tr(lang, one)
+    } else {
+        tr_fmt(lang, many, &[&n.to_string()])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
