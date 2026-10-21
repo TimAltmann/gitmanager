@@ -486,7 +486,7 @@ fn libgit2_fetch(
 
 /// Obergrenzen für Verbindungen von libgit2 (Fetch, Klon): ohne sie wartet
 /// eine hängende Verbindung (VPN weg, halb offene TCP-Verbindung) für immer
-/// und hält den Worker und damit den Ref-Lock (`scanning`, K1) für die
+/// und hält den Worker und damit den Ref-Lock (`git_busy`, K1) für die
 /// ganze Sitzung, wie bei System-`git` (`GIT_CLI_FETCH_TIMEOUT`). Die
 /// Stille gilt je Lese- oder Schreibaufruf, nicht für den ganzen Transfer:
 /// Ein langer Klon, der Daten bekommt, läuft weiter (der Server meldet auch
@@ -789,7 +789,7 @@ pub fn fetch_with_git_cli(
 /// Obergrenzen für System-`git`: ein Prompt, den niemand sieht (SSH-
 /// Passphrase ohne Agent auf der versteckten Konsole von
 /// `CREATE_NO_WINDOW`), hielte sonst den Worker und damit den Ref-Lock
-/// (`scanning`, K1) für die ganze Sitzung.
+/// (`git_busy`, K1) für die ganze Sitzung.
 const GIT_CLI_FETCH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// `worktree add` checkt aus (ggf. mit LFS-Filtern).
 const GIT_CLI_WORKTREE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
