@@ -307,7 +307,7 @@ impl MyApp {
     /// `append` die nächste Seite je Host. Nur angemeldete Hosts ohne
     /// Fehler; ein neuer Abruf macht laufende ungültig (Generation).
     fn start_mr_merged(&mut self, append: bool) {
-        if self.mr_glab_missing || (append && self.mr_merged_loading) {
+        if self.mr_glab_missing || (append && self.mr_merged_loading.is_some()) {
             return;
         }
         let Some(snap) = self.mr_snapshot.as_deref() else {
@@ -351,11 +351,11 @@ impl MyApp {
             if !append {
                 // Kein angemeldeter Host: leer statt „wird geladen“
                 self.mr_merged = Some(MergedList::new(days, since));
-                self.mr_merged_loading = false;
+                self.mr_merged_loading = None;
             }
             return;
         }
-        self.mr_merged_loading = true;
+        self.mr_merged_loading = Some(days);
         let runner = Arc::clone(&self.glab);
         let tx = self.mr_tx.clone();
         let (epoch, gen) = (self.mr_auth_epoch, self.mr_merged_gen);
@@ -393,7 +393,7 @@ impl MyApp {
         if epoch != self.mr_auth_epoch || gen != self.mr_merged_gen {
             return;
         }
-        self.mr_merged_loading = false;
+        self.mr_merged_loading = None;
         // Zeitraum inzwischen zurückgestellt: geladene Liste behalten
         let shown = self.mr_merged.as_ref().map(|l| l.days);
         if days != self.mr_view.merged_days && shown == Some(self.mr_view.merged_days) {
@@ -445,7 +445,7 @@ impl MyApp {
         self.mr_auth_epoch = self.mr_auth_epoch.wrapping_add(1);
         // „Gemergt“ gehört zur alten Anmeldung; neu nach dem Abruf
         self.mr_merged = None;
-        self.mr_merged_loading = false;
+        self.mr_merged_loading = None;
         self.start_mr_refresh();
     }
 
@@ -478,7 +478,7 @@ impl MyApp {
         if self.mr_loading
             || self.mr_discovering
             || self.mr_more_pending > 0
-            || self.mr_merged_loading
+            || self.mr_merged_loading.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -740,8 +740,11 @@ impl MyApp {
                 uninvolved_loading: self.mr_more_pending > 0
                     || (self.mr_loading && self.mr_view.show_uninvolved),
                 merged: self.mr_merged.as_ref(),
-                merged_loading: self.mr_merged_loading
-                    || (self.mr_loading && self.mr_view.mine_merged),
+                // Nach dem Abruf folgt „Gemergt“ für den gewählten Zeitraum
+                merged_loading: self.mr_merged_loading.or_else(|| {
+                    (self.mr_loading && self.mr_view.mine_merged)
+                        .then_some(self.mr_view.merged_days)
+                }),
                 glab_error: self.mr_glab_error.as_ref(),
                 discovering: self.git_busy.scans_repos() || self.mr_discovering,
                 repos: &self.repos,
@@ -1178,7 +1181,7 @@ pub(super) mod tests {
             if !app.mr_loading
                 && !app.mr_discovering
                 && app.mr_more_pending == 0
-                && !app.mr_merged_loading
+                && app.mr_merged_loading.is_none()
             {
                 return;
             }
@@ -1871,11 +1874,11 @@ pub(super) mod tests {
             ..MrViewActions::default()
         };
         app.handle_mr_actions(&egui::Context::default(), actions);
-        assert!(app.mr_merged_loading);
+        assert_eq!(app.mr_merged_loading, Some(7));
         // Ergebnis eines älteren Abrufs (andere Generation) zählt nicht
         let stale = app.mr_merged_gen.wrapping_sub(1);
         app.on_mr_merged((app.mr_auth_epoch, stale, false), 7, 0, Vec::new());
-        assert!(app.mr_merged_loading && app.mr_merged.is_none());
+        assert!(app.mr_merged_loading.is_some() && app.mr_merged.is_none());
         settle(&mut app);
         let list = app.mr_merged.as_ref().expect("Gemergt geladen");
         assert_eq!(list.days, 7);
@@ -1888,7 +1891,64 @@ pub(super) mod tests {
         // Neue Anmeldung: alter Stand „Gemergt“ entfällt
         // (ohne GitLab-Host startet kein neuer Abruf)
         app.bump_mr_auth_epoch();
-        assert!(app.mr_merged.is_none() && !app.mr_merged_loading);
+        assert!(app.mr_merged.is_none() && app.mr_merged_loading.is_none());
+    }
+
+    /// Umschalten auf „Gemergt“ (30 Tage laden), gleich danach 90 Tage
+    /// gewählt: die Ansicht fordert 90 Tage an (`needs_merged`), das spätere
+    /// Ergebnis für 30 Tage wird verworfen, geladen und gezeigt werden 90.
+    #[test]
+    fn merged_period_change_while_loading_loads_new_period() {
+        use crate::gitlab::remote::LocalProject;
+        use crate::gitlab::time::format_rfc3339;
+        let (mut app, glab) = fake_app();
+        app.mr_snapshot = Some(Box::new(MrSnapshot {
+            per_host: vec![host_status(HOST)],
+            ..MrSnapshot::default()
+        }));
+        app.mr_locals = vec![LocalProject {
+            host_key: HOST.to_string(),
+            full_path: "group/app".to_string(),
+            repos: Vec::new(),
+            included: true,
+        }];
+        let page = serde_json::json!({ "data": { "currentUser": { "username": "taltmann",
+            "authoredMergeRequests": {
+                "count": 1,
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [{ "id": "gid://gitlab/MergeRequest/7", "iid": "7",
+                            "project": { "fullPath": "group/app" },
+                            "mergedAt": format_rfc3339(now_unix() - 3600) }]
+            } } } });
+        // Eine Antwort je Abruf (30 und 90 Tage)
+        for _ in 0..2 {
+            glab.inner().push(FakeReply::http(200, &page.to_string()));
+        }
+        let ctx = egui::Context::default();
+        let fetch = || MrViewActions {
+            fetch_merged: true,
+            ..MrViewActions::default()
+        };
+        app.mr_view.mine_merged = true;
+        app.mr_view.merged_days = 30;
+        app.handle_mr_actions(&ctx, fetch());
+        assert_eq!(app.mr_merged_loading, Some(30));
+        let (epoch, gen_30) = (app.mr_auth_epoch, app.mr_merged_gen);
+        app.mr_view.merged_days = 90;
+        app.handle_mr_actions(&ctx, fetch());
+        assert_eq!(app.mr_merged_loading, Some(90));
+        // Der Abruf für 30 Tage endet zuerst: weder Liste noch Ende des Ladens
+        let since = now_unix() - 30 * 86_400;
+        app.on_mr_merged((epoch, gen_30, false), 30, since, Vec::new());
+        assert!(app.mr_merged.is_none());
+        assert_eq!(app.mr_merged_loading, Some(90));
+        settle(&mut app);
+        let list = app.mr_merged.as_ref().expect("90 Tage geladen");
+        assert_eq!(list.days, 90);
+        assert_eq!(
+            list.mrs.iter().map(|m| m.mr.iid).collect::<Vec<_>>(),
+            vec![7]
+        );
     }
 
     /// K1: Auschecken und „Bereits ausgecheckt“ aus der Ansicht landen bei

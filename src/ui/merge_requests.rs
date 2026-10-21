@@ -225,8 +225,9 @@ pub struct MrViewInput<'a> {
     pub uninvolved_loading: bool,
     /// Zuletzt geladene gemergte MRs (Zeitraum in `MergedList::days`)
     pub merged: Option<&'a MergedList>,
-    /// „Gemergt“ (erste oder weitere Seite) wird geladen
-    pub merged_loading: bool,
+    /// Zeitraum (Tage), für den „Gemergt“ (erste oder weitere Seite)
+    /// geladen wird; `None` = kein Abruf
+    pub merged_loading: Option<u32>,
     /// glab fehlt (`NotInstalled`) oder ist zu alt (`TooOld`)
     pub glab_error: Option<&'a GlabErrorKind>,
     /// Scan oder lokale glab-Erkennung (E16) läuft noch: ohne GitLab-Host
@@ -860,9 +861,11 @@ fn current_merged<'a>(v: &View<'a>, state: &MrViewState) -> Option<&'a MergedLis
     v.input.merged.filter(|l| l.days == state.merged_days)
 }
 
-/// „Gemergt“ muss (neu) geladen werden: noch nichts oder anderer Zeitraum.
+/// „Gemergt“ muss (neu) geladen werden: noch nichts oder anderer Zeitraum,
+/// und es lädt nicht schon dieser (ein Abruf für einen anderen Zeitraum
+/// zählt nicht).
 fn needs_merged(v: &View, state: &MrViewState) -> bool {
-    current_merged(v, state).is_none() && !v.input.merged_loading
+    current_merged(v, state).is_none() && v.input.merged_loading != Some(state.merged_days)
 }
 
 fn visible_mine<'a>(v: &View<'a>, query: &str) -> Vec<&'a MergeRequest> {
@@ -1140,7 +1143,7 @@ fn mine_body(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrVie
 /// weitere laden“.
 fn merged_body(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrViewActions) {
     let (lang, p) = (v.lang(), &v.p);
-    let loading = v.input.merged_loading;
+    let loading = v.input.merged_loading.is_some();
     let Some(list) = current_merged(v, state) else {
         if loading {
             loading_line(ui, v, &tr(lang, "mr_loading_merged"));
@@ -3816,7 +3819,7 @@ mod tests {
                     snapshot: Some(&snap),
                     uninvolved_loading: false,
                     merged: None,
-                    merged_loading: false,
+                    merged_loading: None,
                     glab_error: None,
                     discovering: false,
                     repos: &repos,
@@ -3873,7 +3876,7 @@ mod tests {
                     snapshot,
                     uninvolved_loading: true,
                     merged: None,
-                    merged_loading: false,
+                    merged_loading: None,
                     glab_error,
                     discovering: false,
                     repos: &repos,
@@ -3979,7 +3982,7 @@ mod tests {
             snapshot: Some(&snap),
             uninvolved_loading: false,
             merged: Some(&merged),
-            merged_loading: false,
+            merged_loading: None,
             glab_error: None,
             discovering: false,
             repos: &repos,
@@ -4029,7 +4032,7 @@ mod tests {
         // Ohne Stand „Gemergt“, Abruf läuft: Spinner
         let loading = MrViewInput {
             merged: None,
-            merged_loading: true,
+            merged_loading: Some(MERGED_DEFAULT_DAYS),
             ..input
         };
         let mut state = MrViewState::new(&cfg);
@@ -4055,7 +4058,7 @@ mod tests {
             snapshot: Some(&snap),
             uninvolved_loading: false,
             merged: Some(&merged),
-            merged_loading: false,
+            merged_loading: None,
             glab_error: None,
             discovering: false,
             repos: &repos,
@@ -4113,6 +4116,72 @@ mod tests {
         assert_eq!(uninvolved_hits(&view, &state), 0);
     }
 
+    /// Zeitraum gewechselt, während „Gemergt“ noch lädt: der Abruf für den
+    /// alten Zeitraum verdeckt den neuen nicht, er wird sofort angefordert.
+    #[test]
+    fn merged_period_change_while_loading_requests_new_period() {
+        let snap = sample_snapshot();
+        let repos = sample_repos();
+        let hosts = sample_hosts(&repos);
+        let cfg = MrConfig::default();
+        let locals = crate::gitlab::remote::local_projects(&repos, &hosts, &cfg);
+        let shown = sample_merged(&locals, &cfg);
+        let theme = crate::config::Theme::Dark;
+        let input = MrViewInput {
+            lang: Language::De,
+            theme: &theme,
+            cfg: &cfg,
+            snapshot: Some(&snap),
+            uninvolved_loading: false,
+            merged: None,
+            merged_loading: None,
+            glab_error: None,
+            discovering: false,
+            repos: &repos,
+            hosts: &hosts,
+            locals: &locals,
+            agents: &[],
+            ide: None,
+            ide_for: &vscode_for,
+            lookup: MenuLookup {
+                mru: &mru,
+                exists: &never_exists,
+            },
+            now: NOW,
+        };
+        // (geladene Liste, Zeitraum des laufenden Abrufs, gewählter Zeitraum)
+        let needs = |merged: Option<&MergedList>, loading: Option<u32>, days: u32| {
+            let input = MrViewInput {
+                merged,
+                merged_loading: loading,
+                ..input
+            };
+            let view = View {
+                input: &input,
+                p: mr_palette(&theme, &egui::Visuals::dark()),
+                snap: &snap,
+                open: OpenBranches::from_snapshot(&snap),
+                multi_host: false,
+                has_data: true,
+            };
+            let mut state = MrViewState::new(&cfg);
+            state.mine_merged = true;
+            state.merged_days = days;
+            needs_merged(&view, &state)
+        };
+        // Umschalten auf „Gemergt“: 30 Tage laden
+        assert!(needs(None, None, 30));
+        // Gleich danach 90 Tage gewählt: der laufende Abruf gilt 30 Tagen
+        assert!(needs(None, Some(30), 90));
+        // Kein zweiter Abruf für den Zeitraum, der schon lädt
+        assert!(!needs(None, Some(30), 30));
+        assert!(!needs(None, Some(90), 90));
+        // Zurück auf die geladenen 30 Tage, während 90 laden: Liste reicht
+        assert_eq!(shown.days, 30);
+        assert!(!needs(Some(&shown), Some(90), 30));
+        assert!(needs(Some(&shown), Some(30), 7));
+    }
+
     #[test]
     fn uninvolved_spinner_only_while_loading() {
         // Host nicht erreichbar: der Abruf endet vor „Nicht beteiligt“, ohne
@@ -4134,7 +4203,7 @@ mod tests {
                 snapshot: Some(&snap),
                 uninvolved_loading: loading,
                 merged: None,
-                merged_loading: false,
+                merged_loading: None,
                 glab_error: None,
                 discovering: false,
                 repos: &repos,
@@ -4180,7 +4249,7 @@ mod tests {
             snapshot: Some(&snap),
             uninvolved_loading: false,
             merged: None,
-            merged_loading: false,
+            merged_loading: None,
             glab_error: None,
             discovering: false,
             repos: &repos,
@@ -4264,7 +4333,7 @@ mod tests {
             snapshot: Some(&snap),
             uninvolved_loading: false,
             merged: None,
-            merged_loading: false,
+            merged_loading: None,
             glab_error: None,
             discovering: false,
             repos: &repos,

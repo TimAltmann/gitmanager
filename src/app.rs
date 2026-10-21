@@ -380,7 +380,8 @@ pub struct MyApp {
     mr_more_pending: usize,
     /// Eigene gemergte MRs (Umschalter „Gemergt“); `None` = nicht geladen
     mr_merged: Option<MergedList>,
-    mr_merged_loading: bool,
+    /// Zeitraum (Tage) des laufenden Abrufs „Gemergt“; `None` = keiner
+    mr_merged_loading: Option<u32>,
     /// Zählt neue Abrufe „Gemergt“; Ergebnisse älterer werden verworfen
     mr_merged_gen: u64,
     mr_tx: Sender<MrResult>,
@@ -496,7 +497,7 @@ impl MyApp {
             mr_discovering: false,
             mr_more_pending: 0,
             mr_merged: None,
-            mr_merged_loading: false,
+            mr_merged_loading: None,
             mr_merged_gen: 0,
             mr_tx,
             mr_rx,
@@ -3041,7 +3042,7 @@ mod tests {
             mr_discovering: false,
             mr_more_pending: 0,
             mr_merged: None,
-            mr_merged_loading: false,
+            mr_merged_loading: None,
             mr_merged_gen: 0,
             mr_tx,
             mr_rx,
