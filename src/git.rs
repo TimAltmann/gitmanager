@@ -531,15 +531,57 @@ fn with_fetch_retries(
     }
 }
 
-/// Abbruch in der SSH-, Netzwerk- oder OS-Schicht (Verbindung getrennt,
-/// Timeout, Lock-Datei eines gleichzeitigen Fetches), der beim nächsten
-/// Versuch meist weg ist. Ein abgelehntes Login ist endgültig: über HTTP
-/// (`code=Auth`) und wenn der Credential-Callback alles probiert hat
-/// (`class=Callback`, [`CredState::exhausted`]).
+/// Abbruch, der beim nächsten Versuch meist weg ist: Die Verbindung steht
+/// und reißt dann ab (Reset, Timeout, vorzeitiges Ende; bei SSH auch schon
+/// im Handshake), ein Gateway meldet 502/503/504, oder ein gleichzeitiger
+/// Fetch hält eine Lock-Datei.
+///
+/// Endgültig, also ohne weitere Versuche (die bei SSH nur weitere
+/// Fehlversuche beim Server erzeugen): jedes abgelehnte Login (`code=Auth`,
+/// auch „remote rejected authentication: Failed getting response“, wenn der
+/// Server nach zu vielen Fehlversuchen trennt, und
+/// [`CredState::exhausted`]) und ein Abbruch während der Anmeldung,
+/// Host-Key und Zertifikat, DNS-Fehler, Connect-Timeout und abgewiesene
+/// Verbindung (offline) sowie Antworten des Servers (401/403/404, „project
+/// not found“). Geprüft werden nur die Texte von libgit2 selbst; was
+/// libssh2 oder Windows dahinter anhängen, ist nicht stabil (lokalisiert).
 fn is_transient_fetch_error(e: &git2::Error) -> bool {
+    use git2::{ErrorClass, ErrorCode};
+    match e.code() {
+        ErrorCode::Auth | ErrorCode::Certificate | ErrorCode::User => return false,
+        ErrorCode::Timeout | ErrorCode::Locked => return true,
+        _ => {}
+    }
+    let message = e.message();
+    let starts = |prefixes: &[&str]| prefixes.iter().any(|p| message.starts_with(p));
     match e.class() {
-        git2::ErrorClass::Ssh | git2::ErrorClass::Net | git2::ErrorClass::Os => true,
-        git2::ErrorClass::Http => e.code() != git2::ErrorCode::Auth,
+        // Handshake oder Kanal nach dem Login; Login und Host-Key-Prüfung
+        // liegen dazwischen und haben eigene Texte
+        ErrorClass::Ssh => starts(&[
+            "failed to start SSH session",
+            "Failed to open SSH channel",
+            "SSH could not",
+        ]),
+        // Socket nach dem Connect, Ende ohne Meldung des Servers
+        ErrorClass::Net => {
+            e.code() == ErrorCode::Eof || starts(&["error receiving data from socket"])
+        }
+        // WinHTTP nach dem Senden („failed to send request“: offline, DNS)
+        ErrorClass::Os => starts(&[
+            "failed to receive response",
+            "failed to read data",
+            "failed to write",
+            "failed to lock",
+        ]),
+        // „unexpected http status code: 503“, WinHTTP „request failed with
+        // status code: 503“
+        ErrorClass::Http => {
+            message == "unexpected EOF"
+                || message
+                    .rsplit_once(": ")
+                    .and_then(|(_, status)| status.parse::<u16>().ok())
+                    .is_some_and(|status| matches!(status, 502..=504))
+        }
         _ => false,
     }
 }
@@ -3220,13 +3262,13 @@ mod tests {
     fn fetch_retries_transient_errors_only() {
         let dropped = || {
             git2::Error::new(
-                git2::ErrorCode::Auth,
+                git2::ErrorCode::GenericError,
                 git2::ErrorClass::Ssh,
-                "remote rejected authentication: Failed getting response",
+                "SSH could not read data: Failed getting response",
             )
         };
         let delays = [Duration::ZERO; 2];
-        // SSH-Abbruch beim Handshake: zweiter Versuch klappt
+        // SSH-Abbruch mitten in der Übertragung: zweiter Versuch klappt
         let mut calls = 0;
         let res = with_fetch_retries("origin", &delays, || {
             calls += 1;
@@ -3249,18 +3291,37 @@ mod tests {
             .unwrap_err()
             .message()
             .contains("Failed getting response"));
-        // Endgültige Fehler (abgelehntes HTTP-Login, kaputte Refspec) nur einmal
-        for (code, class) in [
-            (git2::ErrorCode::Auth, git2::ErrorClass::Http),
-            (git2::ErrorCode::GenericError, git2::ErrorClass::Reference),
+        // Endgültige Fehler (abgelehntes SSH- und HTTP-Login, offline,
+        // kaputte Refspec) nur einmal
+        for (code, class, message) in [
+            (
+                git2::ErrorCode::Auth,
+                git2::ErrorClass::Ssh,
+                "remote rejected authentication: Failed getting response",
+            ),
+            (
+                git2::ErrorCode::Auth,
+                git2::ErrorClass::Http,
+                "unexpected authentication failure",
+            ),
+            (
+                git2::ErrorCode::GenericError,
+                git2::ErrorClass::Net,
+                "failed to resolve address for gitlab.firma.example: Name or service not known",
+            ),
+            (
+                git2::ErrorCode::GenericError,
+                git2::ErrorClass::Reference,
+                "nope",
+            ),
         ] {
             let mut calls = 0;
             let res = with_fetch_retries("origin", &delays, || {
                 calls += 1;
-                Err(git2::Error::new(code, class, "nope"))
+                Err(git2::Error::new(code, class, message))
             });
             assert!(res.is_err());
-            assert_eq!(calls, 1, "{class:?}");
+            assert_eq!(calls, 1, "{message}");
         }
     }
 
@@ -3354,34 +3415,116 @@ mod tests {
         assert!(fetch_targets(&[]).is_empty());
     }
 
+    /// Texte wie in libgit2 1.9 (`transports/ssh_libssh2.c`, `http.c`,
+    /// `httpclient.c`, `winhttp.c`, `streams/socket.c`).
     #[test]
     fn fetch_transient_error_classes() {
-        let err = |code, class| git2::Error::new(code, class, "x");
-        use git2::{ErrorClass, ErrorCode};
-        assert!(is_transient_fetch_error(&err(
-            ErrorCode::Auth,
-            ErrorClass::Ssh
-        )));
-        assert!(is_transient_fetch_error(&err(
-            ErrorCode::GenericError,
-            ErrorClass::Net
-        )));
-        assert!(is_transient_fetch_error(&err(
-            ErrorCode::GenericError,
-            ErrorClass::Os
-        )));
-        assert!(is_transient_fetch_error(&err(
-            ErrorCode::GenericError,
-            ErrorClass::Http
-        )));
-        assert!(!is_transient_fetch_error(&err(
-            ErrorCode::Auth,
-            ErrorClass::Http
-        )));
-        assert!(!is_transient_fetch_error(&err(
-            ErrorCode::NotFound,
-            ErrorClass::Config
-        )));
+        use git2::{ErrorClass as C, ErrorCode as E};
+        let transient = [
+            // Server trennt im Handshake (überlastet), Abbruch mitten im Transfer
+            (
+                E::GenericError,
+                C::Ssh,
+                "failed to start SSH session: Failed getting banner",
+            ),
+            (
+                E::GenericError,
+                C::Ssh,
+                "SSH could not read data: Timed out waiting on socket",
+            ),
+            (E::Timeout, C::Net, "could not read from socket: timed out"),
+            (
+                E::GenericError,
+                C::Net,
+                "error receiving data from socket: Connection reset by peer",
+            ),
+            (E::Eof, C::Net, "could not read from remote repository"),
+            (E::GenericError, C::Http, "unexpected EOF"),
+            (E::GenericError, C::Http, "unexpected http status code: 503"),
+            (
+                E::GenericError,
+                C::Http,
+                "request failed with status code: 502",
+            ),
+            (
+                E::GenericError,
+                C::Os,
+                "failed to receive response: Verbindung zurückgesetzt",
+            ),
+            (
+                E::Locked,
+                C::Os,
+                "failed to lock file '/r/.git/FETCH_HEAD.lock' for writing",
+            ),
+        ];
+        let permanent = [
+            // Server trennt nach zu vielen Fehlversuchen (MaxAuthTries)
+            (
+                E::Auth,
+                C::Ssh,
+                "remote rejected authentication: Failed getting response",
+            ),
+            (
+                E::GenericError,
+                C::Ssh,
+                "failed to authenticate SSH session: socket disconnect",
+            ),
+            (
+                E::Auth,
+                C::Callback,
+                "authentication failed (tried: ssh-agent)",
+            ),
+            (
+                E::Certificate,
+                C::Ssh,
+                "invalid or unknown remote ssh hostkey",
+            ),
+            // Meldung des Servers auf stderr
+            (
+                E::Eof,
+                C::Ssh,
+                "GitLab: The project you were looking for could not be found.",
+            ),
+            // Offline, DNS, Host nicht erreichbar
+            (
+                E::GenericError,
+                C::Net,
+                "failed to resolve address for gitlab.firma.example: Name or service not known",
+            ),
+            (
+                E::GenericError,
+                C::Net,
+                "failed to connect to 192.0.2.10: Operation timed out",
+            ),
+            (E::GenericError, C::Os, "failed to connect to 192.0.2.10"),
+            (
+                E::GenericError,
+                C::Os,
+                "failed to send request: Name nicht aufgelöst",
+            ),
+            // HTTP: Login, Rechte, nicht gefunden, falsche Zugangsdaten
+            (E::Auth, C::Http, "unexpected authentication failure"),
+            (E::GenericError, C::Http, "unexpected http status code: 404"),
+            (
+                E::GenericError,
+                C::Http,
+                "request failed with status code: 403",
+            ),
+            (
+                E::GenericError,
+                C::Http,
+                "too many redirects or authentication replays",
+            ),
+            (E::NotFound, C::Config, "x"),
+        ];
+        for (code, class, message) in transient {
+            let err = git2::Error::new(code, class, message);
+            assert!(is_transient_fetch_error(&err), "{err}");
+        }
+        for (code, class, message) in permanent {
+            let err = git2::Error::new(code, class, message);
+            assert!(!is_transient_fetch_error(&err), "{err}");
+        }
     }
 
     #[test]
