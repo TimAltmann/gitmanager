@@ -3363,19 +3363,23 @@ mod tests {
         app.start_repo_fetch(dir.path().to_path_buf());
         assert!(app.scanning);
         assert_eq!(app.fetching_repo.as_deref(), Some(dir.path()));
+        // Der Worker meldet sich auf dem alten Kanal; der kommt erst nach
+        // dem Auto-FetchDone zurück (sonst wertet poll_scan beide zugleich aus)
+        let (tx, rx) = mpsc::channel();
+        let worker_rx = std::mem::replace(&mut app.scan_rx, rx);
         // Auto-FetchDone lässt den manuellen Fetch in Ruhe
-        app.scan_tx
-            .send(ScanResult::FetchDone {
-                repos: vec![],
-                fetch_error: None,
-                fetch_partial: false,
-                fetch_is_fetch_error: false,
-                is_auto: true,
-            })
-            .unwrap();
+        tx.send(ScanResult::FetchDone {
+            repos: vec![],
+            fetch_error: None,
+            fetch_partial: false,
+            fetch_is_fetch_error: false,
+            is_auto: true,
+        })
+        .unwrap();
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
         assert!(app.fetching_repo.is_some());
+        app.scan_rx = worker_rx;
         // Ende des manuellen Fetch (Worker oder Abbruch) gibt das Repo frei
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app.fetching_repo.is_some() && std::time::Instant::now() < until {
