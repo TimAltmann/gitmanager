@@ -1022,6 +1022,8 @@ impl MyApp {
         let cfg = self.config.clone();
         let tx = self.scan_tx.clone();
         std::thread::spawn(move || {
+            // Worktrees eines Repos teilen die Remote-Refs: ein Fetch je Repo
+            let paths = crate::git::fetch_targets(&paths);
             // Finding E: Fehler aggregieren statt nur loggen — erster Fehler
             // geht als FetchDone mit (persistenter Banner), weiter fetchen,
             // damit erreichbare Remotes trotzdem frische Counts liefern.

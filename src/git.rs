@@ -368,6 +368,36 @@ pub fn fetch_all(path: &Path) -> anyhow::Result<()> {
     Err(anyhow::Error::new(PartialFetch { succeeded, failed }))
 }
 
+/// Pfade für einen Fetch-Durchlauf über viele Repos: Worktrees eines
+/// Repositorys teilen Remotes und Remote-Refs, ein Fetch je Repository
+/// reicht; gleichzeitige Fetches in dasselbe `.git` stören sich zudem an
+/// den Ref-Locks. Bevorzugt den Haupt-Worktree, sonst den ersten Pfad.
+/// Pfade, die sich nicht öffnen lassen, bleiben (ihr Fehler soll weiter
+/// erscheinen). Reihenfolge wie in `paths`.
+pub fn fetch_targets(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut by_common: HashMap<PathBuf, usize> = HashMap::new();
+    // (Pfad, ist ein verknüpfter Worktree)
+    let mut out: Vec<(PathBuf, bool)> = Vec::new();
+    for path in paths {
+        let Ok(repo) = Repository::open(path) else {
+            out.push((path.clone(), false));
+            continue;
+        };
+        let common = repo.commondir();
+        let common = std::fs::canonicalize(common).unwrap_or_else(|_| common.to_path_buf());
+        let linked = repo.is_worktree();
+        match by_common.get(&common) {
+            Some(&i) if out[i].1 && !linked => out[i] = (path.clone(), false),
+            Some(_) => {}
+            None => {
+                by_common.insert(common, out.len());
+                out.push((path.clone(), linked));
+            }
+        }
+    }
+    out.into_iter().map(|(path, _)| path).collect()
+}
+
 /// K1: holt nur die angegebenen Refspecs eines Remotes, z. B. den
 /// Quell-Branch eines MR (`MrCheckoutPlan::refspec`). Ausdrücklich ohne
 /// Prune (`FetchPrune::Off` übersteuert `fetch.prune` des Users) und ohne
@@ -3362,6 +3392,37 @@ mod tests {
         };
         assert_eq!(err.class(), git2::ErrorClass::Callback);
         assert_eq!(err.message(), "authentication failed (tried: ssh-agent)");
+    }
+
+    #[test]
+    fn fetch_targets_one_per_repository() {
+        let base = tempdir().unwrap();
+        let main = base.path().join("main");
+        let other = base.path().join("other");
+        fs::create_dir_all(&main).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let repo = init_repo_with_commit(&main, "main");
+        init_repo_with_commit(&other, "main");
+        let wt_a = base.path().join("wt-a");
+        let wt_b = base.path().join("wt-b");
+        repo.worktree("wt-a", &wt_a, None).unwrap();
+        repo.worktree("wt-b", &wt_b, None).unwrap();
+        let missing = base.path().join("fehlt");
+        // Worktrees vor dem Haupt-Worktree: der Haupt-Worktree gewinnt
+        let paths = vec![
+            wt_a.clone(),
+            other.clone(),
+            missing.clone(),
+            main.clone(),
+            wt_b.clone(),
+        ];
+        assert_eq!(
+            fetch_targets(&paths),
+            vec![main.clone(), other.clone(), missing]
+        );
+        // Nur Worktrees: der erste
+        assert_eq!(fetch_targets(&[wt_b.clone(), wt_a]), vec![wt_b]);
+        assert!(fetch_targets(&[]).is_empty());
     }
 
     #[test]
