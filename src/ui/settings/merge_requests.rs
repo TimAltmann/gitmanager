@@ -793,6 +793,10 @@ pub fn review_root_hit<'r>(
     })
 }
 
+/// Vergleichsschlüssel für einen Windows-Pfad als Text, auf jedem System
+/// gleich. Bewusst nicht `checkout::path_key`: `review_root` ist
+/// eingegebener Text, und außerhalb von Windows (Tests) trennte `Path` nicht
+/// an `\` und unterschiede Groß-/Kleinschreibung.
 fn windows_key(path: &str) -> String {
     path.trim()
         .replace('/', "\\")

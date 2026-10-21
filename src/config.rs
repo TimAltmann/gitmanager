@@ -1613,6 +1613,9 @@ impl AppConfig {
         self.active_agent_id = self.active_agent_ids.first().cloned();
     }
 
+    /// Schlüssel für `repo_state` und `repo_usage`. Bleibt ohne
+    /// Normalisierung der Komponenten (die macht `checkout::path_key` zum
+    /// Vergleichen), sonst fänden gespeicherte Einträge nicht mehr zurück.
     pub fn repo_state_key(path: &Path) -> String {
         // Auf Windows ist das Dateisystem case-insensitiv – Keys normalisieren, sonst gehen
         // Selections verloren wenn Pfade mal "C:\Dev\MyApp" und mal "c:\dev\myapp" lauten (Explorer, Symlink, canonicalize)

@@ -7,7 +7,7 @@
 
 use super::model::{MergeRequest, MrSnapshot};
 use super::remote::{HostMap, RemoteInfo};
-use crate::config::MrConfig;
+use crate::config::{AppConfig, MrConfig};
 use crate::git::RepoInfo;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -684,21 +684,9 @@ impl Taken<'_> {
 }
 
 /// Vergleichsschlüssel für Pfade: ohne abschließenden Separator, unter
-/// Windows ohne Groß-/Kleinschreibung (wie `AppConfig::repo_state_key`).
-fn path_key(path: &Path) -> String {
-    let key = path
-        .components()
-        .collect::<PathBuf>()
-        .to_string_lossy()
-        .to_string();
-    #[cfg(windows)]
-    {
-        key.to_lowercase()
-    }
-    #[cfg(not(windows))]
-    {
-        key
-    }
+/// Windows ohne Groß-/Kleinschreibung (`AppConfig::repo_state_key`).
+pub fn path_key(path: &Path) -> String {
+    AppConfig::repo_state_key(&path.components().collect::<PathBuf>())
 }
 
 /// URL für „Neuer Klon …“ ohne lokalen Klon des Projekts: nach dem Muster
@@ -1190,6 +1178,18 @@ mod tests {
         assert_eq!(
             proposal(&m).path,
             PathBuf::from("/dev/Reviews/Backend-API-mr-418")
+        );
+    }
+
+    #[test]
+    fn path_key_ignores_spelling() {
+        let key = path_key(Path::new("/dev/Reviews/app"));
+        assert_eq!(path_key(Path::new("/dev/Reviews/app/")), key);
+        assert_eq!(path_key(Path::new("/dev//Reviews/./app")), key);
+        assert_eq!(
+            path_key(Path::new("/dev/reviews/app")) == key,
+            cfg!(windows),
+            "Groß-/Kleinschreibung nur unter Windows egal"
         );
     }
 

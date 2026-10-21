@@ -10,7 +10,7 @@ use super::{fetch_error_i18n_key, fetch_error_parts, GitBusy, MainView, MyApp, S
 use super::{ICON_CROSS, ICON_WARNING};
 use crate::config::{AfterAction, AppConfig};
 use crate::git::{self, CheckoutError, MrPrep, MrPrepOutcome, RepoInfo};
-use crate::gitlab::checkout::{find_checked_out, MrCheckoutPlan, MrRefInfo, ProjectRef};
+use crate::gitlab::checkout::{find_checked_out, path_key, MrCheckoutPlan, MrRefInfo, ProjectRef};
 use crate::gitlab::model::{MergeRequest, MrSnapshot};
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::ui::merge_requests::{MrCheckoutChoice, MrCheckoutKind, OpenTarget};
@@ -738,11 +738,11 @@ pub(super) fn ide_name_for(config: &AppConfig, repos: &[RepoInfo], path: &Path) 
 /// Liegt `path` unter einem Suchpfad? Dann liefert ihn der Rescan als
 /// eigene Karte.
 fn in_search_roots(config: &AppConfig, path: &Path) -> bool {
-    let path = dir_key(path);
+    let path = PathBuf::from(path_key(path));
     config
         .roots
         .iter()
-        .any(|root| path.starts_with(dir_key(root)))
+        .any(|root| path.starts_with(path_key(root)))
 }
 
 /// Meldung mit Zusatz „– {Agent} startet“ usw.
@@ -766,16 +766,9 @@ fn find_mr<'s>(snapshot: &'s MrSnapshot, host_key: &str, id: &str) -> Option<&'s
 }
 
 /// Gleicher Ordner trotz Schreibweise (Separatoren, unter Windows Groß-/
-/// Kleinschreibung wie `AppConfig::repo_state_key`).
+/// Kleinschreibung, siehe [`path_key`]).
 fn same_dir(a: &Path, b: &Path) -> bool {
-    dir_key(a) == dir_key(b)
-}
-
-/// Vergleichsschlüssel eines Ordners (siehe [`same_dir`]).
-fn dir_key(path: &Path) -> PathBuf {
-    PathBuf::from(AppConfig::repo_state_key(
-        &path.components().collect::<PathBuf>(),
-    ))
+    path_key(a) == path_key(b)
 }
 
 #[cfg(test)]
