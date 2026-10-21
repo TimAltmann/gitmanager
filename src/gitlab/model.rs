@@ -969,14 +969,26 @@ pub fn sort_mine(mrs: &mut [MergeRequest], ignore_bots: bool) {
     });
 }
 
-/// E11: offene Review-Anfragen zuerst, dann zuletzt aktualisiert.
-pub fn sort_others(mrs: &mut [MergeRequest]) {
-    mrs.sort_by_key(|mr| (Reverse(mr.review_pending()), updated(mr)));
+/// Zeigt „Von dir approved“: steht unter den noch nicht approvten.
+fn shown_approved(mr: &MergeRequest) -> bool {
+    mr.my_status() == Some(MyReview::Approved)
 }
 
-/// E11: zuletzt aktualisiert über alle Projekte.
+/// E11: offene Review-Anfragen zuerst, von mir approvte zuletzt, sonst
+/// zuletzt aktualisiert.
+pub fn sort_others(mrs: &mut [MergeRequest]) {
+    mrs.sort_by_key(|mr| {
+        (
+            Reverse(mr.review_pending()),
+            shown_approved(mr),
+            updated(mr),
+        )
+    });
+}
+
+/// E11: zuletzt aktualisiert über alle Projekte, von mir approvte zuletzt.
 pub fn sort_uninvolved(mrs: &mut [MergeRequest]) {
-    mrs.sort_by_key(updated);
+    mrs.sort_by_key(|mr| (shown_approved(mr), updated(mr)));
 }
 
 /// Filter-Chips über „Von anderen“ (E13).
@@ -1749,23 +1761,24 @@ mod tests {
             )
             .collect();
         sort_others(&mut others);
-        assert_eq!(iids(&others), vec![421, 418, 92, 240, 77, 310]);
+        // !92 habe ich approved: unter den noch nicht approvten, obwohl neuer
+        assert_eq!(iids(&others), vec![421, 418, 240, 77, 310, 92]);
         // Offene Review-Anfrage bleibt vorn, auch wenn sie älter ist
         others.iter_mut().find(|m| m.iid == 421).unwrap().updated_at =
             parse_rfc3339("2026-10-10T09:00:00Z");
         sort_others(&mut others);
-        assert_eq!(iids(&others), vec![418, 421, 92, 240, 77, 310]);
+        assert_eq!(iids(&others), vec![418, 421, 240, 77, 310, 92]);
     }
 
     #[test]
-    fn sort_uninvolved_by_updated() {
+    fn sort_uninvolved_by_updated_approved_last() {
         let mut list: Vec<MergeRequest> = uninvolved_projects()
             .into_iter()
             .flat_map(|p| p.mrs)
             .map(|n| Mr(n).mr())
             .collect();
         sort_uninvolved(&mut list);
-        assert_eq!(iids(&list), vec![421, 418, 95, 423, 92, 240, 242, 311]);
+        assert_eq!(iids(&list), vec![421, 418, 95, 423, 240, 242, 311, 92]);
     }
 
     // --- Einteilung (E1) ---
@@ -1774,7 +1787,7 @@ mod tests {
     fn build_snapshot_design_brief() {
         let snap = sample_snapshot(true);
         assert_eq!(iids(&snap.mine), vec![412, 87, 233, 19, 305]);
-        assert_eq!(iids(&snap.others), vec![421, 418, 92, 240, 77, 310]);
+        assert_eq!(iids(&snap.others), vec![421, 418, 240, 77, 310, 92]);
         assert_eq!(
             by_iid(&snap.others, 240).reasons,
             vec![Reason::Reviewer, Reason::MentionComment]
@@ -1859,7 +1872,7 @@ mod tests {
         let mr310 = raw.mentions[2].mr.clone();
         raw.mentions.push(mention(mr310, MentionKind::Comment));
         let snap = build_snapshot(&[raw], &locals(&[]), &MrConfig::default(), &me_map());
-        assert_eq!(iids(&snap.others), vec![421, 418, 92, 240, 77, 310]);
+        assert_eq!(iids(&snap.others), vec![421, 418, 240, 77, 310, 92]);
         assert_eq!(
             by_iid(&snap.others, 77).reasons,
             vec![Reason::MentionDescription, Reason::MentionComment]
@@ -1934,7 +1947,7 @@ mod tests {
             &me_map(),
         );
         assert_eq!(iids(&snap.mine), vec![87, 233, 19, 305]);
-        assert_eq!(iids(&snap.others), vec![92, 240, 310]);
+        assert_eq!(iids(&snap.others), vec![240, 310, 92]);
         // !421, !418 (backend-api) und !77 (auth-service)
         assert_eq!(snap.hidden_by_selection, 3);
         // Badge zählt Abgewählte nicht (!421 und !418 warten eigentlich)
@@ -1971,7 +1984,7 @@ mod tests {
             ..MrConfig::default()
         };
         let snap = build_snapshot(&[host_raw(false)], &locals(&[]), &cfg, &me_map());
-        assert_eq!(iids(&snap.others), vec![421, 418, 92, 240, 310]);
+        assert_eq!(iids(&snap.others), vec![421, 418, 240, 310, 92]);
         // Nicht abgewählt, nur nicht lokal → keine Hinweiszeile
         assert_eq!(snap.hidden_by_selection, 0);
         assert_eq!(snap.badge, 2);
@@ -2055,7 +2068,7 @@ mod tests {
         let partial = raw.status.partial.clone();
         let snap = build_snapshot(&[raw], &locals(&[]), &MrConfig::default(), &me_map());
         assert_eq!(iids(&snap.mine), vec![412, 87, 233, 19, 305]);
-        assert_eq!(iids(&snap.others), vec![421, 418, 92, 240]);
+        assert_eq!(iids(&snap.others), vec![421, 418, 240, 92]);
         assert_eq!(snap.uninvolved, None);
         assert_eq!(snap.per_host[0].partial, partial);
         // Dashboard fehlgeschlagen: Erwähnungen bleiben
@@ -2097,7 +2110,7 @@ mod tests {
         raw.dashboard = None;
         raw.mentions.clear();
         let snap = build_snapshot(&[raw], &locals(&[]), &MrConfig::default(), &me_map());
-        assert_eq!(iids(&snap.others), vec![421, 418, 92, 240]);
+        assert_eq!(iids(&snap.others), vec![421, 418, 240, 92]);
         assert!(snap
             .others
             .iter()
@@ -2140,7 +2153,7 @@ mod tests {
         );
         // !305 hat nur ein Bot-Approval (ohne Bots: 0)
         assert_eq!(iids(&snap.mine), vec![412, 87, 305]);
-        assert_eq!(iids(&snap.others), vec![421, 92, 77, 310]);
+        assert_eq!(iids(&snap.others), vec![421, 77, 310, 92]);
         // Zwei To-dos zu !77: Beschreibung und Kommentar
         let mr77 = by_iid(&snap.others, 77);
         assert_eq!(
@@ -2832,11 +2845,11 @@ mod tests {
         let o = &snap.others;
         assert_eq!(
             iids_of(&filter_others(o, &chips(true, true))),
-            vec![421, 418, 92, 240, 77, 310]
+            vec![421, 418, 240, 77, 310, 92]
         );
         assert_eq!(
             iids_of(&filter_others(o, &chips(true, false))),
-            vec![421, 418, 92, 240]
+            vec![421, 418, 240, 92]
         );
         // !240 (Reviewer + @ Kommentar) bleibt auch nur mit „Erwähnt“
         assert_eq!(
