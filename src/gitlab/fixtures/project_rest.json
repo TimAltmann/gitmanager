@@ -1,0 +1,13 @@
+{
+  "id": 13083,
+  "name": "umbenannt",
+  "path": "umbenannt",
+  "path_with_namespace": "neu/umbenannt",
+  "visibility": "private",
+  "archived": false,
+  "merge_requests_enabled": true,
+  "permissions": {
+    "project_access": { "access_level": 30, "notification_level": 3 },
+    "group_access": null
+  }
+}

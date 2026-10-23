@@ -1,0 +1,48 @@
+{
+  "data": {
+    "metadata": { "version": "18.5.1", "enterprise": false },
+    "currentUser": {
+      "username": "taltmann",
+      "name": "Tim Altmann",
+      "authored": {
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "nodes": [
+          {
+            "id": "gid://gitlab/MergeRequest/70019",
+            "iid": "19",
+            "title": "Merge-Request-Ansicht",
+            "draft": true,
+            "webUrl": "https://gitlab.example.com/tools/gitmanager/-/merge_requests/19",
+            "webPath": "/tools/gitmanager/-/merge_requests/19",
+            "updatedAt": "2026-10-16T15:20:00Z",
+            "sourceBranch": "feature/merge-requests",
+            "targetBranch": "main",
+            "sourceBranchExists": true,
+            "diffHeadSha": "6086acf0000000000000000000000000000000aa",
+            "project": { "fullPath": "tools/gitmanager" },
+            "sourceProject": { "fullPath": "tools/gitmanager" },
+            "author": { "username": "taltmann", "name": "Tim Altmann" },
+            "approvedBy": { "nodes": [] },
+            "headPipeline": {
+              "status": "PENDING",
+              "path": "/tools/gitmanager/-/pipelines/501",
+              "detailedStatus": { "detailsPath": "/tools/gitmanager/-/pipelines/501" }
+            },
+            "resolvableDiscussionsCount": 1,
+            "resolvedDiscussionsCount": 0,
+            "detailedMergeStatus": "DRAFT_STATUS",
+            "reviewers": {
+              "nodes": [
+                { "username": "syilmaz", "name": "Sara Yilmaz", "mergeRequestInteraction": { "reviewState": "UNREVIEWED" } }
+              ]
+            }
+          }
+        ]
+      },
+      "reviewing": {
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "nodes": []
+      }
+    }
+  }
+}

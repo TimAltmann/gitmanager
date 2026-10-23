@@ -1,14 +1,32 @@
-use crate::config::{AppConfig, RepoSortMode};
-use crate::git::{launch_agent, launch_ide, RepoInfo};
+mod merge_requests;
+mod mr_checkout;
+mod mr_settings;
+
+use crate::config::{AfterAction, AppConfig, RepoSortMode};
+use crate::git::{launch_agent, launch_ide, MrPrep, RepoInfo};
+use crate::gitlab::glab::{GlabErrorKind, GlabRunner};
+use crate::gitlab::model::{MergedList, MrSnapshot};
+use crate::gitlab::remote::{GlabHost, HostMap, LocalProject};
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::scanner::scan_repos;
 use crate::ui::{
-    repo_list::{show_repo_list, sort_main_repos, RepoListActions},
+    merge_requests::{MrCheckoutChoice, MrViewState},
+    repo_list::{show_repo_list, sort_main_repos, RepoHighlight, RepoListActions},
     settings::SettingsState,
 };
 use egui::{Color32, RichText, Vec2};
+use merge_requests::{top_bar_button, MrResult, TOP_BAR_CAPTIONS_WIDTH, TOP_BAR_COMPACT_WIDTH};
+use mr_checkout::{MrCheckoutFailure, MrSwitch};
+use mr_settings::{GlabFactory, MrSettingsCache, MrSettingsResult};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
+
+/// Fenstergröße beim Start (ohne gespeicherte Größe: eframe ohne
+/// `persistence`). Mindestens `TOP_BAR_COMPACT_WIDTH` breit, damit
+/// „Aktualisieren“ und „Einstellungen“ beim Start ihren Text zeigen.
+pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1100.0, 680.0];
+const _: () = assert!(DEFAULT_WINDOW_SIZE[0] >= TOP_BAR_COMPACT_WIDTH);
 
 const ICON_GEAR: egui::ImageSource = egui::include_image!("../assets/icons/gear.svg");
 const ICON_REFRESH: egui::ImageSource = egui::include_image!("../assets/icons/refresh.svg");
@@ -29,6 +47,12 @@ enum ScanResult {
     /// Fehler zurück, rührt `repos` bewusst NICHT an (kein Listen-Wipe).
     FetchAborted {
         reason_key: &'static str,
+    },
+    /// K1: Auschecken eines MR fertig; `Ok(None)` nach dem Klonen, sonst
+    /// der vorbereitete lokale Branch (Worktree, bestehender Klon).
+    MrCheckoutReady {
+        choice: Box<MrCheckoutChoice>,
+        result: Result<Option<MrPrep>, MrCheckoutFailure>,
     },
 }
 
@@ -61,6 +85,57 @@ pub fn fetch_error_parts(e: &anyhow::Error) -> (String, bool, bool) {
     (msg, partial, is_fetch)
 }
 
+/// E15: Hinweis nach dem Wechsel auf einen Remote-Branch, dessen lokaler
+/// Branch vorgespult wurde, voraus ist oder divergiert. `None` → die
+/// bisherige Erfolgsmeldung.
+pub fn checkout_outcome_notice(
+    lang: Language,
+    outcome: &crate::git::CheckoutOutcome,
+) -> Option<String> {
+    use crate::git::CheckoutOutcome;
+    Some(match outcome {
+        CheckoutOutcome::Switched => return None,
+        CheckoutOutcome::FastForwarded { branch, by: 1 } => {
+            tr_fmt(lang, "branch_fast_forwarded_one", &[branch])
+        }
+        CheckoutOutcome::FastForwarded { branch, by } => {
+            tr_fmt(lang, "branch_fast_forwarded", &[branch, &by.to_string()])
+        }
+        CheckoutOutcome::LocalAhead { branch, ahead: 1 } => {
+            tr_fmt(lang, "branch_local_ahead_one", &[branch])
+        }
+        CheckoutOutcome::LocalAhead { branch, ahead } => {
+            tr_fmt(lang, "branch_local_ahead", &[branch, &ahead.to_string()])
+        }
+        CheckoutOutcome::Diverged {
+            branch,
+            ahead,
+            behind,
+        } => tr_fmt(
+            lang,
+            "branch_local_diverged",
+            &[branch, &ahead.to_string(), &behind.to_string()],
+        ),
+    })
+}
+
+/// E15: Fehlerdetail für den Branch-Wechsel — typisierte Abbrüche
+/// (`BranchSwitchBlocked`) lokalisiert, sonst der bisherige Fehlertext.
+pub fn branch_switch_error_detail(lang: Language, e: &anyhow::Error) -> String {
+    use crate::git::BranchSwitchBlocked;
+    match e.downcast_ref::<BranchSwitchBlocked>() {
+        Some(BranchSwitchBlocked::UpstreamMismatch { branch, upstream }) => {
+            tr_fmt(lang, "branch_upstream_mismatch", &[branch, upstream])
+        }
+        Some(BranchSwitchBlocked::CheckedOutElsewhere { branch, path }) => tr_fmt(
+            lang,
+            "branch_checked_out_elsewhere",
+            &[branch, &path.display().to_string()],
+        ),
+        None => format!("{e:#}"),
+    }
+}
+
 /// M2: Zähler-Label für die gecappte Dialog-Dateiliste — nur bei
 /// tatsächlicher Trunkierung mit "+" (`files_truncated` aus
 /// `get_detailed_status`), nicht schon bei exakt CAP Einträgen (F1#F3).
@@ -69,6 +144,17 @@ pub fn capped_file_count_label(count: usize, truncated: bool) -> String {
         format!("{}+", crate::git::DETAILED_STATUS_CAP)
     } else {
         count.to_string()
+    }
+}
+
+/// Statusleiste der Repo-Liste, solange ein Lauf die Refs hält. Beim
+/// Auschecken eines MR (K1, auch während eines minutenlangen Klons)
+/// „Auschecken für !{iid} läuft …“ statt „Scanne nach Repositories…“.
+fn repo_busy_text(lang: Language, busy: &GitBusy) -> Option<String> {
+    match busy {
+        GitBusy::Idle => None,
+        GitBusy::Scan | GitBusy::Fetch { .. } => Some(tr(lang, "scanning_repos")),
+        GitBusy::Checkout { iid } => Some(tr_fmt(lang, "mr_checkout_running", &[&iid.to_string()])),
     }
 }
 
@@ -161,10 +247,48 @@ enum UsageType {
     ConfigChange,
 }
 
+/// Hauptansicht im Fenster (nicht gespeichert).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainView {
+    Repos,
+    MergeRequests,
+}
+
+/// Was gerade die Refs der Repos hält: höchstens ein Scan, manueller Fetch
+/// oder MR-Checkout zur Zeit (zwei libgit2-Läufe racen um FETCH_HEAD/Refs,
+/// „cannot lock ref“). Der Auto-Fetch zählt bewusst nicht dazu
+/// (`auto_fetching`, Finding D1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum GitBusy {
+    #[default]
+    Idle,
+    /// Scan der Suchpfade (`start_scan`)
+    Scan,
+    /// Manueller Fetch dieses Repos, danach Rescan (`start_repo_fetch`)
+    Fetch { repo: PathBuf },
+    /// K1: Auschecken dieses MR, ohne abschließenden Scan
+    Checkout { iid: u64 },
+}
+
+impl GitBusy {
+    /// Ein Lauf hält die Refs: kein zweiter Scan, Fetch oder Checkout
+    fn holds_refs(&self) -> bool {
+        *self != GitBusy::Idle
+    }
+
+    /// Scan oder manueller Fetch: beide enden mit neuen Repos (`Repos` bzw.
+    /// `FetchDone`), das Auschecken nicht
+    fn scans_repos(&self) -> bool {
+        matches!(self, GitBusy::Scan | GitBusy::Fetch { .. })
+    }
+}
+
 pub struct MyApp {
     config: AppConfig,
     repos: Vec<RepoInfo>,
-    scanning: bool,
+    /// Scan, manueller Fetch oder MR-Checkout (Ref-Lock, Spinner); nur über
+    /// `set_git_busy` ändern (Tray)
+    git_busy: GitBusy,
     error: Option<String>,
     show_settings: bool,
     settings_state: Option<SettingsState>,
@@ -210,8 +334,9 @@ pub struct MyApp {
     /// `None` = noch nie gelaufen (erster Durchlauf nach Startup-Scan fällig).
     last_auto_fetch: Option<std::time::Instant>,
     /// Finding D1: eigener Busy-Zustand für den periodischen Auto-Fetch.
-    /// Der Auto-Fetch setzt bewusst NICHT `scanning`, damit Refresh/Fetch
-    /// währenddessen klickbar bleiben (stiller Hintergrundlauf).
+    /// Der Auto-Fetch setzt bewusst NICHT `git_busy`, damit Refresh/Fetch
+    /// währenddessen klickbar bleiben (stiller Hintergrundlauf). Nur über
+    /// `set_auto_fetching` ändern (Tray).
     auto_fetching: bool,
     /// P2b/L2: manueller Refresh während Auto-Fetch — Intent merken statt
     /// verwerfen; der `FetchDone(is_auto)`-Arm holt ihn nach.
@@ -227,6 +352,62 @@ pub struct MyApp {
     /// bei N Tray-Actions im selben Frame).
     config_save_pending: bool,
     last_config_save: Option<std::time::Instant>,
+    main_view: MainView,
+    /// glab-Aufrufe der Sitzung (immer `GatedRunner`, E16); Tests: `FakeGlab`
+    glab: Arc<dyn GlabRunner>,
+    /// Programm hinter `glab`; ein anderes nach „Speichern“ → neuer Runner
+    glab_program: String,
+    glab_factory: GlabFactory,
+    /// Lokale glab-Erkennung je Kandidat (E16), Cache je Sitzung; nach jedem
+    /// Scan nur für neue Kandidaten ergänzt
+    glab_hosts: Vec<GlabHost>,
+    /// GitLab-Hosts und lokale Projekte aus Repos, Erkennung und Config
+    mr_hosts: HostMap,
+    mr_locals: Vec<LocalProject>,
+    /// Klone je Projekt für die Checkout-Buttons (`update_mr_clones`)
+    mr_clones: crate::gitlab::checkout::CloneIndex,
+    /// Letzter Stand der MR-Ansicht; bleibt beim Neuladen sichtbar
+    mr_snapshot: Option<Box<MrSnapshot>>,
+    mr_loading: bool,
+    /// Refresh während eines laufenden Abrufs gemerkt
+    mr_pending_refresh: bool,
+    /// „Speichern“ während des Rescans: Abruf erst mit den neuen Repos
+    mr_refresh_after_scan: bool,
+    /// Ende des letzten Abrufs (wie `last_auto_fetch`)
+    mr_last_refresh: Option<std::time::Instant>,
+    /// Steigt bei Anmeldungsänderungen; ältere Ergebnisse werden verworfen
+    mr_auth_epoch: u64,
+    mr_discovering: bool,
+    /// Ausstehende Seiten „Nicht beteiligt“ (eine je Host)
+    mr_more_pending: usize,
+    /// Eigene gemergte MRs (Umschalter „Gemergt“); `None` = nicht geladen
+    mr_merged: Option<MergedList>,
+    /// Zeitraum (Tage) des laufenden Abrufs „Gemergt“; `None` = keiner
+    mr_merged_loading: Option<u32>,
+    /// Zählt neue Abrufe „Gemergt“; Ergebnisse älterer werden verworfen
+    mr_merged_gen: u64,
+    mr_tx: Sender<MrResult>,
+    mr_rx: Receiver<MrResult>,
+    mr_view: MrViewState,
+    /// glab fehlt oder ist zu alt: keine weiteren glab-Aufrufe in der Sitzung
+    /// (außer „Aktualisieren“); `mr_glab_error` trägt die Art für die Karte
+    mr_glab_missing: bool,
+    mr_glab_error: Option<GlabErrorKind>,
+    /// K1: Wechsel eines bestehenden Klons wartet auf `execute_branch_switch`
+    mr_switch: Option<MrSwitch>,
+    /// K1: „Danach öffnen“ mit der IDE wartet auf den Rescan
+    pending_after_checkout: Option<(PathBuf, AfterAction)>,
+    /// K1: Hinweis in der MR-Ansicht (divergierter Branch); überlebt Rescans
+    mr_notice: Option<String>,
+    /// „In Repo-Liste zeigen“: hervorgehobene Karte und seit wann
+    repo_highlight: Option<(RepoHighlight, std::time::Instant)>,
+    /// Lokale Erkennung (E16) für diese Hosts erneut, auch wenn bekannt
+    mr_rediscover: std::collections::BTreeSet<String>,
+    /// Einstellungs-Tab „Merge Requests“: Worker-Ergebnisse kommen auch
+    /// nach dem Schließen an (der `SettingsState` wird dann verworfen)
+    mr_settings_tx: Sender<MrSettingsResult>,
+    mr_settings_rx: Receiver<MrSettingsResult>,
+    mr_settings: MrSettingsCache,
 }
 
 impl MyApp {
@@ -251,11 +432,17 @@ impl MyApp {
         let (config_update_tx, config_update_rx) = mpsc::channel::<Result<AppConfig, String>>();
         let (update_tx, update_rx) =
             mpsc::channel::<Result<Option<crate::updater::UpdateInfo>, String>>();
+        let (mr_tx, mr_rx) = mpsc::channel();
+        let (mr_settings_tx, mr_settings_rx) = mpsc::channel();
+        let glab_factory = mr_settings::system_glab_factory();
+        let glab_program = config.merge_requests.glab_program.clone();
+        let glab = glab_factory(&glab_program);
+        let mr_view = MrViewState::new(&config.merge_requests);
 
         let mut app = Self {
             config,
             repos: Vec::new(),
-            scanning: false,
+            git_busy: GitBusy::Idle,
             error: None,
             show_settings: false,
             settings_state: None,
@@ -296,6 +483,38 @@ impl MyApp {
             repo_sort_dirty: true,
             config_save_pending: false,
             last_config_save: None,
+            main_view: MainView::Repos,
+            glab,
+            glab_program,
+            glab_factory,
+            glab_hosts: Vec::new(),
+            mr_hosts: HostMap::default(),
+            mr_locals: Vec::new(),
+            mr_clones: Default::default(),
+            mr_snapshot: None,
+            mr_loading: false,
+            mr_pending_refresh: false,
+            mr_refresh_after_scan: false,
+            mr_last_refresh: None,
+            mr_auth_epoch: 0,
+            mr_discovering: false,
+            mr_more_pending: 0,
+            mr_merged: None,
+            mr_merged_loading: None,
+            mr_merged_gen: 0,
+            mr_tx,
+            mr_rx,
+            mr_view,
+            mr_glab_missing: false,
+            mr_glab_error: None,
+            mr_switch: None,
+            pending_after_checkout: None,
+            mr_notice: None,
+            repo_highlight: None,
+            mr_rediscover: Default::default(),
+            mr_settings_tx,
+            mr_settings_rx,
+            mr_settings: MrSettingsCache::default(),
         };
         #[cfg(target_os = "windows")]
         {
@@ -399,14 +618,22 @@ impl MyApp {
             }
         }
         app.start_scan();
-        // Initial size matches viewport default (1080x680) – used for collapse logic
-        app.last_window_size = [1080.0, 680.0];
+        // Initial size matches viewport default – used for collapse logic
+        app.last_window_size = DEFAULT_WINDOW_SIZE;
         app
     }
 
     fn start_scan(&mut self) {
-        if self.scanning {
-            return;
+        match self.git_busy {
+            GitBusy::Idle => {}
+            // Ein laufender Scan/Fetch liefert ohnehin neue Repos
+            GitBusy::Scan | GitBusy::Fetch { .. } => return,
+            // K1: das Auschecken endet ohne Scan – Wunsch merken, `poll_scan`
+            // holt ihn danach nach
+            GitBusy::Checkout { .. } => {
+                self.pending_scan = true;
+                return;
+            }
         }
         // L2: kein paralleler Lauf zum Auto-Fetch — zwei libgit2-Fetches
         // auf denselben Repos racen um FETCH_HEAD/refs (cannot lock ref).
@@ -417,12 +644,12 @@ impl MyApp {
             self.status_message_time = Some(std::time::Instant::now());
             return;
         }
-        self.scanning = true;
+        self.set_git_busy(GitBusy::Scan);
         self.error = None;
         let cfg = self.config.clone();
         let tx = self.scan_tx.clone();
         std::thread::spawn(move || {
-            // H3: Panic darf `scanning` nicht hängen lassen — Fallback
+            // H3: Panic darf `git_busy` nicht hängen lassen — Fallback
             // resettet Flags + zeigt Fehler (Liste bleibt erhalten).
             let msg =
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan_repos(&cfg))) {
@@ -442,7 +669,7 @@ impl MyApp {
         while let Ok(result) = self.scan_rx.try_recv() {
             match result {
                 ScanResult::Repos(repos) => {
-                    self.scanning = false;
+                    self.set_git_busy(GitBusy::Idle);
                     // I1: auto_fetching NICHT hier löschen — ein laufender
                     // Auto-Fetch würde sonst als fertig gelten und sofort ein
                     // zweiter Auto-Fetch starten (Ref-Race). Nur FetchDone
@@ -457,6 +684,9 @@ impl MyApp {
                     // P2b: abgeschlossener Scan erfüllt gemerkten Refresh.
                     self.pending_scan = false;
                     self.error = None;
+                    self.mr_after_scan();
+                    // K1: IDE nach dem Auschecken, sobald der Ordner bekannt ist
+                    self.run_pending_after_checkout();
                     // Review-Fix: dirty VOR dem direkten Sync markieren — bei
                     // WouldBlock bleibt das Flag (Backstop in sync_tray_service).
                     self.mark_tray_dirty();
@@ -470,29 +700,26 @@ impl MyApp {
                     fetch_is_fetch_error,
                     is_auto,
                 } => {
-                    // L4: `scanning` nur für manuelle Läufe zurücksetzen — ein
+                    // L4: `git_busy` nur für manuelle Läufe zurücksetzen — ein
                     // parallel eintreffendes Auto-FetchDone darf den Spinner
                     // eines noch laufenden manuellen Laufs nicht löschen.
                     if !is_auto {
-                        self.scanning = false;
+                        self.set_git_busy(GitBusy::Idle);
                     }
                     // I1: nur Auto-FetchDone löscht auto_fetching — manueller
                     // Fetch (is_auto=false) lässt einen laufenden Auto-Fetch in Ruhe.
+                    // P2b: einen gemerkten Refresh holt das Ende von `poll_scan` nach.
                     if is_auto {
-                        self.auto_fetching = false;
+                        self.set_auto_fetching(false);
                         // I6: Timestamp = Ende statt Start — bei langsamem Fetch
                         // (> Intervall) kein Back-to-Back-Dauerfeuer.
                         self.last_auto_fetch = Some(std::time::Instant::now());
-                        // P2b: gemerkten manuellen Refresh jetzt nachholen.
-                        if self.pending_scan {
-                            self.pending_scan = false;
-                            self.start_scan();
-                        }
                     }
                     let mut repos = repos;
                     sort_main_repos(&mut repos, &self.config);
                     self.repos = repos;
                     self.repo_sort_dirty = false;
+                    self.mr_after_scan();
                     if let Some(raw) = fetch_error {
                         let key = fetch_error_i18n_key(fetch_partial);
                         // I2: auth_hint nur bei echten Remote-Fehlern — bei
@@ -512,6 +739,7 @@ impl MyApp {
                     } else {
                         self.error = None;
                     }
+                    self.run_pending_after_checkout();
                     self.mark_tray_dirty();
                     self.sync_tray_service();
                     ctx.request_repaint();
@@ -521,15 +749,11 @@ impl MyApp {
                     // Spinner), Fehler persistent zeigen, Liste behalten.
                     // Wie Auto-FetchDone als Intervall-Ende werten (kein
                     // sofortiges Back-to-Back mit Panic-Loop).
-                    self.scanning = false;
-                    self.auto_fetching = false;
+                    self.set_git_busy(GitBusy::Idle);
+                    self.set_auto_fetching(false);
                     self.last_auto_fetch = Some(std::time::Instant::now());
-                    // F1#F2: gemerkten Refresh auch nach Abort nachholen
-                    // (wie Auto-FetchDone) — sonst wartet er bis Intervall.
-                    if self.pending_scan {
-                        self.pending_scan = false;
-                        self.start_scan();
-                    }
+                    // F1#F2: einen gemerkten Refresh holt auch nach Abort das
+                    // Ende von `poll_scan` nach — sonst wartet er bis Intervall.
                     let msg = tr(self.config.language, reason_key);
                     let msg = if msg == reason_key {
                         reason_key.to_string()
@@ -539,6 +763,13 @@ impl MyApp {
                     self.error = Some(msg.clone());
                     self.status_message = Some(msg);
                     self.status_message_time = Some(std::time::Instant::now());
+                    self.mark_tray_dirty();
+                    ctx.request_repaint();
+                }
+                ScanResult::MrCheckoutReady { choice, result } => {
+                    // K1: Ref-Lock lösen; dann Rescan, Wechsel oder Fehler
+                    self.set_git_busy(GitBusy::Idle);
+                    self.on_mr_checkout_ready(*choice, result);
                     self.mark_tray_dirty();
                     ctx.request_repaint();
                 }
@@ -612,7 +843,7 @@ impl MyApp {
                 }
             }
         }
-        if self.scanning {
+        if self.git_busy.holds_refs() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if let Some(t) = self.status_message_time {
@@ -634,9 +865,21 @@ impl MyApp {
                 }
                 self.handle_branch_switch(ctx, path, branch);
             }
+            // K1: MR-Wechsel ohne Ausführung und ohne eigenen Dialog verwerfen
+            self.drop_stale_mr_switch();
             // Dialog/Fehler landen in branch_dialog/error ohne direkten Sync
             // (#3 Badge) → dirty, damit der nächste Throttle-Sync übernimmt.
             self.mark_tray_dirty();
+        }
+        // Gemerkten Scan nachholen, sobald nichts mehr die Refs hält und kein
+        // Auto-Fetch läuft (P2b nach dem Auto-Fetch, F1#F2 nach Abort, K1 nach
+        // dem Auschecken) – erst nach dem Wechsel oben, sonst liest er den
+        // alten Stand. Ein Fehler bleibt bis zum Scan-Ergebnis stehen.
+        if self.pending_scan && !self.git_busy.holds_refs() && !self.auto_fetching {
+            self.pending_scan = false;
+            let error = self.error.take();
+            self.start_scan();
+            self.error = error;
         }
     }
 }
@@ -758,6 +1001,23 @@ impl MyApp {
         self.tray_dirty = true;
     }
 
+    /// Setzt, was die Refs hält. Jeder Wechsel sperrt oder löst die
+    /// Fetch-Buttons im Tray (`TrayFetching`), daher dirty.
+    fn set_git_busy(&mut self, busy: GitBusy) {
+        if self.git_busy != busy {
+            self.git_busy = busy;
+            self.mark_tray_dirty();
+        }
+    }
+
+    /// Wie `set_git_busy` für den Auto-Fetch (D1).
+    fn set_auto_fetching(&mut self, running: bool) {
+        if self.auto_fetching != running {
+            self.auto_fetching = running;
+            self.mark_tray_dirty();
+        }
+    }
+
     /// Task 5: Periodischer Auto-Fetch im Hintergrund (throttled).
     /// Scope: ALLE gescannten Repos (Default-Intervall 10 min, 0 = aus) —
     /// der Veraltet-Indikator im Hauptfenster braucht frische Counts überall,
@@ -778,13 +1038,13 @@ impl MyApp {
         }
         if self.auto_fetching {
             // Läuft bereits: Ergebnis zeitnah anwenden (stiller Lauf ohne
-            // `scanning`, daher kein automatischer Repaint-Loop).
+            // `git_busy`, daher kein automatischer Repaint-Loop).
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
             return;
         }
-        if self.scanning {
-            // Manueller Scan/Fetch läuft: Auto auslassen statt blockieren
-            // (Finding D1) — nächster Tick holt es nach.
+        if self.git_busy.holds_refs() {
+            // Manueller Scan/Fetch oder Auschecken läuft: Auto auslassen
+            // statt blockieren (Finding D1) — nächster Tick holt es nach.
             ctx.request_repaint_after(std::time::Duration::from_secs(60));
             return;
         }
@@ -795,9 +1055,10 @@ impl MyApp {
         }
         // I6: Timestamp erst im FetchDone-Arm (Ende) setzen — nicht hier am
         // Start, sonst Back-to-Back bei Fetch-Dauer > Intervall.
-        // Finding D1: bewusst NICHT `scanning` — Refresh/Fetch bleiben klickbar.
-        self.auto_fetching = true;
-        let paths: Vec<PathBuf> = self.repos.iter().map(|r| r.path.clone()).collect();
+        // Finding D1: bewusst NICHT `git_busy` — Refresh/Fetch bleiben klickbar.
+        self.set_auto_fetching(true);
+        // Worktrees eines Repos teilen die Remote-Refs: ein Fetch je Repo
+        let paths = crate::git::fetch_targets(&self.repos);
         let cfg = self.config.clone();
         let tx = self.scan_tx.clone();
         std::thread::spawn(move || {
@@ -987,6 +1248,16 @@ impl MyApp {
             let config = self.config.clone();
             // #3: Badge-Text (wartender Branch-Dialog/Fehler) gleich mit syncen.
             let notice = self.tray_notice();
+            // E21: Badge am Tray-Button „Merge Requests“ (letzter Stand).
+            let mr_badge = merge_requests::mr_badge(self.mr_snapshot.as_deref());
+            // Fetch-Buttons im Tray: gesperrt während Scan/Fetch, Spinner am Repo
+            let fetching = crate::ui::tray_popup::TrayFetching {
+                busy: self.git_busy.holds_refs() || self.auto_fetching,
+                repo: match &self.git_busy {
+                    GitBusy::Fetch { repo } => Some(repo.clone()),
+                    _ => None,
+                },
+            };
             // Poison-tolerant: recover from poisoned mutex instead of staling forever.
             let locked = match shared.try_lock() {
                 Ok(g) => Some(g),
@@ -996,6 +1267,8 @@ impl MyApp {
             if let Some(mut guard) = locked {
                 guard.update_data(repos, config);
                 guard.notice = notice;
+                guard.mr_badge = mr_badge;
+                guard.fetching = fetching;
                 // Erfolgreich: dirty zurücksetzen.
                 self.tray_dirty = false;
                 self.last_tray_sync = Some(std::time::Instant::now());
@@ -1050,8 +1323,10 @@ impl MyApp {
         };
         for action in actions {
             match action {
-                crate::tray_service::TrayAction::ShowMainWindow => self.show_main_window(ctx),
+                crate::tray_service::TrayAction::ShowMainWindow => self.show_main_from_tray(ctx),
+                crate::tray_service::TrayAction::ShowMergeRequests => self.show_mrs_from_tray(ctx),
                 crate::tray_service::TrayAction::Refresh => self.start_scan(),
+                crate::tray_service::TrayAction::FetchRepo(path) => self.start_repo_fetch(path),
                 crate::tray_service::TrayAction::OpenSettings => {
                     self.show_settings = true;
                     self.settings_state = Some(SettingsState::from_config(&self.config));
@@ -1249,6 +1524,75 @@ impl MyApp {
     #[cfg(not(target_os = "windows"))]
     fn sync_tray_service(&mut self) {}
 
+    /// Manueller `git fetch --all` für ein Repo (Branch-Popup im Hauptfenster,
+    /// Fetch-Button im Tray): im Hintergrund, danach Rescan (`FetchDone`).
+    fn start_repo_fetch(&mut self, repo_path: PathBuf) {
+        let lang = self.config.language;
+        // L2: wie start_scan — kein manueller Fetch während
+        // Auto-Fetch läuft (Ref-Race); Request verwerfen + Hinweis.
+        if self.auto_fetching {
+            self.status_message = Some(tr(lang, "auto_fetch_running"));
+            self.status_message_time = Some(std::time::Instant::now());
+            return;
+        }
+        // Ein Scan/Fetch/Checkout läuft schon (Tray-Stand kann veraltet sein):
+        // kein zweiter Fetch auf dieselben Refs
+        if self.git_busy.holds_refs() {
+            self.status_message = Some(tr(lang, "fetch_busy"));
+            self.status_message_time = Some(std::time::Instant::now());
+            return;
+        }
+        let path_clone = repo_path.clone();
+        let cfg = self.config.clone();
+        let tx = self.scan_tx.clone();
+        // Manueller Fetch = frische Refs: Auto-Timer zurücksetzen,
+        // damit der periodische Fetch nicht Sekunden später doppelt läuft.
+        self.last_auto_fetch = Some(std::time::Instant::now());
+        self.status_message = Some(tr_fmt(
+            lang,
+            "fetching_branches",
+            &[&repo_path.display().to_string()],
+        ));
+        self.status_message_time = Some(std::time::Instant::now());
+        std::thread::spawn(move || {
+            // H3: Panic vor send darf `git_busy` nicht hängen
+            // lassen — FetchAborted resettet Flags ohne Listen-Wipe.
+            let msg = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let fetch_res = crate::git::fetch_all(&path_clone);
+                let (fetch_error, fetch_partial, fetch_is_fetch_error) = match fetch_res {
+                    Ok(()) => (None, false, false),
+                    Err(e) => {
+                        let (msg, partial, is_fetch) = fetch_error_parts(&e);
+                        eprintln!("Fetch fehlgeschlagen für {}: {msg}", path_clone.display());
+                        (Some(msg), partial, is_fetch)
+                    }
+                };
+                let repos = crate::scanner::scan_repos(&cfg);
+                (fetch_error, fetch_partial, fetch_is_fetch_error, repos)
+            })) {
+                Ok((fetch_error, fetch_partial, fetch_is_fetch_error, repos)) => {
+                    ScanResult::FetchDone {
+                        repos,
+                        fetch_error,
+                        fetch_partial,
+                        fetch_is_fetch_error,
+                        is_auto: false,
+                    }
+                }
+                Err(_) => {
+                    eprintln!("Manueller Fetch-Thread abgestürzt (panic vor send)");
+                    ScanResult::FetchAborted {
+                        reason_key: "fetch_aborted",
+                    }
+                }
+            };
+            let _ = tx.send(msg);
+        });
+        // Spinner/gesperrte Fetch-Buttons auch im Tray, sofort statt per Throttle
+        self.set_git_busy(GitBusy::Fetch { repo: repo_path });
+        self.sync_tray_service();
+    }
+
     fn record_usage(&mut self, repo_path: &Path, usage_type: UsageType) {
         let key = crate::config::AppConfig::repo_state_key(repo_path);
         let usage = self.config.repo_usage.entry(key).or_default();
@@ -1324,6 +1668,150 @@ impl MyApp {
         }
     }
 
+    /// Öffnet `path` mit der IDE `ide_id` des wirksamen Profils (Repo-Karte
+    /// und MR-Ansicht); `file` = Solution/Projektdatei, bei `no_args` nur der
+    /// Ordner. Merkt die IDE-Wahl. `true`, wenn die IDE gestartet wurde.
+    fn open_ide(&mut self, path: &Path, ide_id: &str, file: &Path) -> bool {
+        self.open_ide_in(path, path, ide_id, file)
+    }
+
+    /// Wie [`Self::open_ide`], die IDE kommt aber aus dem wirksamen Profil
+    /// von `profile_path` (K1: Worktree außerhalb der Suchpfade mit der IDE
+    /// des Basis-Klons).
+    fn open_ide_in(&mut self, path: &Path, profile_path: &Path, ide_id: &str, file: &Path) -> bool {
+        let lang = self.config.language;
+        // Speichere letzte IDE Wahl
+        {
+            let state = self.config.get_repo_state_mut(path);
+            state.selected_ide = Some(ide_id.to_string());
+            // Review-Fix: Tray-Snapshot sonst stale.
+            self.mark_tray_dirty();
+            if let Err(e) = self.config.save() {
+                self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+            }
+        }
+        let mut started = false;
+        // Finde IdeConfig
+        let profile = self.config.get_effective_profile_for_repo(profile_path);
+        if let Some(ide) = profile.ides.iter().find(|i| i.id == ide_id) {
+            let file_opt = if ide.no_args { None } else { Some(file) };
+            let display_path = file_opt
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            match launch_ide(ide, path, file_opt) {
+                Ok(()) => {
+                    self.status_message = Some(tr_fmt(
+                        lang,
+                        "opening_with",
+                        &[&display_path, &ide.display_name],
+                    ));
+                    self.status_message_time = Some(std::time::Instant::now());
+                    started = true;
+                }
+                Err(e) => {
+                    self.error = Some(format!(
+                        "IDE '{}' konnte nicht gestartet werden: {e:#}",
+                        ide.display_name
+                    ));
+                }
+            }
+        } else {
+            self.error = Some(tr_fmt(
+                lang,
+                "ide_not_found",
+                &[ide_id, &profile.display_name],
+            ));
+        }
+        self.record_usage(path, UsageType::Open);
+        started
+    }
+
+    /// Agent mit dieser ID, sonst der aktive (wie die Repo-Karte).
+    fn agent_by_id(&self, agent_id: &str) -> Option<&crate::config::AgentProfile> {
+        self.config
+            .agents
+            .iter()
+            .find(|a| a.id == agent_id)
+            .or_else(|| self.config.get_active_agent())
+    }
+
+    /// Startet den Agenten `agent_id` (sonst den aktiven) im Terminal in
+    /// `path`. `true`, wenn ein Agent gestartet wurde.
+    fn open_agent(&mut self, path: &Path, agent_id: &str) -> bool {
+        let lang = self.config.language;
+        let started = if let Some(agent) = self.agent_by_id(agent_id).cloned() {
+            let term_pref = agent
+                .terminal_override
+                .clone()
+                .unwrap_or_else(|| self.config.terminal.preference.clone());
+            // Nicht blockierend starten (verhindert UI Freeze, besonders bei pwsh/wt)
+            let repo_clone = path.to_path_buf();
+            let display_name = agent.display_name.clone();
+            let err_tx = self.launch_err_tx.clone();
+            self.status_message = Some(tr_fmt(
+                lang,
+                "starting_agent_in",
+                &[&agent.display_name, &path.display().to_string()],
+            ));
+            self.status_message_time = Some(std::time::Instant::now());
+            std::thread::spawn(move || {
+                if let Err(e) = launch_agent(&agent, &repo_clone, &term_pref) {
+                    let _ = err_tx.send(format!(
+                        "Agent '{}' konnte nicht gestartet werden: {e:#}",
+                        display_name
+                    ));
+                }
+            });
+            true
+        } else {
+            self.error = Some(tr_fmt(lang, "agent_not_found", &[agent_id]));
+            false
+        };
+        self.record_usage(path, UsageType::Open);
+        started
+    }
+
+    /// Öffnet `path` im Explorer. `true` bei Erfolg.
+    fn open_explorer(&mut self, path: &Path) -> bool {
+        let opened = match crate::git::open_in_explorer(path) {
+            Ok(()) => {
+                self.status_message = Some(tr_fmt(
+                    self.config.language,
+                    "explorer_opened",
+                    &[&path.display().to_string()],
+                ));
+                self.status_message_time = Some(std::time::Instant::now());
+                true
+            }
+            Err(e) => {
+                self.error = Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"));
+                false
+            }
+        };
+        self.record_usage(path, UsageType::Open);
+        opened
+    }
+
+    /// Öffnet eine Shell in `path` (im Hintergrund; Fehler kommen über
+    /// `launch_err_rx`).
+    fn open_shell(&mut self, path: &Path) {
+        let pref = self.config.terminal.preference.clone();
+        let repo_clone = path.to_path_buf();
+        let err_tx = self.launch_err_tx.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = crate::git::open_shell(&repo_clone, &pref) {
+                let _ = err_tx.send(format!("Shell konnte nicht geöffnet werden: {e:#}"));
+            }
+        });
+        self.status_message = Some(tr_fmt(
+            self.config.language,
+            "shell_opened",
+            &[&path.display().to_string()],
+        ));
+        self.status_message_time = Some(std::time::Instant::now());
+        self.record_usage(path, UsageType::Open);
+    }
+
     fn handle_branch_switch(
         &mut self,
         ctx: &egui::Context,
@@ -1349,11 +1837,13 @@ impl MyApp {
             let has_conflicts = crate::git::has_merge_conflicts(&repo);
             let in_progress = crate::git::is_merge_in_progress(&repo);
             if has_conflicts || in_progress {
-                self.error = Some(format!(
-                    "Branch-Wechsel zu '{}' nicht möglich: Merge-Konflikte oder Merge/Rebase läuft ({:?})",
-                    target_branch,
-                    repo.state()
+                self.error = Some(tr_fmt(
+                    self.config.language,
+                    "branch_switch_blocked",
+                    &[&target_branch, &format!("{:?}", repo.state())],
                 ));
+                // K1: kein Wechsel, also auch kein „Danach öffnen“
+                self.cancel_mr_switch(&repo_path, &target_branch);
                 // I5: echte Fehler müssen bei hidden Window revealen — sonst
                 // klickt der Nutzer im Tray und sieht nichts.
                 self.mark_tray_dirty();
@@ -1388,36 +1878,58 @@ impl MyApp {
     ) {
         let result = if stash {
             crate::git::stash_and_checkout(&repo_path, &target_branch)
+                .map(|switch| (switch.outcome, switch.pop_failed))
         } else if force {
-            crate::git::checkout_branch_force(&repo_path, &target_branch)
+            crate::git::checkout_branch_force(&repo_path, &target_branch).map(|o| (o, None))
         } else {
-            crate::git::checkout_branch(&repo_path, &target_branch)
+            crate::git::checkout_branch(&repo_path, &target_branch).map(|o| (o, None))
         };
 
+        let lang = self.config.language;
         match result {
-            Ok(()) => {
-                self.status_message = Some(format!(
-                    "Branch zu '{}' gewechselt: {}",
-                    target_branch,
-                    repo_path.display()
+            Ok((_, Some(pop_failed))) => {
+                // Gewechselt, aber Stash pop gescheitert (Stash bleibt
+                // erhalten): Hinweis im Dialog wie bisher und neu scannen.
+                // Ein MR-Wechsel ist trotzdem erledigt (Meldung, „Danach öffnen“).
+                let hint = pop_failed.to_string();
+                match &mut self.branch_dialog {
+                    Some(dlg) => dlg.error = Some(hint),
+                    None => self.error = Some(hint),
+                }
+                self.start_scan();
+                self.mr_switch_succeeded(&repo_path, &target_branch);
+            }
+            Ok((outcome, None)) => {
+                self.status_message = Some(tr_fmt(
+                    lang,
+                    "branch_switched",
+                    &[&target_branch, &repo_path.display().to_string()],
                 ));
                 self.status_message_time = Some(std::time::Instant::now());
                 self.error = None;
                 self.branch_dialog = None;
                 self.record_usage(&repo_path, UsageType::BranchSwitch);
                 self.start_scan();
+                // E15: Hinweis (vorgespult / voraus / divergiert) erst nach
+                // `start_scan` — während eines Auto-Fetch überschreibt der
+                // sonst „auto_fetch_running“ (Scan bleibt per pending_scan gemerkt).
+                if let Some(notice) = checkout_outcome_notice(lang, &outcome) {
+                    self.status_message = Some(notice);
+                    self.status_message_time = Some(std::time::Instant::now());
+                }
+                // K1: Wechsel aus der MR-Ansicht → MR-Meldung, „Danach öffnen“
+                self.mr_switch_succeeded(&repo_path, &target_branch);
             }
             Err(e) => {
+                // E15: Upstream-/Worktree-Abbruch lokalisiert.
+                let detail = branch_switch_error_detail(lang, &e);
                 // Wenn Fehler und Dialog offen, zeige Fehler im Dialog, sonst global
                 if let Some(dlg) = &mut self.branch_dialog {
-                    dlg.error = Some(format!("{e:#}"));
+                    dlg.error = Some(detail);
                 } else {
-                    self.error = Some(format!("Branch-Wechsel fehlgeschlagen: {e:#}"));
-                }
-                // Bei stash_and_checkout kann es sein dass stash pop fehlgeschlagen ist, aber checkout ok – dann trotzdem neu scannen
-                // M4: typisiert statt String-Match.
-                if crate::git::is_stash_pop_failed(&e) {
-                    self.start_scan();
+                    self.error = Some(tr_fmt(lang, "branch_switch_failed", &[&detail]));
+                    // K1: ohne Dialog kein zweiter Versuch
+                    self.cancel_mr_switch(&repo_path, &target_branch);
                 }
             }
         }
@@ -1428,6 +1940,10 @@ impl MyApp {
         let lang = self.config.language;
         // Hysterese wird in `update()` gepflegt ( <400 collapsed, >=500 expanded )
         let effective_collapse = self.top_bar_collapsed;
+        // Schmales Fenster (Umschalter braucht Platz): Buttons nur als Icon;
+        // noch schmaler Feldbeschriftungen als Tooltip der Combos.
+        let compact = self.last_window_size[0] < TOP_BAR_COMPACT_WIDTH;
+        let no_captions = self.last_window_size[0] < TOP_BAR_CAPTIONS_WIDTH;
 
         egui::Panel::top("top_bar")
             .frame(
@@ -1443,21 +1959,19 @@ impl MyApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(tr(lang, "app_title")).size(17.0).strong());
                     ui.add_space(12.0);
-                    ui.label(
-                        RichText::new(format!("{} Repositories", self.repos.len()))
-                            .size(12.0)
-                            .color(Color32::from_rgb(100, 100, 100)),
-                    );
+                    self.view_switcher(ui);
 
                     // Profile Combo in TopBar
                     ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(tr(lang, "profile_label"))
-                            .size(11.0)
-                            .color(Color32::from_rgb(100, 100, 100)),
-                    );
+                    if !no_captions {
+                        ui.label(
+                            RichText::new(tr(lang, "profile_label"))
+                                .size(11.0)
+                                .color(Color32::from_rgb(100, 100, 100)),
+                        );
+                    }
                     let mut new_profile = self.config.active_profile_id.clone();
-                    egui::ComboBox::from_id_salt("active_profile_top")
+                    let profile_combo = egui::ComboBox::from_id_salt("active_profile_top")
                         .selected_text(self.config.get_active_profile().display_name.clone())
                         .width(110.0)
                         .show_ui(ui, |ui| {
@@ -1468,6 +1982,11 @@ impl MyApp {
                                 }
                             }
                         });
+                    if no_captions {
+                        profile_combo
+                            .response
+                            .on_hover_text(tr(lang, "profile_label").trim_end_matches(':'));
+                    }
                     if new_profile != self.config.active_profile_id {
                         self.config.active_profile_id = new_profile;
                         if let Err(e) = self.config.save() {
@@ -1491,11 +2010,13 @@ impl MyApp {
                     if show_agents {
                         if self.config.agents.len() > 1 {
                             ui.add_space(8.0);
-                            ui.label(
-                                RichText::new("AI:")
-                                    .size(11.0)
-                                    .color(Color32::from_rgb(100, 100, 100)),
-                            );
+                            if !no_captions {
+                                ui.label(
+                                    RichText::new("AI:")
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(100, 100, 100)),
+                                );
+                            }
                             let active_agents = self.config.get_active_agents();
                             let current_text = if active_agents.is_empty() {
                                 "Keine".to_string()
@@ -1507,7 +2028,7 @@ impl MyApp {
                             let mut save_err: Option<String> = None;
                             // Review-Fix: Agent-Liste betrifft Tray-Popup → dirty.
                             let mut agents_changed = false;
-                            egui::ComboBox::from_id_salt("active_agent_top")
+                            let agent_combo = egui::ComboBox::from_id_salt("active_agent_top")
                                 .selected_text(current_text)
                                 .width(120.0)
                                 .show_ui(ui, |ui| {
@@ -1558,6 +2079,11 @@ impl MyApp {
                                         }
                                     }
                                 });
+                            if no_captions {
+                                agent_combo
+                                    .response
+                                    .on_hover_text(tr(lang, "ai_label").trim_end_matches(':'));
+                            }
                             if agents_changed {
                                 self.mark_tray_dirty();
                             }
@@ -1576,13 +2102,15 @@ impl MyApp {
 
                     // Language selector
                     ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(tr(lang, "language"))
-                            .size(11.0)
-                            .color(Color32::from_rgb(100, 100, 100)),
-                    );
+                    if !no_captions {
+                        ui.label(
+                            RichText::new(tr(lang, "language"))
+                                .size(11.0)
+                                .color(Color32::from_rgb(100, 100, 100)),
+                        );
+                    }
                     let mut new_lang = lang;
-                    egui::ComboBox::from_id_salt("language_top")
+                    let lang_combo = egui::ComboBox::from_id_salt("language_top")
                         .selected_text(lang.display_name().to_string())
                         .width(90.0)
                         .show_ui(ui, |ui| {
@@ -1593,6 +2121,9 @@ impl MyApp {
                                 }
                             }
                         });
+                    if no_captions {
+                        lang_combo.response.on_hover_text(tr(lang, "language"));
+                    }
                     if new_lang != lang {
                         self.config.language = new_lang;
                         // Review-Fix: Sprache betrifft auch Tray-Texte.
@@ -1603,13 +2134,9 @@ impl MyApp {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::image_and_text(
-                                egui::Image::new(ICON_GEAR)
-                                    .fit_to_exact_size(Vec2::splat(14.0))
-                                    .tint(ui.visuals().text_color()),
-                                RichText::new(tr(lang, "settings")).size(12.0),
-                            ))
+                        let settings =
+                            top_bar_button(ui, ICON_GEAR, &tr(lang, "settings"), compact, true);
+                        if settings
                             .on_hover_text(tr(lang, "settings_tooltip"))
                             .clicked()
                         {
@@ -1617,23 +2144,50 @@ impl MyApp {
                             self.settings_state = Some(SettingsState::from_config(&self.config));
                         }
                         ui.add_space(8.0);
-                        let (refresh_icon, refresh_label) = if self.scanning {
-                            (ICON_REFRESH, tr(lang, "scanning"))
+                        // E19: in der MR-Ansicht lädt „Aktualisieren“ die MRs neu.
+                        let mr_view = self.main_view == MainView::MergeRequests;
+                        let checkout = matches!(self.git_busy, GitBusy::Checkout { .. });
+                        let busy = if mr_view {
+                            self.mr_loading || self.mr_discovering || checkout
                         } else {
-                            (ICON_REFRESH, tr(lang, "refresh"))
+                            self.git_busy.holds_refs()
                         };
-                        let btn = egui::Button::image_and_text(
-                            egui::Image::new(refresh_icon)
-                                .fit_to_exact_size(Vec2::splat(14.0))
-                                .tint(ui.visuals().text_color()),
-                            RichText::new(refresh_label).size(12.0),
-                        );
-                        if ui.add_enabled(!self.scanning, btn).clicked() {
-                            self.start_scan();
+                        // Beim Auschecken kein „Scanne…“
+                        let refresh_label = if !mr_view && self.git_busy.scans_repos() {
+                            tr(lang, "scanning")
+                        } else {
+                            tr(lang, "refresh")
+                        };
+                        let refresh =
+                            top_bar_button(ui, ICON_REFRESH, &refresh_label, compact, !busy);
+                        // Tooltip auch deaktiviert (nur Icon: sonst ohne Text)
+                        let tooltip = if mr_view {
+                            Some(tr(lang, "mr_reload_tt"))
+                        } else if compact {
+                            Some(refresh_label)
+                        } else {
+                            None
+                        };
+                        let refresh = match tooltip {
+                            Some(tt) => {
+                                refresh.on_hover_text(tt.clone()).on_disabled_hover_text(tt)
+                            }
+                            None => refresh,
+                        };
+                        if refresh.clicked() {
+                            if mr_view {
+                                self.mr_user_refresh();
+                            } else {
+                                self.start_scan();
+                            }
                         }
-                        if self.scanning {
+                        if busy {
                             ui.add_space(8.0);
                             ui.spinner();
+                        }
+                        // E19: Sortierung wirkt nur auf die Repo-Liste.
+                        if mr_view {
+                            return;
                         }
                         // Task 4: Sort-Modus als Icon-Button mit Dropdown
                         // (kein Text-Label im Button → kein Truncation des DE-Labels;
@@ -1738,15 +2292,24 @@ impl MyApp {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if let Some(msg) = &self.status_message {
+                    if self.main_view == MainView::MergeRequests {
+                        // Statusmeldung (3 s) hat Vorrang, sonst Hosts und Stand.
+                        let (text, is_message) = self.mr_status_line();
+                        let color = if is_message {
+                            Color32::from_rgb(60, 120, 60)
+                        } else {
+                            crate::ui::theme::mr_palette(&self.config.theme, ui.visuals()).text2
+                        };
+                        ui.label(RichText::new(text).size(11.0).color(color));
+                    } else if let Some(msg) = &self.status_message {
                         ui.label(
                             RichText::new(msg)
                                 .size(11.0)
                                 .color(Color32::from_rgb(60, 120, 60)),
                         );
-                    } else if self.scanning {
+                    } else if let Some(text) = repo_busy_text(lang, &self.git_busy) {
                         ui.label(
-                            RichText::new(tr(lang, "scanning_repos"))
+                            RichText::new(text)
                                 .size(11.0)
                                 .color(Color32::from_rgb(100, 100, 100)),
                         );
@@ -1869,10 +2432,18 @@ impl MyApp {
             });
         }
         if to_close {
-            self.branch_dialog = None;
+            self.close_branch_dialog();
         }
         if let Some((path, branch, force, stash)) = action {
             self.execute_branch_switch(path, branch, force, stash);
+        }
+    }
+
+    /// „Abbrechen“ im Branch-Dialog; ein wartender MR-Wechsel entfällt
+    /// samt „Danach öffnen“ (K1).
+    fn close_branch_dialog(&mut self) {
+        if let Some(dlg) = self.branch_dialog.take() {
+            self.cancel_mr_switch(&dlg.repo_path, &dlg.target_branch);
         }
     }
 
@@ -1942,6 +2513,58 @@ impl MyApp {
             self.show_update_dialog = false;
         }
     }
+
+    /// Gemeinsames Fehlerbanner (`self.error`) über der Repo-Liste bzw. der
+    /// MR-Ansicht; das Kreuz löscht den Fehler.
+    fn show_error_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(err_msg) = self.error.clone() else {
+            return;
+        };
+        let lang = self.config.language;
+        let mut do_clear = false;
+        let frame = egui::Frame::new()
+            .fill(Color32::from_rgb(255, 235, 235))
+            .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 100, 100)))
+            .corner_radius(6)
+            .inner_margin(egui::Margin::symmetric(10, 8));
+        frame.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Image::new(ICON_WARNING)
+                        .fit_to_exact_size(Vec2::splat(16.0))
+                        .tint(Color32::from_rgb(160, 40, 40)),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "{}: {}",
+                        if lang == Language::En {
+                            "Error"
+                        } else {
+                            "Fehler"
+                        },
+                        err_msg
+                    ))
+                    .size(12.0)
+                    .color(Color32::from_rgb(160, 40, 40)),
+                );
+                if ui
+                    .add(egui::Button::image(
+                        egui::Image::new(ICON_CROSS)
+                            .fit_to_exact_size(Vec2::splat(12.0))
+                            .tint(Color32::from_rgb(160, 40, 40)),
+                    ))
+                    .on_hover_text("Schließen")
+                    .clicked()
+                {
+                    do_clear = true;
+                }
+            });
+        });
+        ui.add_space(8.0);
+        if do_clear {
+            self.error = None;
+        }
+    }
 }
 
 impl eframe::App for MyApp {
@@ -1965,6 +2588,10 @@ impl eframe::App for MyApp {
         }
         // Task 5: periodischer Fetch (throttled, 0=aus) — auch bei hidden Window.
         self.maybe_auto_fetch(ctx);
+        // Merge Requests: Ergebnisse übernehmen, Intervall nur bei sichtbarem Fenster.
+        self.poll_mr(ctx);
+        self.poll_mr_settings(ctx);
+        self.maybe_refresh_mr(ctx);
         self.handle_close_request(ctx);
         // P5: gebatchte Usage-Saves hier flush (deckt auch ui()-Actions vom
         // Vorframe ab — max. 1 Save pro Frame).
@@ -2003,56 +2630,14 @@ impl eframe::App for MyApp {
                     .inner_margin(egui::Margin::same(12)),
             )
             .show(ui, |ui| {
-                let err_to_clear = if let Some(err_msg) = self.error.clone() {
-                    let mut do_clear = false;
-                    let frame = egui::Frame::new()
-                        .fill(Color32::from_rgb(255, 235, 235))
-                        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 100, 100)))
-                        .corner_radius(6)
-                        .inner_margin(egui::Margin::symmetric(10, 8));
-                    frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::Image::new(ICON_WARNING)
-                                    .fit_to_exact_size(Vec2::splat(16.0))
-                                    .tint(Color32::from_rgb(160, 40, 40)),
-                            );
-                            ui.label(
-                                RichText::new(format!(
-                                    "{}: {}",
-                                    if lang == Language::En {
-                                        "Error"
-                                    } else {
-                                        "Fehler"
-                                    },
-                                    err_msg
-                                ))
-                                .size(12.0)
-                                .color(Color32::from_rgb(160, 40, 40)),
-                            );
-                            if ui
-                                .add(egui::Button::image(
-                                    egui::Image::new(ICON_CROSS)
-                                        .fit_to_exact_size(Vec2::splat(12.0))
-                                        .tint(Color32::from_rgb(160, 40, 40)),
-                                ))
-                                .on_hover_text("Schließen")
-                                .clicked()
-                            {
-                                do_clear = true;
-                            }
-                        });
-                    });
-                    ui.add_space(8.0);
-                    do_clear
-                } else {
-                    false
-                };
-                if err_to_clear {
-                    self.error = None;
+                // E20: Fehler beim Auschecken/Branch-Wechsel in beiden Ansichten.
+                self.show_error_banner(ui);
+                if self.main_view == MainView::MergeRequests {
+                    self.show_mr_view(ui);
+                    return;
                 }
 
-                if self.config.roots.is_empty() && !self.scanning {
+                if self.config.roots.is_empty() && !self.git_busy.scans_repos() {
                     let frame = egui::Frame::new()
                         .fill(Color32::from_rgb(255, 248, 220))
                         .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 180, 80)))
@@ -2090,15 +2675,25 @@ impl eframe::App for MyApp {
 
                 // Wir brauchen &mut für repo_list, um selektierte Werte zu zeigen, aber hier clonen wir mut
                 // repo_list wird &mut repos erwarten, wir haben &mut self.repos
-                // scanning → Fetch-/Refresh-Buttons disabled + Spinner während Fetch/Scan
+                // Lauf hält die Refs → Fetch-/Refresh-Buttons disabled + Spinner
                 // Task 4: Sortierung im View (Scanner bleibt alphabetisch)
                 // Finding A: nur bei dirty sortieren statt pro Frame (60fps).
                 if self.repo_sort_dirty {
                     sort_main_repos(&mut self.repos, &self.config);
+                    self.update_mr_clones();
                     self.repo_sort_dirty = false;
                 }
-                let fetching = self.scanning;
-                show_repo_list(ui, &mut self.repos, &self.config, &mut actions, fetching);
+                let fetching = self.git_busy.holds_refs();
+                // K1: „In Repo-Liste zeigen“ hebt eine Karte kurz hervor
+                let highlight = self.repo_highlight_frame(&ctx);
+                show_repo_list(
+                    ui,
+                    &mut self.repos,
+                    &self.config,
+                    &mut actions,
+                    fetching,
+                    highlight.as_ref(),
+                );
 
                 // Handle Actions
                 if let Some((repo_path, branch)) = actions.branch_switch {
@@ -2176,88 +2771,10 @@ impl eframe::App for MyApp {
                     }
                 }
                 if let Some((repo_path, ide_id, file_path)) = actions.ide_open {
-                    // Speichere letzte IDE Wahl
-                    {
-                        let state = self.config.get_repo_state_mut(&repo_path);
-                        state.selected_ide = Some(ide_id.clone());
-                        // Review-Fix: Tray-Snapshot sonst stale.
-                        self.mark_tray_dirty();
-                        if let Err(e) = self.config.save() {
-                            self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
-                        }
-                    }
-                    // Finde IdeConfig
-                    let profile = self.config.get_effective_profile_for_repo(&repo_path);
-                    if let Some(ide) = profile.ides.iter().find(|i| i.id == ide_id) {
-                        let file_opt = if ide.no_args {
-                            None
-                        } else {
-                            Some(file_path.as_path())
-                        };
-                        let display_path = file_opt
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| repo_path.display().to_string());
-                        match launch_ide(ide, &repo_path, file_opt) {
-                            Ok(()) => {
-                                self.status_message = Some(tr_fmt(
-                                    lang,
-                                    "opening_with",
-                                    &[&display_path, &ide.display_name],
-                                ));
-                                self.status_message_time = Some(std::time::Instant::now());
-                            }
-                            Err(e) => {
-                                self.error = Some(format!(
-                                    "IDE '{}' konnte nicht gestartet werden: {e:#}",
-                                    ide.display_name
-                                ));
-                            }
-                        }
-                    } else {
-                        self.error = Some(tr_fmt(
-                            lang,
-                            "ide_not_found",
-                            &[&ide_id, &profile.display_name],
-                        ));
-                    }
-                    self.record_usage(&repo_path, UsageType::Open);
+                    self.open_ide(&repo_path, &ide_id, &file_path);
                 }
                 if let Some((repo_path, agent_id)) = actions.agent_open {
-                    let agent = self
-                        .config
-                        .agents
-                        .iter()
-                        .find(|a| a.id == agent_id)
-                        .cloned()
-                        .or_else(|| self.config.get_active_agent().cloned());
-                    if let Some(agent) = agent {
-                        let term_pref = agent
-                            .terminal_override
-                            .clone()
-                            .unwrap_or_else(|| self.config.terminal.preference.clone());
-                        // Nicht blockierend starten (verhindert UI Freeze, besonders bei pwsh/wt)
-                        let repo_clone = repo_path.clone();
-                        let agent_clone = agent.clone();
-                        let display_name = agent.display_name.clone();
-                        let err_tx = self.launch_err_tx.clone();
-                        std::thread::spawn(move || {
-                            if let Err(e) = launch_agent(&agent_clone, &repo_clone, &term_pref) {
-                                let _ = err_tx.send(format!(
-                                    "Agent '{}' konnte nicht gestartet werden: {e:#}",
-                                    display_name
-                                ));
-                            }
-                        });
-                        self.status_message = Some(tr_fmt(
-                            lang,
-                            "starting_agent_in",
-                            &[&agent.display_name, &repo_path.display().to_string()],
-                        ));
-                        self.status_message_time = Some(std::time::Instant::now());
-                    } else {
-                        self.error = Some(tr_fmt(lang, "agent_not_found", &[&agent_id]));
-                    }
-                    self.record_usage(&repo_path, UsageType::Open);
+                    self.open_agent(&repo_path, &agent_id);
                 }
                 if let Some((repo_path, profile_opt)) = actions.profile_override {
                     self.config
@@ -2274,101 +2791,14 @@ impl eframe::App for MyApp {
                         self.start_scan();
                     }
                 }
-                // L2: wie start_scan — kein manueller Fetch während
-                // Auto-Fetch läuft (Ref-Race); Request verwerfen + Hinweis.
-                if self.auto_fetching && actions.fetch_branches.is_some() {
-                    self.status_message = Some(tr(lang, "auto_fetch_running"));
-                    self.status_message_time = Some(std::time::Instant::now());
-                    actions.fetch_branches = None;
-                }
                 if let Some(repo_path) = actions.fetch_branches {
-                    let path_clone = repo_path.clone();
-                    let cfg = self.config.clone();
-                    let tx = self.scan_tx.clone();
-                    self.scanning = true;
-                    // Manueller Fetch = frische Refs: Auto-Timer zurücksetzen,
-                    // damit der periodische Fetch nicht Sekunden später doppelt läuft.
-                    self.last_auto_fetch = Some(std::time::Instant::now());
-                    self.status_message = Some(tr_fmt(
-                        lang,
-                        "fetching_branches",
-                        &[&repo_path.display().to_string()],
-                    ));
-                    self.status_message_time = Some(std::time::Instant::now());
-                    std::thread::spawn(move || {
-                        // H3: Panic vor send darf `scanning` nicht hängen
-                        // lassen — FetchAborted resettet Flags ohne Listen-Wipe.
-                        let msg =
-                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                let fetch_res = crate::git::fetch_all(&path_clone);
-                                let (fetch_error, fetch_partial, fetch_is_fetch_error) =
-                                    match fetch_res {
-                                        Ok(()) => (None, false, false),
-                                        Err(e) => {
-                                            let (msg, partial, is_fetch) = fetch_error_parts(&e);
-                                            eprintln!(
-                                                "Fetch fehlgeschlagen für {}: {msg}",
-                                                path_clone.display()
-                                            );
-                                            (Some(msg), partial, is_fetch)
-                                        }
-                                    };
-                                let repos = crate::scanner::scan_repos(&cfg);
-                                (fetch_error, fetch_partial, fetch_is_fetch_error, repos)
-                            })) {
-                                Ok((fetch_error, fetch_partial, fetch_is_fetch_error, repos)) => {
-                                    ScanResult::FetchDone {
-                                        repos,
-                                        fetch_error,
-                                        fetch_partial,
-                                        fetch_is_fetch_error,
-                                        is_auto: false,
-                                    }
-                                }
-                                Err(_) => {
-                                    eprintln!("Manueller Fetch-Thread abgestürzt (panic vor send)");
-                                    ScanResult::FetchAborted {
-                                        reason_key: "fetch_aborted",
-                                    }
-                                }
-                            };
-                        let _ = tx.send(msg);
-                    });
+                    self.start_repo_fetch(repo_path);
                 }
                 if let Some(repo_path) = actions.explorer_open {
-                    match crate::git::open_in_explorer(&repo_path) {
-                        Ok(()) => {
-                            self.status_message = Some(tr_fmt(
-                                lang,
-                                "explorer_opened",
-                                &[&repo_path.display().to_string()],
-                            ));
-                            self.status_message_time = Some(std::time::Instant::now());
-                        }
-                        Err(e) => {
-                            self.error =
-                                Some(format!("Explorer konnte nicht geöffnet werden: {e:#}"));
-                        }
-                    }
-                    self.record_usage(&repo_path, UsageType::Open);
+                    self.open_explorer(&repo_path);
                 }
                 if let Some(repo_path) = actions.shell_open {
-                    let pref = self.config.terminal.preference.clone();
-                    let repo_clone = repo_path.clone();
-                    let err_tx = self.launch_err_tx.clone();
-                    std::thread::spawn(move || {
-                        if let Err(e) = crate::git::open_shell(&repo_clone, &pref) {
-                            let _ =
-                                err_tx.send(format!("Shell konnte nicht geöffnet werden: {e:#}"));
-                        }
-                    });
-                    self.status_message = Some(tr_fmt(
-                        lang,
-                        "shell_opened",
-                        &[&repo_path.display().to_string()],
-                    ));
-                    self.status_message_time = Some(std::time::Instant::now());
-                    self.record_usage(&repo_path, UsageType::Open);
+                    self.open_shell(&repo_path);
                 }
             });
 
@@ -2379,14 +2809,19 @@ impl eframe::App for MyApp {
             if let Some(mut state) = self.settings_state.take() {
                 let mut save: Option<AppConfig> = None;
                 let mut open = self.show_settings;
+                let mut mr_out = crate::ui::settings::MrSettingsOutput::default();
                 crate::ui::settings::show_settings_window(
                     &ctx,
                     &mut state,
                     &mut open,
                     &mut save,
                     self.update_error.as_deref(),
+                    &self.mr_settings_input(),
+                    &mut mr_out,
                 );
                 self.show_settings = open;
+                // Tab „Merge Requests“: Prüfung und Token wirken sofort
+                self.handle_mr_settings_output(mr_out, &state.draft.merge_requests);
 
                 if let Some(new_cfg) = save {
                     // Theme sofort anwenden
@@ -2411,6 +2846,7 @@ impl eframe::App for MyApp {
                         }
                     }
                     self.config = new_cfg;
+                    self.apply_glab_program();
                     // Autostart nach Save anwenden (Registry Run-Key schreiben/entfernen)
                     let autostart_failed = match crate::autostart::apply_autostart(autostart) {
                         Ok(()) => false,
@@ -2447,6 +2883,8 @@ impl eframe::App for MyApp {
                     if should_scan {
                         self.start_scan();
                     }
+                    // Merge Requests: Hosts/Auswahl neu, sofort neu laden.
+                    self.mr_after_settings_save();
                 } else if self.show_settings {
                     self.settings_state = Some(state);
                 } else {
@@ -2468,6 +2906,7 @@ impl eframe::App for MyApp {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+    use crate::gitlab::glab::GatedRunner;
 
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -2527,15 +2966,31 @@ mod tests {
         assert!(should_auto_fetch(Some(old1), 1, now));
     }
 
-    fn test_app() -> MyApp {
+    /// Test-App ohne Fenster; glab ist ein `FakeGlab` ohne Antworten.
+    pub(super) fn test_app() -> MyApp {
+        test_app_with_glab(Arc::new(GatedRunner::new(
+            crate::gitlab::glab::FakeGlab::new(),
+        )))
+    }
+
+    /// Wie `test_app` mit eigenem Runner (Antworten vorbereiten, Aufrufe prüfen).
+    pub(super) fn test_app_with_glab(glab: Arc<dyn GlabRunner>) -> MyApp {
         let (scan_tx, scan_rx) = mpsc::channel();
         let (launch_err_tx, launch_err_rx) = mpsc::channel();
         let (_config_update_tx, config_update_rx) = mpsc::channel();
         let (_update_tx, update_rx) = mpsc::channel();
+        let (mr_tx, mr_rx) = mpsc::channel();
+        let (mr_settings_tx, mr_settings_rx) = mpsc::channel();
+        let config = AppConfig::default();
+        let mr_view = MrViewState::new(&config.merge_requests);
+        let glab_program = config.merge_requests.glab_program.clone();
+        // Jedes Programm landet beim selben `FakeGlab`
+        let fake = Arc::clone(&glab);
+        let glab_factory: GlabFactory = Box::new(move |_| Arc::clone(&fake));
         MyApp {
-            config: AppConfig::default(),
+            config,
             repos: Vec::new(),
-            scanning: false,
+            git_busy: GitBusy::Idle,
             error: None,
             show_settings: false,
             settings_state: None,
@@ -2574,6 +3029,38 @@ mod tests {
             config_save_pending: false,
             last_config_save: None,
             repo_sort_dirty: true,
+            main_view: MainView::Repos,
+            glab,
+            glab_program,
+            glab_factory,
+            glab_hosts: Vec::new(),
+            mr_hosts: HostMap::default(),
+            mr_locals: Vec::new(),
+            mr_clones: Default::default(),
+            mr_snapshot: None,
+            mr_loading: false,
+            mr_pending_refresh: false,
+            mr_refresh_after_scan: false,
+            mr_last_refresh: None,
+            mr_auth_epoch: 0,
+            mr_discovering: false,
+            mr_more_pending: 0,
+            mr_merged: None,
+            mr_merged_loading: None,
+            mr_merged_gen: 0,
+            mr_tx,
+            mr_rx,
+            mr_view,
+            mr_glab_missing: false,
+            mr_glab_error: None,
+            mr_switch: None,
+            pending_after_checkout: None,
+            mr_notice: None,
+            repo_highlight: None,
+            mr_rediscover: Default::default(),
+            mr_settings_tx,
+            mr_settings_rx,
+            mr_settings: MrSettingsCache::default(),
         }
     }
 
@@ -2613,6 +3100,39 @@ mod tests {
         assert!(app.error.is_some());
     }
 
+    /// Start von Scan und Auto-Fetch sperrt die Fetch-Buttons im Tray
+    /// (`TrayFetching.busy`) → dirty, sonst zeigt das Popup sie bis zum
+    /// Ergebnis klickbar und ein Klick ginge still verloren.
+    #[test]
+    fn scan_and_auto_fetch_start_mark_tray_dirty() {
+        let mut app = test_app();
+        app.config.roots.clear();
+        app.start_scan();
+        assert_eq!(app.git_busy, GitBusy::Scan);
+        assert!(app.tray_dirty, "Scan-Start");
+
+        let dir = tempdir().unwrap();
+        let mut app = test_app();
+        app.config.roots.clear();
+        app.repos = vec![crate::git::RepoInfo::new(
+            dir.path().to_path_buf(),
+            "main".to_string(),
+            false,
+            false,
+        )];
+        app.maybe_auto_fetch(&egui::Context::default());
+        assert!(app.auto_fetching);
+        assert!(app.tray_dirty, "Auto-Fetch-Start");
+        app.tray_dirty = false;
+        app.set_auto_fetching(false);
+        assert!(app.tray_dirty, "Auto-Fetch-Ende");
+        // Ohne Wechsel kein neuer Sync
+        app.tray_dirty = false;
+        app.set_auto_fetching(false);
+        app.set_git_busy(GitBusy::Idle);
+        assert!(!app.tray_dirty);
+    }
+
     #[test]
     fn poll_scan_marks_tray_dirty_on_pending_switches() {
         // Branch-Switch ohne Repo (open_repo → None → Fehlerpfad) markiert dirty.
@@ -2634,6 +3154,7 @@ mod tests {
             ScanResult::Repos(v) => assert!(v.is_empty()),
             ScanResult::FetchDone { .. } => panic!("expected Repos"),
             ScanResult::FetchAborted { .. } => panic!("expected Repos"),
+            ScanResult::MrCheckoutReady { .. } => panic!("expected Repos"),
         }
         let info =
             crate::git::RepoInfo::new(PathBuf::from("/tmp/repo"), "main".to_string(), false, false);
@@ -2642,6 +3163,29 @@ mod tests {
             ScanResult::Repos(v) => assert_eq!(v.len(), 1),
             ScanResult::FetchDone { .. } => panic!("expected Repos"),
             ScanResult::FetchAborted { .. } => panic!("expected Repos"),
+            ScanResult::MrCheckoutReady { .. } => panic!("expected Repos"),
+        }
+        // K1: Ergebnis des Checkout-Workers trägt Wahl und Ergebnis
+        let ready = ScanResult::MrCheckoutReady {
+            choice: Box::new(crate::ui::merge_requests::MrCheckoutChoice {
+                host_key: "gitlab.example.com".to_string(),
+                mr_id: "gid://gitlab/MergeRequest/5".to_string(),
+                iid: 5,
+                kind: crate::ui::merge_requests::MrCheckoutKind::Switch {
+                    clone: PathBuf::from("/tmp/repo"),
+                },
+                after: crate::config::AfterAction::Nothing,
+            }),
+            result: Ok(None),
+        };
+        match ready {
+            ScanResult::MrCheckoutReady { choice, result } => {
+                assert_eq!(choice.iid, 5);
+                assert!(matches!(result, Ok(None)));
+            }
+            ScanResult::Repos(_) => panic!("expected MrCheckoutReady"),
+            ScanResult::FetchDone { .. } => panic!("expected MrCheckoutReady"),
+            ScanResult::FetchAborted { .. } => panic!("expected MrCheckoutReady"),
         }
         let fetch_done = ScanResult::FetchDone {
             repos: vec![],
@@ -2664,6 +3208,7 @@ mod tests {
             }
             ScanResult::Repos(_) => panic!("expected FetchDone"),
             ScanResult::FetchAborted { .. } => panic!("expected FetchDone"),
+            ScanResult::MrCheckoutReady { .. } => panic!("expected FetchDone"),
         }
     }
 
@@ -2677,7 +3222,7 @@ mod tests {
     fn poll_scan_fetch_done_error_sets_error_and_status() {
         // UI-Error-Pfad: Fetch-Fehler landet in self.error + Status (statt eprintln-only)
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.scan_tx
             .send(ScanResult::FetchDone {
                 repos: vec![],
@@ -2689,7 +3234,7 @@ mod tests {
             .expect("send fetch done");
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
-        assert!(!app.scanning, "fetch done must clear spinner");
+        assert_eq!(app.git_busy, GitBusy::Idle, "fetch done must clear spinner");
         let err = app.error.expect("error must be set");
         assert!(
             err.contains("'origin': auth failed"),
@@ -2711,7 +3256,7 @@ mod tests {
     #[test]
     fn poll_scan_fetch_done_partial_uses_partial_key() {
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.scan_tx
             .send(ScanResult::FetchDone {
                 repos: vec![],
@@ -2724,7 +3269,7 @@ mod tests {
             .expect("send fetch done");
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
         let err = app.error.expect("error must be set");
         assert!(
             err.contains("'bad'"),
@@ -2746,7 +3291,7 @@ mod tests {
         // I1: EN-UI darf kein Deutsch einbetten (Wrapper + Hint + Detail EN).
         let mut app = test_app();
         assert_eq!(app.config.language, crate::i18n::Language::En);
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.scan_tx
             .send(ScanResult::FetchDone {
                 repos: vec![],
@@ -2783,7 +3328,7 @@ mod tests {
     #[test]
     fn poll_scan_fetch_done_ok_clears_error() {
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.auto_fetching = true;
         app.error = Some("stale".to_string());
         app.scan_tx
@@ -2798,9 +3343,9 @@ mod tests {
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
         // L4: Auto-FetchDone räumt eigenen Flag/Timestamp, lässt aber einen
-        // parallelen manuellen Lauf (scanning) in Ruhe.
+        // parallelen manuellen Lauf (git_busy) in Ruhe.
         assert!(
-            app.scanning,
+            app.git_busy.holds_refs(),
             "auto FetchDone must not clear manual scanning"
         );
         assert!(!app.auto_fetching);
@@ -2839,12 +3384,12 @@ mod tests {
         // I1: manueller Scan (Repos) darf einen laufenden Auto-Fetch nicht
         // als fertig markieren — sonst zwei parallele fetch_all (Ref-Race).
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.auto_fetching = true;
         app.scan_tx.send(ScanResult::Repos(vec![])).unwrap();
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
         assert!(app.auto_fetching, "Repos must not clear auto_fetching");
     }
 
@@ -2868,6 +3413,60 @@ mod tests {
             app.auto_fetching,
             "manual FetchDone must not clear auto flag"
         );
+    }
+
+    #[test]
+    fn repo_fetch_from_tray_refused_while_busy() {
+        // Tray-Stand kann veraltet sein: kein zweiter Fetch auf dieselben Refs
+        let mut app = test_app();
+        app.git_busy = GitBusy::Scan;
+        app.start_repo_fetch(PathBuf::from("/repos/a"));
+        assert_eq!(app.git_busy, GitBusy::Scan);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some(tr(app.config.language, "fetch_busy").as_str())
+        );
+        let mut app = test_app();
+        app.auto_fetching = true;
+        app.start_repo_fetch(PathBuf::from("/repos/a"));
+        assert_eq!(app.git_busy, GitBusy::Idle);
+    }
+
+    #[test]
+    fn repo_fetch_marks_repo_until_fetch_done() {
+        let mut app = test_app();
+        let dir = tempfile::tempdir().unwrap();
+        app.start_repo_fetch(dir.path().to_path_buf());
+        assert_eq!(
+            app.git_busy,
+            GitBusy::Fetch {
+                repo: dir.path().to_path_buf()
+            }
+        );
+        // Der Worker meldet sich auf dem alten Kanal; der kommt erst nach
+        // dem Auto-FetchDone zurück (sonst wertet poll_scan beide zugleich aus)
+        let (tx, rx) = mpsc::channel();
+        let worker_rx = std::mem::replace(&mut app.scan_rx, rx);
+        // Auto-FetchDone lässt den manuellen Fetch in Ruhe
+        tx.send(ScanResult::FetchDone {
+            repos: vec![],
+            fetch_error: None,
+            fetch_partial: false,
+            fetch_is_fetch_error: false,
+            is_auto: true,
+        })
+        .unwrap();
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert!(matches!(app.git_busy, GitBusy::Fetch { .. }));
+        app.scan_rx = worker_rx;
+        // Ende des manuellen Fetch (Worker oder Abbruch) gibt das Repo frei
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.git_busy.holds_refs() && std::time::Instant::now() < until {
+            app.poll_scan(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(app.git_busy, GitBusy::Idle);
     }
 
     #[test]
@@ -2897,9 +3496,9 @@ mod tests {
     #[test]
     fn poll_scan_auto_fetch_done_keeps_manual_scanning() {
         // L4: Auto-FetchDone darf den Spinner eines parallelen manuellen
-        // Laufs nicht löschen (nur is_auto=false setzt scanning zurück).
+        // Laufs nicht löschen (nur is_auto=false setzt git_busy zurück).
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.scan_tx
             .send(ScanResult::FetchDone {
                 repos: vec![],
@@ -2912,7 +3511,7 @@ mod tests {
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
         assert!(
-            app.scanning,
+            app.git_busy.holds_refs(),
             "auto FetchDone must not clear manual scanning"
         );
         // Manueller FetchDone räumt auf wie bisher.
@@ -2926,7 +3525,7 @@ mod tests {
             })
             .unwrap();
         app.poll_scan(&ctx);
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
     }
 
     #[test]
@@ -2936,8 +3535,9 @@ mod tests {
         let mut app = test_app();
         app.auto_fetching = true;
         app.start_scan();
-        assert!(
-            !app.scanning,
+        assert_eq!(
+            app.git_busy,
+            GitBusy::Idle,
             "must not spawn manual scan during auto-fetch"
         );
         assert!(
@@ -2950,7 +3550,7 @@ mod tests {
         // Ohne Auto-Lauf normaler Start.
         app.auto_fetching = false;
         app.start_scan();
-        assert!(app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Scan);
     }
 
     #[test]
@@ -3045,7 +3645,11 @@ mod tests {
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
         assert!(!app.pending_scan);
-        assert!(app.scanning, "pending refresh must start after abort");
+        assert_eq!(
+            app.git_busy,
+            GitBusy::Scan,
+            "pending refresh must start after abort"
+        );
         assert!(app.error.is_some());
     }
 
@@ -3056,7 +3660,7 @@ mod tests {
         app.auto_fetching = true;
         app.start_scan();
         assert!(app.pending_scan);
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
         let ctx = egui::Context::default();
         app.scan_tx
             .send(ScanResult::FetchDone {
@@ -3069,14 +3673,18 @@ mod tests {
             .unwrap();
         app.poll_scan(&ctx);
         assert!(!app.pending_scan);
-        assert!(app.scanning, "pending refresh must start after auto done");
+        assert_eq!(
+            app.git_busy,
+            GitBusy::Scan,
+            "pending refresh must start after auto done"
+        );
     }
 
     #[test]
     fn fetch_aborted_resets_flags_keeps_repos() {
         // H3: Abort resettet Flags + zeigt Fehler, wischt Liste nicht.
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.auto_fetching = true;
         app.repos = vec![crate::git::RepoInfo::new(
             PathBuf::from("/tmp/repo"),
@@ -3091,10 +3699,86 @@ mod tests {
             .unwrap();
         let ctx = egui::Context::default();
         app.poll_scan(&ctx);
-        assert!(!app.scanning);
+        assert_eq!(app.git_busy, GitBusy::Idle);
         assert!(!app.auto_fetching);
         assert_eq!(app.repos.len(), 1);
         assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn repo_busy_text_names_mr_checkout() {
+        let lang = Language::De;
+        assert_eq!(repo_busy_text(lang, &GitBusy::Idle), None);
+        let fetch = GitBusy::Fetch {
+            repo: PathBuf::from("/repos/a"),
+        };
+        for busy in [GitBusy::Scan, fetch] {
+            assert_eq!(
+                repo_busy_text(lang, &busy),
+                Some(tr(lang, "scanning_repos"))
+            );
+        }
+        // Auschecken hält nur die Refs: kein „Scanne …“
+        assert_eq!(
+            repo_busy_text(lang, &GitBusy::Checkout { iid: 5 }).as_deref(),
+            Some("Auschecken für !5 läuft …")
+        );
+    }
+
+    #[test]
+    fn git_busy_tells_ref_lock_from_scan() {
+        assert!(!GitBusy::Idle.holds_refs() && !GitBusy::Idle.scans_repos());
+        let fetch = GitBusy::Fetch {
+            repo: PathBuf::from("/repos/a"),
+        };
+        for busy in [GitBusy::Scan, fetch] {
+            assert!(busy.holds_refs() && busy.scans_repos(), "{busy:?}");
+        }
+        // K1: das Auschecken endet ohne Scan
+        let checkout = GitBusy::Checkout { iid: 5 };
+        assert!(checkout.holds_refs() && !checkout.scans_repos());
+    }
+
+    /// Ohne GitLab-Host zeigt die MR-Ansicht „Laden“ nur, solange ein Scan
+    /// noch Hosts liefern kann, nicht während eines (ggf. minutenlangen)
+    /// Auscheckens (K1).
+    #[test]
+    fn mr_view_loading_card_only_while_scanning() {
+        let loading = tr(Language::En, "mr_loading");
+        let fetch = GitBusy::Fetch {
+            repo: PathBuf::from("/repos/a"),
+        };
+        for (busy, shows_loading) in [
+            (GitBusy::Scan, true),
+            (fetch, true),
+            (GitBusy::Checkout { iid: 5 }, false),
+            (GitBusy::Idle, false),
+        ] {
+            let mut app = test_app();
+            app.main_view = MainView::MergeRequests;
+            app.git_busy = busy.clone();
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            let output = ctx.run_ui(raw, |ui| app.show_mr_view(ui));
+            let nodes = output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .map(|u| u.nodes.clone())
+                .unwrap_or_default();
+            output.drop_without_applying_deltas();
+            let shown = nodes
+                .iter()
+                .any(|(_, n)| n.value().or(n.label()) == Some(loading.as_str()));
+            assert_eq!(shown, shows_loading, "{busy:?}");
+        }
     }
 
     #[test]
@@ -3116,7 +3800,7 @@ mod tests {
     fn poll_scan_plain_error_has_no_auth_hint() {
         // I2: Open-/Setup-Fehler ohne auth_hint (irreführend sonst).
         let mut app = test_app();
-        app.scanning = true;
+        app.git_busy = GitBusy::Scan;
         app.scan_tx
             .send(ScanResult::FetchDone {
                 repos: vec![],
@@ -3183,6 +3867,167 @@ mod tests {
             top_bar_collapsed = false;
         }
         assert!(!top_bar_collapsed);
+    }
+
+    #[test]
+    fn checkout_outcome_notice_texts() {
+        // E15: Hinweis nur bei abweichendem lokalem Branch, Einzahl getrennt.
+        use crate::git::CheckoutOutcome;
+        assert_eq!(
+            checkout_outcome_notice(Language::De, &CheckoutOutcome::Switched),
+            None
+        );
+        let ff = |by| CheckoutOutcome::FastForwarded {
+            branch: "feature/x".to_string(),
+            by,
+        };
+        assert_eq!(
+            checkout_outcome_notice(Language::De, &ff(1)).as_deref(),
+            Some("Lokaler Branch feature/x um 1 Commit vorgespult")
+        );
+        assert_eq!(
+            checkout_outcome_notice(Language::De, &ff(3)).as_deref(),
+            Some("Lokaler Branch feature/x um 3 Commits vorgespult")
+        );
+        assert_eq!(
+            checkout_outcome_notice(Language::En, &ff(3)).as_deref(),
+            Some("Fast-forwarded local branch feature/x by 3 commits")
+        );
+        let ahead = |ahead| CheckoutOutcome::LocalAhead {
+            branch: "feature/x".to_string(),
+            ahead,
+        };
+        assert_eq!(
+            checkout_outcome_notice(Language::De, &ahead(1)).as_deref(),
+            Some("Lokaler Branch feature/x ist 1 Commit voraus – lokaler Stand ausgecheckt")
+        );
+        assert_eq!(
+            checkout_outcome_notice(Language::En, &ahead(2)).as_deref(),
+            Some("Local branch feature/x is 2 commits ahead – local state checked out")
+        );
+        let diverged = CheckoutOutcome::Diverged {
+            branch: "feature/x".to_string(),
+            ahead: 2,
+            behind: 3,
+        };
+        assert_eq!(
+            checkout_outcome_notice(Language::De, &diverged).as_deref(),
+            Some(
+                "Lokaler Branch feature/x weicht ab (2 voraus, 3 hinterher) – lokaler Stand ausgecheckt"
+            )
+        );
+        assert_eq!(
+            checkout_outcome_notice(Language::En, &diverged).as_deref(),
+            Some("Local branch feature/x differs (2 ahead, 3 behind) – local state checked out")
+        );
+    }
+
+    #[test]
+    fn branch_switch_error_detail_localizes_blocked() {
+        // E15: typisierte Abbrüche lokalisiert, andere Fehler unverändert.
+        use crate::git::BranchSwitchBlocked;
+        let upstream = anyhow::Error::new(BranchSwitchBlocked::UpstreamMismatch {
+            branch: "feature/x".to_string(),
+            upstream: "upstream/feature/x".to_string(),
+        });
+        assert_eq!(
+            branch_switch_error_detail(Language::En, &upstream),
+            "Local branch feature/x tracks upstream/feature/x"
+        );
+        assert_eq!(
+            branch_switch_error_detail(Language::De, &upstream),
+            "Lokaler Branch feature/x verfolgt upstream/feature/x"
+        );
+        let wt = PathBuf::from("/tmp/wt");
+        let elsewhere = anyhow::Error::new(BranchSwitchBlocked::CheckedOutElsewhere {
+            branch: "feature/x".to_string(),
+            path: wt.clone(),
+        });
+        assert_eq!(
+            branch_switch_error_detail(Language::En, &elsewhere),
+            format!("Branch feature/x is checked out in {}", wt.display())
+        );
+        assert_eq!(
+            branch_switch_error_detail(Language::De, &elsewhere),
+            format!("Branch feature/x ist in {} ausgecheckt", wt.display())
+        );
+        let other = anyhow::anyhow!("Checkout fehlgeschlagen: boom");
+        assert_eq!(
+            branch_switch_error_detail(Language::En, &other),
+            "Checkout fehlgeschlagen: boom"
+        );
+    }
+
+    /// E15: Repo mit lokalem `feature` einen Commit hinter
+    /// `refs/remotes/origin/feature` (nur git2, kein Netz).
+    fn repo_with_stale_feature(path: &Path) {
+        std::fs::create_dir(path).unwrap();
+        let repo = git2::Repository::init(path).unwrap();
+        let mut cfg = repo.config().unwrap();
+        cfg.set_str("user.name", "Test").unwrap();
+        cfg.set_str("user.email", "test@test.com").unwrap();
+        std::fs::write(path.join("a.txt"), "one\n").unwrap();
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("a.txt")).unwrap();
+        idx.write().unwrap();
+        let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        let first = repo
+            .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        let first = repo.find_commit(first).unwrap();
+        repo.branch("feature", &first, false).unwrap();
+        // Remote-Stand: ein Commit weiter (b.txt), nur als Remote-Ref.
+        let blob = repo.blob(b"two\n").unwrap();
+        let mut tb = repo.treebuilder(Some(&tree)).unwrap();
+        tb.insert("b.txt", blob, 0o100644).unwrap();
+        let tree2 = repo.find_tree(tb.write().unwrap()).unwrap();
+        let second = repo
+            .commit(None, &sig, &sig, "remote", &tree2, &[&first])
+            .unwrap();
+        repo.reference("refs/remotes/origin/feature", second, true, "test")
+            .unwrap();
+    }
+
+    #[test]
+    fn execute_branch_switch_notice_survives_auto_fetch() {
+        // E15-Review: läuft ein Auto-Fetch, darf `start_scan` den Hinweis
+        // nicht durch „auto_fetch_running“ ersetzen; der Scan bleibt gemerkt.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("repo");
+        repo_with_stale_feature(&path);
+        let mut app = test_app();
+        app.config.roots.clear();
+        app.config.language = Language::De;
+        app.auto_fetching = true;
+        app.execute_branch_switch(path.clone(), "origin/feature".to_string(), false, false);
+        assert!(app.error.is_none(), "unerwarteter Fehler: {:?}", app.error);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Lokaler Branch feature um 1 Commit vorgespult")
+        );
+        assert!(app.pending_scan, "Folge-Scan nach dem Auto-Fetch gemerkt");
+        assert_eq!(app.git_busy, GitBusy::Idle);
+    }
+
+    #[test]
+    fn execute_branch_switch_shows_fast_forward_notice() {
+        // E15: Dropdown „origin/feature“ mit veraltetem lokalem `feature`
+        // → vorgespult, Hinweis als Statusmeldung, kein Fehler.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("repo");
+        repo_with_stale_feature(&path);
+        let mut app = test_app();
+        // Folge-Scan ohne Suchpfade (keine Platte, kein Netz).
+        app.config.roots.clear();
+        app.config.language = Language::De;
+        app.execute_branch_switch(path.clone(), "origin/feature".to_string(), false, false);
+        assert!(app.error.is_none(), "unerwarteter Fehler: {:?}", app.error);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Lokaler Branch feature um 1 Commit vorgespult")
+        );
+        assert!(path.join("b.txt").exists());
     }
 
     #[test]

@@ -1,0 +1,130 @@
+{
+  "data": {
+    "currentUser": {
+      "username": "taltmann",
+      "todos": {
+        "pageInfo": { "hasNextPage": true, "endCursor": "MTAwMjQ" },
+        "nodes": [
+          {
+            "id": "gid://gitlab/Todo/7001",
+            "action": "mentioned",
+            "note": null,
+            "targetEntity": {
+              "state": "opened",
+              "id": "gid://gitlab/MergeRequest/80077",
+              "iid": "77",
+              "title": "Token-Refresh vereinheitlichen",
+              "draft": false,
+              "webUrl": "https://gitlab.example.com/plattform/auth-service/-/merge_requests/77",
+              "webPath": "/plattform/auth-service/-/merge_requests/77",
+              "updatedAt": "2026-10-16T11:00:00Z",
+              "sourceBranch": "refactor/token-refresh",
+              "targetBranch": "main",
+              "sourceBranchExists": true,
+              "diffHeadSha": "77777777777777777777777777777777777777aa",
+              "project": { "fullPath": "plattform/auth-service" },
+              "sourceProject": { "fullPath": "plattform/auth-service" },
+              "author": { "username": "lhoffmann", "name": "Lukas Hoffmann" },
+              "approvedBy": { "nodes": [{ "username": "pschmid", "name": "Petra Schmid", "bot": false }] },
+              "approvalsRequired": 2,
+              "approvalsLeft": 1,
+              "headPipeline": {
+                "status": "RUNNING",
+                "path": "/plattform/auth-service/-/pipelines/3301",
+                "detailedStatus": { "detailsPath": "/plattform/auth-service/-/pipelines/3301" }
+              },
+              "resolvableDiscussionsCount": 1,
+              "resolvedDiscussionsCount": 0,
+              "detailedMergeStatus": "NOT_APPROVED",
+              "reviewers": { "nodes": [] }
+            }
+          },
+          {
+            "id": "gid://gitlab/Todo/7002",
+            "action": "directly_addressed",
+            "note": { "id": "gid://gitlab/DiscussionNote/88001" },
+            "targetEntity": {
+              "state": "opened",
+              "id": "gid://gitlab/MergeRequest/60310",
+              "iid": "310",
+              "title": "Cache für Abhängigkeiten",
+              "draft": false,
+              "webUrl": "https://gitlab.example.com/plattform/ci-templates/-/merge_requests/310",
+              "webPath": "/plattform/ci-templates/-/merge_requests/310",
+              "updatedAt": "2026-10-15T08:30:00Z",
+              "sourceBranch": "feature/dep-cache",
+              "targetBranch": "main",
+              "sourceBranchExists": true,
+              "diffHeadSha": "31031031031031031031031031031031031031aa",
+              "project": { "fullPath": "plattform/ci-templates" },
+              "sourceProject": { "fullPath": "plattform/ci-templates" },
+              "author": { "username": "pschmid", "name": "Petra Schmid" },
+              "approvedBy": {
+                "nodes": [
+                  { "username": "dwagner", "name": "David Wagner", "bot": false },
+                  { "username": "fbraun", "name": "Felix Braun", "bot": false }
+                ]
+              },
+              "approvalsRequired": 2,
+              "approvalsLeft": 0,
+              "headPipeline": {
+                "status": "SUCCESS",
+                "path": "/plattform/ci-templates/-/pipelines/4410",
+                "detailedStatus": { "detailsPath": "/plattform/ci-templates/-/pipelines/4410" }
+              },
+              "resolvableDiscussionsCount": 0,
+              "resolvedDiscussionsCount": 0,
+              "detailedMergeStatus": "MERGEABLE",
+              "reviewers": { "nodes": [] }
+            }
+          },
+          {
+            "id": "gid://gitlab/Todo/7003",
+            "action": "mentioned",
+            "note": { "id": "gid://gitlab/Note/88002" },
+            "targetEntity": {
+              "state": "closed",
+              "id": "gid://gitlab/MergeRequest/50398",
+              "iid": "398",
+              "title": "Alter Exportpfad",
+              "draft": false,
+              "webUrl": "https://gitlab.example.com/kern/backend-api/-/merge_requests/398",
+              "project": { "fullPath": "kern/backend-api" },
+              "author": { "username": "fbraun", "name": "Felix Braun" }
+            }
+          },
+          {
+            "id": "gid://gitlab/Todo/7004",
+            "action": "mentioned",
+            "note": { "id": "gid://gitlab/Note/88003" },
+            "targetEntity": {
+              "state": "merged",
+              "id": "gid://gitlab/MergeRequest/50401",
+              "iid": "401",
+              "title": "Abhängigkeiten aktualisieren",
+              "draft": false,
+              "webUrl": "https://gitlab.example.com/kern/backend-api/-/merge_requests/401",
+              "project": { "fullPath": "kern/backend-api" },
+              "author": { "username": "dwagner", "name": "David Wagner" }
+            }
+          },
+          {
+            "id": "gid://gitlab/Todo/7005",
+            "action": "mentioned",
+            "note": { "id": "gid://gitlab/DiscussionNote/88004" },
+            "targetEntity": {
+              "state": "opened",
+              "id": "gid://gitlab/MergeRequest/80077",
+              "iid": "77",
+              "title": "Token-Refresh vereinheitlichen",
+              "draft": false,
+              "webUrl": "https://gitlab.example.com/plattform/auth-service/-/merge_requests/77",
+              "project": { "fullPath": "plattform/auth-service" },
+              "author": { "username": "lhoffmann", "name": "Lukas Hoffmann" }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

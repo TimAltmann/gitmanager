@@ -5,7 +5,9 @@ mod autostart;
 mod config;
 mod config_parser;
 mod git;
+mod gitlab;
 mod i18n;
+mod process;
 mod scanner;
 mod tray;
 mod tray_service;
@@ -80,13 +82,9 @@ pub fn start_minimized_flag() -> bool {
 }
 
 fn main() -> eframe::Result<()> {
-    // P2a: globaler Connect-Timeout für libgit2 (Default: OS-TCP, bei
-    // Blackhole-Remotes minutenlang). Gilt prozessweit für alle Fetches;
-    // betrifft nur die Connect-Phase, nicht langsame Transfers.
-    // P2a: globaler Connect-Timeout für libgit2 (Default: OS-TCP, bei
-    // Blackhole-Remotes minutenlang). Gilt prozessweit für alle Fetches;
-    // betrifft nur die Connect-Phase, nicht langsame Transfers.
-    let _ = unsafe { git2::opts::set_server_connect_timeout_in_milliseconds(30_000) };
+    // P2a: Connect- und Stille-Timeout für libgit2 (Default: OS-TCP bzw.
+    // ohne Grenze), prozessweit für Fetches und Klone. Vor allen Threads.
+    git::init_libgit2_timeouts();
     // Panic hook für Tray-Crashes (F-17): vorherigen Hook chainen, Crash-Log mit
     // Millisekunden-Timestamp + PID (keine Kollision pro Sekunde) nach
     // ProjectDirs::from("com","gitmanager","gitmanager").data_local_dir()
@@ -136,7 +134,7 @@ fn main() -> eframe::Result<()> {
     // M1: --minimized für Autostart (Tray-Start ohne volles Fenster).
     let start_minimized = start_minimized_flag();
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1080.0, 680.0])
+        .with_inner_size(app::DEFAULT_WINDOW_SIZE)
         .with_min_inner_size([920.0, 560.0])
         .with_title("GitManager - Git Repository Manager");
     if start_minimized {
@@ -218,19 +216,6 @@ mod tests {
             dir.path().join("other.txt").exists(),
             "foreign files untouched"
         );
-    }
-
-    #[test]
-    fn libgit2_connect_timeout_roundtrips() {
-        // P2a: Timeout-Optik existiert und ist setzbar (schützt vor
-        // Blackhole-Hängern); main() setzt 30 s, hier Roundtrip prüfen.
-        unsafe {
-            git2::opts::set_server_connect_timeout_in_milliseconds(30_000).unwrap();
-            assert_eq!(
-                git2::opts::get_server_connect_timeout_in_milliseconds().unwrap(),
-                30_000
-            );
-        }
     }
 
     #[test]

@@ -20,6 +20,9 @@ RUN cargo install cargo-xwin --locked
 # Windows Targets für Cross-Compile
 RUN rustup target add x86_64-pc-windows-gnu x86_64-pc-windows-msvc
 
+# rustfmt + clippy für die DoD (fmt --check, clippy -D warnings) im Container
+RUN rustup component add rustfmt clippy
+
 WORKDIR /app
 
 # Cache-Layer: nur Cargo.toml kopieren und fetch

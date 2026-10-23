@@ -186,12 +186,21 @@ pub struct RepoListActions {
 
 use std::path::PathBuf;
 
+/// „In Repo-Liste zeigen“ aus der MR-Ansicht (K1): Karte kurz hervorheben,
+/// im ersten Frame dorthin scrollen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoHighlight {
+    pub path: PathBuf,
+    pub scroll: bool,
+}
+
 pub fn show_repo_list(
     ui: &mut Ui,
     repos: &mut [RepoInfo],
     config: &AppConfig,
     actions: &mut RepoListActions,
     fetching: bool,
+    highlight: Option<&RepoHighlight>,
 ) {
     if repos.is_empty() {
         ui.vertical_centered(|ui| {
@@ -216,7 +225,8 @@ pub fn show_repo_list(
         .show(ui, |ui| {
             ui.add_space(4.0);
             for repo in repos.iter_mut() {
-                show_repo_row(ui, repo, config, actions, fetching);
+                let highlight = highlight.filter(|h| h.path == repo.path);
+                show_repo_row(ui, repo, config, actions, fetching, highlight);
                 ui.add_space(6.0);
             }
             ui.add_space(12.0);
@@ -229,6 +239,7 @@ fn show_repo_row(
     config: &AppConfig,
     actions: &mut RepoListActions,
     fetching: bool,
+    highlight: Option<&RepoHighlight>,
 ) {
     let visuals = ui.visuals();
     let frame = egui::Frame::new()
@@ -240,7 +251,7 @@ fn show_repo_row(
         .corner_radius(8)
         .inner_margin(egui::Margin::symmetric(12, 10));
 
-    frame.show(ui, |ui| {
+    let card = frame.show(ui, |ui| {
         ui.vertical(|ui| {
             // Zeile 1: Name + Dirty + Branch Dropdown + Solution Dropdown + Profile Override
             ui.horizontal(|ui| {
@@ -1153,6 +1164,18 @@ fn show_repo_row(
             }
         });
     });
+    if let Some(highlight) = highlight {
+        let rect = card.response.rect;
+        ui.painter().rect_stroke(
+            rect,
+            egui::CornerRadius::same(8),
+            egui::Stroke::new(2.0_f32, ui.visuals().selection.stroke.color),
+            egui::StrokeKind::Outside,
+        );
+        if highlight.scroll {
+            ui.scroll_to_rect(rect, Some(egui::Align::Center));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1589,5 +1612,93 @@ mod tests {
         assert!(detached.contains("Detached"));
         let detached_behind = branch_button_tooltip(Language::En, "abc1234", true, 1);
         assert!(detached_behind.contains('1'));
+    }
+
+    /// „In Repo-Liste zeigen“ (K1): die hervorgehobene Karte wird einmal in
+    /// den sichtbaren Bereich gescrollt und bleibt dort.
+    #[test]
+    fn highlight_scrolls_card_into_view() {
+        use crate::git::RepoInfo;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut config = AppConfig::default();
+        config.roots.clear();
+        let mut repos: Vec<RepoInfo> = (0..30)
+            .map(|i| {
+                RepoInfo::new(
+                    PathBuf::from(format!("/tmp/gm-highlight/repo{i:02}")),
+                    "main".into(),
+                    false,
+                    false,
+                )
+            })
+            .collect();
+        let mut highlight = RepoHighlight {
+            path: repos[29].path.clone(),
+            scroll: true,
+        };
+        let height = 600.0;
+        // Unterkante der Namen-Label „repo29“ je Frame; je Frame eine
+        // Sekunde, damit die Scroll-Animation ankommt
+        let mut bottoms = Vec::new();
+        for frame in 0..4 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, height),
+                )),
+                time: Some(f64::from(frame)),
+                ..egui::RawInput::default()
+            };
+            let output = ctx.run_ui(raw, |ui| {
+                let mut actions = RepoListActions {
+                    branch_switch: None,
+                    solution_select: None,
+                    ide_open: None,
+                    agent_open: None,
+                    profile_override: None,
+                    fetch_branches: None,
+                    explorer_open: None,
+                    shell_open: None,
+                    custom_select: None,
+                };
+                show_repo_list(
+                    ui,
+                    &mut repos,
+                    &config,
+                    &mut actions,
+                    false,
+                    Some(&highlight),
+                );
+            });
+            // Gescrollt wird nur im ersten Frame
+            highlight.scroll = false;
+            let update = output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("AccessKit");
+            let bottom = update
+                .nodes
+                .iter()
+                .find(|(_, n)| n.label().or(n.value()) == Some("repo29"))
+                .and_then(|(_, n)| n.bounds())
+                .map(|b| b.y1)
+                .expect("Label repo29");
+            bottoms.push(bottom);
+            output.drop_without_applying_deltas();
+        }
+        assert!(
+            bottoms[0] > f64::from(height),
+            "zuerst außerhalb: {bottoms:?}"
+        );
+        assert!(
+            bottoms[2] <= f64::from(height),
+            "danach sichtbar: {bottoms:?}"
+        );
+        assert!(
+            bottoms[3] <= f64::from(height),
+            "bleibt sichtbar: {bottoms:?}"
+        );
     }
 }

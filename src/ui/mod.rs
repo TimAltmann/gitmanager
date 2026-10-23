@@ -1,3 +1,4 @@
+pub mod merge_requests;
 pub mod repo_list;
 pub mod settings;
 pub mod theme;

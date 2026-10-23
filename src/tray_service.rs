@@ -17,6 +17,8 @@ mod imp {
     #[derive(Debug)]
     pub enum TrayAction {
         ShowMainWindow,
+        /// E21: Hauptfenster direkt in der MR-Ansicht
+        ShowMergeRequests,
         Refresh,
         OpenSettings,
         Quit,
@@ -26,6 +28,8 @@ mod imp {
         AgentOpen(PathBuf, String),
         ExplorerOpen(PathBuf),
         ShellOpen(PathBuf),
+        /// `git fetch --all` für ein Repo (Fetch-Button im Tray)
+        FetchRepo(PathBuf),
     }
 
     /// Shared state between main app and tray service viewport
@@ -49,6 +53,11 @@ mod imp {
         /// #3: Badge-Text fürs Popup (wartender Branch-Dialog/Fehler im
         /// Hauptfenster). Wird vom Main-Thread bei jedem Sync gesetzt.
         pub notice: Option<String>,
+        /// E21: wartende Reviews am Button „Merge Requests“ (aus
+        /// `MrSnapshot.badge`, `None` bei 0 oder nach Anmeldefehler).
+        pub mr_badge: Option<usize>,
+        /// Fetch-Buttons: gesperrt während Scan/Fetch, Spinner am laufenden Repo
+        pub fetching: tray_popup::TrayFetching,
         /// Task 6: pro-Repo Branch-Filter für die Tray-Dropdown-Suche
         /// (KEIN globales Suchfeld). Wird bei Close geleert.
         pub branch_filters: HashMap<PathBuf, String>,
@@ -66,6 +75,8 @@ mod imp {
                 last_toggle_at: None,
                 action_tx,
                 notice: None,
+                mr_badge: None,
+                fetching: tray_popup::TrayFetching::default(),
                 branch_filters: HashMap::new(),
             }
         }
@@ -302,10 +313,15 @@ mod imp {
             let guard = lock_shared(shared);
             (guard.repos.clone(), guard.config.clone())
         };
-        // #3: Badge-Text (ein String-Clone nur bei gesetzter Notice).
-        let notice: Option<String> = {
+        // #3: Badge-Text (ein String-Clone nur bei gesetzter Notice),
+        // E21: Badge am Button „Merge Requests“.
+        let (notice, mr_badge, fetching): (
+            Option<String>,
+            Option<usize>,
+            tray_popup::TrayFetching,
+        ) = {
             let guard = lock_shared(shared);
-            guard.notice.clone()
+            (guard.notice.clone(), guard.mr_badge, guard.fetching.clone())
         };
         // Task 6: Filter-State aus TrayShared laden (kein Lock während des
         // Renders halten) — nach dem Frame zurückschreiben bzw. bei Close leeren.
@@ -319,7 +335,7 @@ mod imp {
         // Kein Cache nötig: teuer waren die Deep-Clones, nicht der Sort.
         let tray_limit = config_arc.tray_icons.max_display.clamp(5, 50);
         let repos_visible = tray_popup::sorted_visible_refs(&repos_arc, &config_arc, tray_limit);
-        let popup_width: f32 = 360.0;
+        let popup_width: f32 = tray_popup::POPUP_WIDTH;
         let popup_height: f32 =
             tray_popup::popup_height_for_visible(&repos_visible, notice.as_deref());
         let popup_size = Vec2::new(popup_width, popup_height);
@@ -391,7 +407,11 @@ mod imp {
                         &repos_visible,
                         &config_arc,
                         &mut tray_actions,
-                        notice.as_deref(),
+                        &tray_popup::TrayStatus {
+                            notice: notice.as_deref(),
+                            mr_badge,
+                            fetching: &fetching,
+                        },
                         &mut branch_filters,
                     );
                 });
@@ -442,16 +462,7 @@ mod imp {
         // Send actions to main app and wake main viewport (service is throttled, main needs instant)
         // #10: Sender unter kurzem Lock klonen, dann ohne gehaltenen Lock senden —
         // der Main-Thread verwirft bei WouldBlock sonst den ganzen Sync.
-        let needs_root_repaint = tray_actions.open_main
-            || tray_actions.open_settings
-            || tray_actions.quit
-            || tray_actions.refresh
-            || tray_actions.branch_switch.is_some()
-            || tray_actions.solution_select.is_some()
-            || tray_actions.ide_open.is_some()
-            || tray_actions.agent_open.is_some()
-            || tray_actions.explorer_open.is_some()
-            || tray_actions.shell_open.is_some();
+        let needs_root_repaint = tray_popup::needs_root_repaint(&tray_actions);
         let action_tx = {
             let guard = lock_shared(shared);
             guard.action_tx.clone()
@@ -461,6 +472,9 @@ mod imp {
         }
         if tray_actions.open_main {
             let _ = action_tx.send(TrayAction::ShowMainWindow);
+        }
+        if tray_actions.open_mrs {
+            let _ = action_tx.send(TrayAction::ShowMergeRequests);
         }
         if tray_actions.quit {
             let _ = action_tx.send(TrayAction::Quit);
@@ -482,6 +496,9 @@ mod imp {
         }
         if let Some(path) = tray_actions.shell_open {
             let _ = action_tx.send(TrayAction::ShellOpen(path));
+        }
+        if let Some(path) = tray_actions.fetch_repo {
+            let _ = action_tx.send(TrayAction::FetchRepo(path));
         }
         if tray_actions.open_settings {
             let _ = action_tx.send(TrayAction::OpenSettings);
