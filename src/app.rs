@@ -2252,22 +2252,37 @@ impl MyApp {
                                     .color(color),
                             )
                             .on_hover_text(if exists {
-                                format!("{} (Tiefe {})", root.display(), self.config.max_depth)
+                                format!(
+                                    "{} ({} {})",
+                                    root.display(),
+                                    tr(self.config.language, "depth_label").trim_end_matches(':'),
+                                    self.config.max_depth
+                                )
                             } else {
-                                format!("{} (nicht gefunden)", root.display())
+                                format!(
+                                    "{} {}",
+                                    root.display(),
+                                    tr(self.config.language, "not_found")
+                                )
                             });
                         }
                         ui.label(
-                            RichText::new(format!("  Tiefe: {}", self.config.max_depth))
-                                .size(11.0)
-                                .color(Color32::from_rgb(120, 120, 120)),
+                            RichText::new(format!(
+                                "  {} {}",
+                                tr(self.config.language, "depth_label"),
+                                self.config.max_depth
+                            ))
+                            .size(11.0)
+                            .color(Color32::from_rgb(120, 120, 120)),
                         );
                         ui.add_space(8.0);
                         let prof = self.config.get_active_profile();
                         ui.label(
                             RichText::new(format!(
-                                "Profil: {} (*{})",
-                                prof.display_name, prof.file_extension
+                                "{} {} (*{})",
+                                tr(self.config.language, "profile_label"),
+                                prof.display_name,
+                                prof.file_extension
                             ))
                             .size(11.0)
                             .color(Color32::from_rgb(100, 100, 100)),
@@ -2315,13 +2330,20 @@ impl MyApp {
                         );
                     } else {
                         ui.label(
-                            RichText::new(format!(
-                                "{} Repos · {} Pfade · Tiefe {} · Profil {}",
-                                self.repos.len(),
-                                self.config.roots.len(),
-                                self.config.max_depth,
-                                self.config.get_active_profile().display_name
-                            ))
+                            RichText::new({
+                                let lang = self.config.language;
+                                format!(
+                                    "{} {} · {} {} · {} {} · {} {}",
+                                    self.repos.len(),
+                                    tr(lang, "status_repos_paths"),
+                                    self.config.roots.len(),
+                                    tr(lang, "status_paths"),
+                                    tr(lang, "depth_label").trim_end_matches(':'),
+                                    self.config.max_depth,
+                                    tr(lang, "profile_label").trim_end_matches(':'),
+                                    self.config.get_active_profile().display_name
+                                )
+                            })
                             .size(11.0)
                             .color(Color32::from_rgb(120, 120, 120)),
                         );
