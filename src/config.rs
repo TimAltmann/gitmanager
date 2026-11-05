@@ -866,6 +866,21 @@ pub struct AppConfig {
     /// und verwerfen es beim nächsten Speichern.
     #[serde(default)]
     pub merge_requests: MrConfig,
+
+    /// Standard-Ordner für „Neuer Worktree“ aus der Repo-Liste; `None` =
+    /// neben dem Basis-Repo. Ältere Versionen ignorieren das Feld.
+    #[serde(default)]
+    pub worktree_root: Option<String>,
+}
+
+impl AppConfig {
+    /// Standard-Ordner für neue Worktrees: getrimmt, einheitliche Trenner,
+    /// nur absolut (ein relativer Pfad hinge vom Arbeitsordner ab).
+    pub fn worktree_root_dir(&self) -> Option<PathBuf> {
+        let root = self.worktree_root.as_deref()?.trim();
+        let dir: PathBuf = Path::new(root).components().collect();
+        dir.is_absolute().then_some(dir)
+    }
 }
 
 impl Default for AppConfig {
@@ -899,6 +914,7 @@ impl Default for AppConfig {
             main_sort_mode: default_sort_mode(),
             auto_fetch_interval_min: default_auto_fetch_interval(),
             merge_requests: MrConfig::default(),
+            worktree_root: None,
         }
     }
 }
@@ -3633,5 +3649,25 @@ mod tests {
         let before = sorted.clone();
         assert!(!sorted.normalize());
         assert_eq!(sorted, before);
+    }
+
+    #[test]
+    fn worktree_root_dir_only_absolute_and_serde_default() {
+        let mut cfg = AppConfig::default();
+        assert_eq!(cfg.worktree_root_dir(), None);
+        cfg.worktree_root = Some("  relative/dir ".to_string());
+        assert_eq!(cfg.worktree_root_dir(), None);
+        let abs = if cfg!(windows) { "C:\\wt\\" } else { "/wt/" };
+        cfg.worktree_root = Some(format!(" {abs} "));
+        let dir = cfg.worktree_root_dir().expect("absolut");
+        assert!(dir.is_absolute());
+        assert!(dir.ends_with("wt"));
+        // Alte Configs ohne Feld laden mit `None`, neue speichern es mit
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("worktree_root"));
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("worktree_root");
+        let old: AppConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(old.worktree_root, None);
     }
 }

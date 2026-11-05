@@ -1890,6 +1890,107 @@ pub fn add_worktree(
     })
 }
 
+/// Branch-Quelle für „Neuer Worktree“ aus der Repo-Liste.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeBranch {
+    /// Vorhandener Branch: lokal (`feature/x`) oder Remote-Branch
+    /// (`origin/feature/x`, dann lokaler Branch `feature/x` mit Upstream)
+    Existing(String),
+    /// Neuer lokaler Branch `name` ab `start` (Branch oder Ref, `None` = HEAD
+    /// des Basis-Repos)
+    New { name: String, start: Option<String> },
+}
+
+/// Legt im Ordner `target_path` einen Worktree des Repos `base_path` an
+/// (siehe [`add_worktree`]) und liefert den ausgecheckten lokalen Branch.
+/// Ein Remote-Branch ohne lokalen Gegenpart wird als lokaler Branch mit
+/// Upstream angelegt, ein neuer Branch am Startpunkt. Scheitert der
+/// Worktree, wird ein hier angelegter Branch wieder entfernt.
+pub fn create_worktree(
+    base_path: &Path,
+    target_path: &Path,
+    branch: &WorktreeBranch,
+) -> Result<String, CheckoutError> {
+    let repo = Repository::open(base_path)
+        .map_err(|e| CheckoutError::Git(format!("Repo öffnen fehlgeschlagen: {e}")))?;
+    let has_local = |name: &str| repo.find_branch(name, BranchType::Local).is_ok();
+    let (local, created) = match branch {
+        WorktreeBranch::Existing(name) if has_local(name) => (name.clone(), false),
+        WorktreeBranch::Existing(name) => {
+            let remote_branch = repo
+                .find_branch(name, BranchType::Remote)
+                .map_err(|_| CheckoutError::Git(format!("Branch {name} nicht gefunden")))?;
+            let local = remote_local_name(&repo, name)
+                .ok_or_else(|| CheckoutError::Git(format!("Branch {name} nicht gefunden")))?;
+            if has_local(&local) {
+                (local, false)
+            } else {
+                let commit = remote_branch
+                    .get()
+                    .peel_to_commit()
+                    .map_err(|e| CheckoutError::Git(format!("Branch {name}: {e}")))?;
+                let mut created = repo.branch(&local, &commit, false).map_err(|e| {
+                    CheckoutError::Git(format!("Branch {local} anlegen fehlgeschlagen: {e}"))
+                })?;
+                if let Err(e) = created.set_upstream(Some(name)) {
+                    eprintln!("Upstream {name} für {local} setzen fehlgeschlagen: {e}");
+                }
+                (local, true)
+            }
+        }
+        WorktreeBranch::New { name, start } => {
+            let name = name.trim();
+            if !git2::Branch::name_is_valid(name).unwrap_or(false) {
+                return Err(CheckoutError::Git(format!(
+                    "Ungültiger Branch-Name: {name}"
+                )));
+            }
+            if has_local(name) {
+                return Err(CheckoutError::Git(format!(
+                    "Branch {name} existiert bereits"
+                )));
+            }
+            let commit = match start.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(start) => repo.revparse_single(start).and_then(|o| o.peel_to_commit()),
+                None => repo.head().and_then(|h| h.peel_to_commit()),
+            }
+            .map_err(|e| CheckoutError::Git(format!("Startpunkt nicht gefunden: {e}")))?;
+            repo.branch(name, &commit, false).map_err(|e| {
+                CheckoutError::Git(format!("Branch {name} anlegen fehlgeschlagen: {e}"))
+            })?;
+            (name.to_string(), true)
+        }
+    };
+    drop(repo);
+    match add_worktree(base_path, target_path, &local) {
+        Ok(()) => Ok(local),
+        Err(e) => {
+            if created {
+                if let Ok(repo) = Repository::open(base_path) {
+                    if let Ok(mut b) = repo.find_branch(&local, BranchType::Local) {
+                        let _ = b.delete();
+                    }
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+/// `origin/feature/x` → `feature/x`: längster passender Remote-Name als
+/// Präfix (Remotes dürfen `/` enthalten).
+fn remote_local_name(repo: &Repository, remote_branch: &str) -> Option<String> {
+    let remotes = repo.remotes().ok()?;
+    remotes
+        .iter()
+        .flatten()
+        .flatten()
+        .filter_map(|r| remote_branch.strip_prefix(r)?.strip_prefix('/'))
+        .filter(|rest| !rest.is_empty())
+        .min_by_key(|rest| rest.len())
+        .map(str::to_string)
+}
+
 /// Verwaiste Worktree-Einträge, die auf genau `target` zeigen (Ordner im
 /// Explorer gelöscht, ohne `git worktree prune`), entfernen: libgit2 legt
 /// `<commondir>/worktrees/<name>` exklusiv an, und `git worktree add`
@@ -5180,6 +5281,103 @@ mod tests {
         add_worktree(&c1, &target, "feature/x").unwrap();
         assert_eq!(head_target(&target), "refs/heads/feature/x");
         assert_eq!(fs::read_to_string(admin.join("gitdir")).unwrap(), gitdir);
+    }
+
+    #[test]
+    fn create_worktree_from_local_branch() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let target = base.path().join("wts").join("c1-feature-x");
+        let branch = WorktreeBranch::Existing("feature/x".to_string());
+        assert_eq!(create_worktree(&c1, &target, &branch).unwrap(), "feature/x");
+        assert_eq!(head_target(&target), "refs/heads/feature/x");
+        assert!(target.join("x.txt").exists());
+        assert_eq!(head_target(&c1), "refs/heads/main");
+        let info = get_repo_info(target.clone()).unwrap();
+        assert!(info.is_linked_worktree);
+    }
+
+    #[test]
+    fn create_worktree_from_remote_branch_creates_tracking_branch() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        // Lokalen Branch entfernen: nur origin/feature/x bleibt
+        git_cmd(&c1, &["branch", "-D", "feature/x"]);
+        let target = base.path().join("c1-feature-x");
+        let branch = WorktreeBranch::Existing("origin/feature/x".to_string());
+        assert_eq!(create_worktree(&c1, &target, &branch).unwrap(), "feature/x");
+        assert_eq!(head_target(&target), "refs/heads/feature/x");
+        let repo = Repository::open(&c1).unwrap();
+        let upstream = repo.branch_upstream_name("refs/heads/feature/x").unwrap();
+        assert_eq!(
+            upstream.as_str().ok(),
+            Some("refs/remotes/origin/feature/x")
+        );
+    }
+
+    #[test]
+    fn create_worktree_with_new_branch_from_head_and_start() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let from_head = WorktreeBranch::New {
+            name: "feature/neu".to_string(),
+            start: None,
+        };
+        let t1 = base.path().join("neu");
+        assert_eq!(
+            create_worktree(&c1, &t1, &from_head).unwrap(),
+            "feature/neu"
+        );
+        assert_eq!(head_target(&t1), "refs/heads/feature/neu");
+        assert_eq!(
+            ref_oid(&c1, "refs/heads/feature/neu"),
+            ref_oid(&c1, "refs/heads/main")
+        );
+        let from_feature = WorktreeBranch::New {
+            name: "fix".to_string(),
+            start: Some("origin/feature/x".to_string()),
+        };
+        let t2 = base.path().join("fix");
+        create_worktree(&c1, &t2, &from_feature).unwrap();
+        assert!(t2.join("x.txt").exists());
+        // Name schon vergeben / ungültig
+        let taken = WorktreeBranch::New {
+            name: "fix".to_string(),
+            start: None,
+        };
+        assert!(create_worktree(&c1, &base.path().join("t3"), &taken).is_err());
+        let invalid = WorktreeBranch::New {
+            name: "a..b".to_string(),
+            start: None,
+        };
+        assert!(create_worktree(&c1, &base.path().join("t4"), &invalid).is_err());
+        assert!(!base.path().join("t4").exists());
+    }
+
+    #[test]
+    fn create_worktree_failure_removes_new_branch() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let busy = base.path().join("busy");
+        fs::create_dir(&busy).unwrap();
+        fs::write(busy.join("f.txt"), "x").unwrap();
+        let branch = WorktreeBranch::New {
+            name: "tmp".to_string(),
+            start: None,
+        };
+        assert!(matches!(
+            create_worktree(&c1, &busy, &branch),
+            Err(CheckoutError::TargetNotEmpty { .. })
+        ));
+        let repo = Repository::open(&c1).unwrap();
+        assert!(repo.find_branch("tmp", BranchType::Local).is_err());
+        // Vorhandener Branch bleibt bei Fehler erhalten (main ist HEAD)
+        let main = WorktreeBranch::Existing("main".to_string());
+        assert!(matches!(
+            create_worktree(&c1, &base.path().join("m"), &main),
+            Err(CheckoutError::CheckedOutElsewhere { .. })
+        ));
+        assert!(repo.find_branch("main", BranchType::Local).is_ok());
     }
 
     #[test]

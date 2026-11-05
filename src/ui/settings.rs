@@ -9,8 +9,9 @@ use std::path::PathBuf;
 mod merge_requests;
 
 pub use merge_requests::{
-    error_reason, forget_token_fields, project_paths_for_host, rediscover_candidates, set_alias,
-    verify_error, GlabCheck, MrSettingsInput, MrSettingsOutput, TokenEvent,
+    error_reason, forget_token_fields, project_paths_for_host, rediscover_candidates,
+    review_root_hit, set_alias, verify_error, GlabCheck, MrSettingsInput, MrSettingsOutput,
+    TokenEvent,
 };
 
 const ICON_CHEVRON_DOWN: egui::ImageSource =
@@ -839,6 +840,55 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
                 state.draft.auto_fetch_interval_min = mins.min(120);
             }
         });
+    }
+    // Standard-Ordner für „Neuer Worktree“ (leer = neben dem Repo)
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    show_worktree_root_setting(ui, &mut state.draft);
+}
+
+fn show_worktree_root_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
+    let lang = draft.language;
+    ui.label(RichText::new(tr(lang, "wt_root_label")).size(13.0).strong());
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(tr(lang, "wt_root_hint"))
+            .size(11.0)
+            .color(Color32::from_rgb(100, 100, 100)),
+    );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let mut text = draft.worktree_root.clone().unwrap_or_default();
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut text)
+                    .hint_text(tr(lang, "wt_root_placeholder"))
+                    .desired_width(320.0),
+            )
+            .changed()
+        {
+            draft.worktree_root = Some(text).filter(|r| !r.trim().is_empty());
+        }
+        if ui.button(format!("{} …", tr(lang, "browse"))).clicked() {
+            let mut dialog = rfd::FileDialog::new();
+            if let Some(dir) = draft.worktree_root_dir().filter(|d| d.is_dir()) {
+                dialog = dialog.set_directory(dir);
+            }
+            if let Some(path) = dialog.pick_folder() {
+                draft.worktree_root = Some(path.display().to_string());
+            }
+        }
+        if draft.worktree_root.is_some() && ui.button(tr(lang, "wt_root_reset")).clicked() {
+            draft.worktree_root = None;
+        }
+    });
+    if draft.worktree_root.is_some() && draft.worktree_root_dir().is_none() {
+        ui.label(
+            RichText::new(tr(lang, "wt_root_relative"))
+                .size(11.0)
+                .color(Color32::from_rgb(200, 120, 40)),
+        );
     }
 }
 

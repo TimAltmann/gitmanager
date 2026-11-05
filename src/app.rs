@@ -1,6 +1,7 @@
 mod merge_requests;
 mod mr_checkout;
 mod mr_settings;
+mod new_worktree;
 
 use crate::config::{AfterAction, AppConfig, RepoSortMode};
 use crate::git::{launch_agent, launch_ide, MrPrep, RepoInfo};
@@ -155,6 +156,7 @@ fn repo_busy_text(lang: Language, busy: &GitBusy) -> Option<String> {
         GitBusy::Idle => None,
         GitBusy::Scan | GitBusy::Fetch { .. } => Some(tr(lang, "scanning_repos")),
         GitBusy::Checkout { iid } => Some(tr_fmt(lang, "mr_checkout_running", &[&iid.to_string()])),
+        GitBusy::Worktree => Some(tr(lang, "wt_creating")),
     }
 }
 
@@ -268,6 +270,8 @@ enum GitBusy {
     Fetch { repo: PathBuf },
     /// K1: Auschecken dieses MR, ohne abschließenden Scan
     Checkout { iid: u64 },
+    /// „Neuer Worktree“ aus der Repo-Liste läuft, danach Rescan
+    Worktree,
 }
 
 impl GitBusy {
@@ -408,6 +412,8 @@ pub struct MyApp {
     mr_settings_tx: Sender<MrSettingsResult>,
     mr_settings_rx: Receiver<MrSettingsResult>,
     mr_settings: MrSettingsCache,
+    /// Repo-Liste: Suche und Dialog „Neuer Worktree“
+    worktree_ui: new_worktree::WorktreeUi,
 }
 
 impl MyApp {
@@ -515,6 +521,7 @@ impl MyApp {
             mr_settings_tx,
             mr_settings_rx,
             mr_settings: MrSettingsCache::default(),
+            worktree_ui: Default::default(),
         };
         #[cfg(target_os = "windows")]
         {
@@ -630,7 +637,7 @@ impl MyApp {
             GitBusy::Scan | GitBusy::Fetch { .. } => return,
             // K1: das Auschecken endet ohne Scan – Wunsch merken, `poll_scan`
             // holt ihn danach nach
-            GitBusy::Checkout { .. } => {
+            GitBusy::Checkout { .. } | GitBusy::Worktree => {
                 self.pending_scan = true;
                 return;
             }
@@ -2613,6 +2620,7 @@ impl eframe::App for MyApp {
         // Merge Requests: Ergebnisse übernehmen, Intervall nur bei sichtbarem Fenster.
         self.poll_mr(ctx);
         self.poll_mr_settings(ctx);
+        self.poll_new_worktree(ctx);
         self.maybe_refresh_mr(ctx);
         self.handle_close_request(ctx);
         // P5: gebatchte Usage-Saves hier flush (deckt auch ui()-Actions vom
@@ -2643,6 +2651,7 @@ impl eframe::App for MyApp {
         self.show_top_bar(ui);
         self.show_status_bar(ui);
         self.show_branch_dialog(&ctx);
+        self.show_new_worktree_dialog(&ctx);
         self.show_update_dialog(&ctx);
 
         egui::CentralPanel::default()
@@ -2693,6 +2702,7 @@ impl eframe::App for MyApp {
                     explorer_open: None,
                     shell_open: None,
                     custom_select: None,
+                    new_worktree: None,
                 };
 
                 // Wir brauchen &mut für repo_list, um selektierte Werte zu zeigen, aber hier clonen wir mut
@@ -2715,7 +2725,11 @@ impl eframe::App for MyApp {
                     &mut actions,
                     fetching,
                     highlight.as_ref(),
+                    &mut self.worktree_ui.search,
                 );
+                if let Some(base) = actions.new_worktree.take() {
+                    self.open_new_worktree_dialog(base);
+                }
 
                 // Handle Actions
                 if let Some((repo_path, branch)) = actions.branch_switch {
@@ -3083,6 +3097,7 @@ mod tests {
             mr_settings_tx,
             mr_settings_rx,
             mr_settings: MrSettingsCache::default(),
+            worktree_ui: Default::default(),
         }
     }
 

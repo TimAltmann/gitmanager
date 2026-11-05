@@ -26,6 +26,8 @@ const ICON_GIT_COMMIT: egui::ImageSource =
 const ICON_SEARCH: egui::ImageSource = egui::include_image!("../../assets/icons/search.svg");
 const ICON_REFRESH: egui::ImageSource = egui::include_image!("../../assets/icons/refresh.svg");
 const ICON_WARNING: egui::ImageSource = egui::include_image!("../../assets/icons/warning.svg");
+const ICON_PLUS: egui::ImageSource = egui::include_image!("../../assets/icons/plus.svg");
+const ICON_CROSS: egui::ImageSource = egui::include_image!("../../assets/icons/cross.svg");
 
 /// Tooltip-Text für den Branch-Button: Basis + optional `branch_behind`-Hinweis.
 pub fn branch_button_tooltip(
@@ -182,6 +184,61 @@ pub struct RepoListActions {
     pub explorer_open: Option<PathBuf>,
     pub shell_open: Option<PathBuf>,
     pub custom_select: Option<(PathBuf, String, String)>,
+    /// „Neuer Worktree“: `Some(None)` aus der Werkzeugleiste (Repo im Dialog
+    /// wählen), `Some(Some(base))` von der Karte des Repos `base`.
+    pub new_worktree: Option<Option<PathBuf>>,
+}
+
+/// Suche der Repo-Liste: jedes Wort (durch Leerzeichen getrennt) muss in
+/// Name, Branch, Pfad oder – bei Worktrees – im Namen des Haupt-Repos
+/// vorkommen, ohne Groß-/Kleinschreibung. Leere Suche passt immer.
+pub fn repo_matches_search(repo: &RepoInfo, query: &str) -> bool {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return true;
+    }
+    let mut haystack =
+        format!("{}\n{}\n{}", repo.name, repo.branch, repo.path.display()).to_lowercase();
+    if let Some(main) = main_repo_name(repo) {
+        haystack.push('\n');
+        haystack.push_str(&main.to_lowercase());
+    }
+    words.iter().all(|w| haystack.contains(w.as_str()))
+}
+
+/// Ordnername des Haupt-Repos eines verknüpften Worktrees (aus
+/// `common_dir`, i. d. R. `<haupt>/.git`); `None` bei eigenen Klonen.
+pub fn main_repo_name(repo: &RepoInfo) -> Option<String> {
+    if !repo.is_linked_worktree {
+        return None;
+    }
+    let dir = &repo.common_dir;
+    let name = if dir.file_name().is_some_and(|n| n == ".git") {
+        dir.parent()?.file_name()?
+    } else {
+        dir.file_name()?
+    };
+    let name = name.to_string_lossy();
+    let name = name.strip_suffix(".git").unwrap_or(&name);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Indizes der sichtbaren Karten, getrennt nach Repositories (eigene Klone)
+/// und verknüpften Worktrees; Reihenfolge wie in `repos`.
+pub fn split_visible(repos: &[RepoInfo], query: &str) -> (Vec<usize>, Vec<usize>) {
+    let mut mains = Vec::new();
+    let mut worktrees = Vec::new();
+    for (i, repo) in repos.iter().enumerate() {
+        if !repo_matches_search(repo, query) {
+            continue;
+        }
+        if repo.is_linked_worktree {
+            worktrees.push(i);
+        } else {
+            mains.push(i);
+        }
+    }
+    (mains, worktrees)
 }
 
 use std::path::PathBuf;
@@ -201,6 +258,7 @@ pub fn show_repo_list(
     actions: &mut RepoListActions,
     fetching: bool,
     highlight: Option<&RepoHighlight>,
+    search: &mut String,
 ) {
     if repos.is_empty() {
         ui.vertical_centered(|ui| {
@@ -220,17 +278,126 @@ pub fn show_repo_list(
         return;
     }
 
+    // „In Repo-Liste zeigen“ auf eine von der Suche ausgeblendete Karte:
+    // Suche leeren, damit die Karte sichtbar wird.
+    if let Some(h) = highlight.filter(|h| h.scroll) {
+        if repos
+            .iter()
+            .any(|r| r.path == h.path && !repo_matches_search(r, search))
+        {
+            search.clear();
+        }
+    }
+
+    show_list_toolbar(ui, config, actions, search);
+    ui.add_space(6.0);
+
+    let (mains, worktrees) = split_visible(repos, search);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.add_space(4.0);
-            for repo in repos.iter_mut() {
-                let highlight = highlight.filter(|h| h.path == repo.path);
-                show_repo_row(ui, repo, config, actions, fetching, highlight);
+            if mains.is_empty() && worktrees.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(30.0);
+                    ui.label(
+                        RichText::new(tr_fmt(config.language, "repo_search_no_matches", &[search]))
+                            .size(13.0)
+                            .weak(),
+                    );
+                });
+                return;
+            }
+            let sections = [
+                ("repo_section_repos", "repos", &mains),
+                ("repo_section_worktrees", "worktrees", &worktrees),
+            ];
+            for (title_key, salt, indices) in sections {
+                if indices.is_empty() {
+                    continue;
+                }
+                let title = format!("{} ({})", tr(config.language, title_key), indices.len());
+                egui::CollapsingHeader::new(RichText::new(title).size(13.0).strong())
+                    .id_salt(("repo_section", salt))
+                    .default_open(true)
+                    .show_unindented(ui, |ui| {
+                        ui.add_space(4.0);
+                        for &i in indices.iter() {
+                            let repo = &mut repos[i];
+                            let highlight = highlight.filter(|h| h.path == repo.path);
+                            show_repo_row(ui, repo, config, actions, fetching, highlight);
+                            ui.add_space(6.0);
+                        }
+                    });
                 ui.add_space(6.0);
             }
             ui.add_space(12.0);
         });
+}
+
+/// Werkzeugleiste über der Liste: Suche (Strg+F) und „Neuer Worktree“.
+fn show_list_toolbar(
+    ui: &mut Ui,
+    config: &AppConfig,
+    actions: &mut RepoListActions,
+    search: &mut String,
+) {
+    let lang = config.language;
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Image::new(ICON_SEARCH)
+                .fit_to_exact_size(Vec2::splat(14.0))
+                .tint(ui.visuals().weak_text_color()),
+        );
+        let edit = ui.add(
+            egui::TextEdit::singleline(search)
+                .id(egui::Id::new("repo_list_search"))
+                .hint_text(tr(lang, "repo_search_hint"))
+                .desired_width(340.0),
+        );
+        let focus_shortcut = ui.ctx().input_mut(|i| {
+            i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND,
+                egui::Key::F,
+            ))
+        });
+        if focus_shortcut {
+            edit.request_focus();
+        }
+        if edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            search.clear();
+        }
+        if !search.is_empty()
+            && ui
+                .add(
+                    egui::Button::image(
+                        egui::Image::new(ICON_CROSS)
+                            .fit_to_exact_size(Vec2::splat(12.0))
+                            .tint(ui.visuals().text_color()),
+                    )
+                    .small(),
+                )
+                .on_hover_text(tr(lang, "repo_search_clear"))
+                .clicked()
+        {
+            search.clear();
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let btn = egui::Button::image_and_text(
+                egui::Image::new(ICON_PLUS)
+                    .fit_to_exact_size(Vec2::splat(14.0))
+                    .tint(ui.visuals().text_color()),
+                tr(lang, "wt_new_button"),
+            );
+            if ui
+                .add(btn)
+                .on_hover_text(tr(lang, "wt_new_tooltip"))
+                .clicked()
+            {
+                actions.new_worktree = Some(None);
+            }
+        });
+    });
 }
 
 fn show_repo_row(
@@ -257,6 +424,13 @@ fn show_repo_row(
             ui.horizontal(|ui| {
                 ui.label(RichText::new("📁").size(14.0));
                 ui.label(RichText::new(&repo.name).size(13.0).strong());
+                if let Some(main) = main_repo_name(repo) {
+                    ui.label(
+                        RichText::new(tr_fmt(config.language, "wt_of_repo", &[&main]))
+                            .size(11.0)
+                            .weak(),
+                    );
+                }
                 if repo.dirty {
                     ui.label(
                         RichText::new("●")
@@ -1145,6 +1319,22 @@ fn show_repo_row(
                             );
                         }
                     }
+
+                    // Neuer Worktree dieses Repos (nicht auf Worktree-Karten)
+                    if !repo.is_linked_worktree {
+                        let wt_btn = egui::Button::image(
+                            egui::Image::new(ICON_PLUS)
+                                .fit_to_exact_size(Vec2::splat(18.0))
+                                .tint(ui.visuals().text_color()),
+                        );
+                        if ui
+                            .add(wt_btn)
+                            .on_hover_text(tr(config.language, "wt_new_for_repo_tooltip"))
+                            .clicked()
+                        {
+                            actions.new_worktree = Some(Some(repo.path.clone()));
+                        }
+                    }
                 });
             });
 
@@ -1225,6 +1415,7 @@ mod tests {
             explorer_open: None,
             shell_open: None,
             custom_select: None,
+            new_worktree: None,
         };
         assert!(actions.branch_switch.is_none());
         assert!(actions.solution_select.is_none());
@@ -1249,6 +1440,7 @@ mod tests {
             explorer_open: None,
             shell_open: None,
             custom_select: None,
+            new_worktree: None,
         };
         actions.branch_switch = Some((PathBuf::from("/tmp/repo"), "main".to_string()));
         assert_eq!(
@@ -1493,6 +1685,7 @@ mod tests {
             explorer_open: None,
             shell_open: None,
             custom_select: None,
+            new_worktree: None,
         };
         a.custom_select = Some((PathBuf::from("/tmp/repo"), "db".into(), "prod".into()));
         assert_eq!(
@@ -1661,6 +1854,7 @@ mod tests {
                     explorer_open: None,
                     shell_open: None,
                     custom_select: None,
+                    new_worktree: None,
                 };
                 show_repo_list(
                     ui,
@@ -1669,6 +1863,7 @@ mod tests {
                     &mut actions,
                     false,
                     Some(&highlight),
+                    &mut String::new(),
                 );
             });
             // Gescrollt wird nur im ersten Frame
@@ -1700,5 +1895,59 @@ mod tests {
             bottoms[3] <= f64::from(height),
             "bleibt sichtbar: {bottoms:?}"
         );
+    }
+
+    fn linked_worktree(path: &str, main: &str, branch: &str) -> RepoInfo {
+        let mut repo = RepoInfo::new(PathBuf::from(path), branch.to_string(), false, false);
+        repo.is_linked_worktree = true;
+        repo.common_dir = PathBuf::from(main).join(".git");
+        repo
+    }
+
+    #[test]
+    fn main_repo_name_only_for_linked_worktrees() {
+        let main = RepoInfo::new(PathBuf::from("/code/app"), "main".into(), false, false);
+        assert_eq!(main_repo_name(&main), None);
+        let wt = linked_worktree("/wt/app-feature-a", "/code/app", "feature/a");
+        assert_eq!(main_repo_name(&wt).as_deref(), Some("app"));
+        // Bare-Repo als gemeinsames Verzeichnis
+        let mut bare = linked_worktree("/wt/x", "/code", "main");
+        bare.common_dir = PathBuf::from("/code/backend.git");
+        assert_eq!(main_repo_name(&bare).as_deref(), Some("backend"));
+    }
+
+    #[test]
+    fn search_matches_name_branch_path_and_main_repo_case_insensitive() {
+        let repo = RepoInfo::new(
+            PathBuf::from("/code/Backend-API"),
+            "feature/Login".into(),
+            false,
+            false,
+        );
+        assert!(repo_matches_search(&repo, ""));
+        assert!(repo_matches_search(&repo, "   "));
+        assert!(repo_matches_search(&repo, "backend"));
+        assert!(repo_matches_search(&repo, "LOGIN"));
+        assert!(repo_matches_search(&repo, "/code/"));
+        // alle Wörter müssen passen
+        assert!(repo_matches_search(&repo, "api login"));
+        assert!(!repo_matches_search(&repo, "api logout"));
+        let wt = linked_worktree("/wt/review-42", "/code/shop", "fix/cart");
+        assert!(repo_matches_search(&wt, "shop"));
+        assert!(repo_matches_search(&wt, "shop cart"));
+    }
+
+    #[test]
+    fn split_visible_separates_worktrees_and_applies_search() {
+        let repos = vec![
+            RepoInfo::new(PathBuf::from("/code/app"), "main".into(), false, false),
+            linked_worktree("/code/app-feature-a", "/code/app", "feature/a"),
+            RepoInfo::new(PathBuf::from("/code/web"), "main".into(), false, false),
+            linked_worktree("/wt/web-fix", "/code/web", "fix/b"),
+        ];
+        assert_eq!(split_visible(&repos, ""), (vec![0, 2], vec![1, 3]));
+        assert_eq!(split_visible(&repos, "web"), (vec![2], vec![3]));
+        assert_eq!(split_visible(&repos, "feature"), (vec![], vec![1]));
+        assert_eq!(split_visible(&repos, "nichts"), (vec![], vec![]));
     }
 }
