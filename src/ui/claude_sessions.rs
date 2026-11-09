@@ -182,6 +182,11 @@ fn show_toolbar(ui: &mut Ui, lang: Language, search: &mut String) {
     });
 }
 
+/// Id der Klickfläche einer Karte.
+pub(crate) fn card_id(session: &ClaudeSession) -> egui::Id {
+    egui::Id::new(("claude_card", &session.cwd, &session.id))
+}
+
 /// Karte im Stil der Repo-Karte; Klick auf Karte oder „Fortsetzen“ setzt
 /// `actions.resume`.
 fn show_session_card(
@@ -200,6 +205,15 @@ fn show_session_card(
         ))
         .corner_radius(8)
         .inner_margin(egui::Margin::symmetric(12, 10));
+
+    // Klickfläche VOR dem Inhalt registrieren (Rechteck des vorigen Frames),
+    // damit der „Fortsetzen“-Button darüber liegt und Hover/Tooltip behält.
+    let id = card_id(session);
+    let rect_key = id.with("rect");
+    let response = ui
+        .ctx()
+        .data(|d| d.get_temp::<egui::Rect>(rect_key))
+        .map(|rect| ui.interact(rect, id, egui::Sense::click()));
 
     let mut button_clicked = false;
     let card = frame.show(ui, |ui| {
@@ -244,17 +258,20 @@ fn show_session_card(
             });
         });
     });
-    let response = ui
-        .interact(
-            card.response.rect,
-            egui::Id::new(("claude_card", &session.id)),
-            egui::Sense::click(),
-        )
-        .on_hover_text(format!("{}\n{}", session.cwd, session.id));
-    if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    let rect = card.response.rect;
+    ui.ctx().data_mut(|d| d.insert_temp(rect_key, rect));
+    let mut card_clicked = false;
+    if let Some(response) = response {
+        let response = response.on_hover_text(format!("{}\n{}", session.cwd, session.id));
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        card_clicked = response.clicked();
+    } else {
+        // Erster Frame: Rechteck erst jetzt bekannt, nächster Frame übernimmt
+        ui.ctx().request_repaint();
     }
-    if button_clicked || response.clicked() {
+    if button_clicked || card_clicked {
         actions.resume = Some((session.cwd.clone(), session.id.clone()));
     }
 }
@@ -318,6 +335,74 @@ mod tests {
         assert_eq!(names, ["a", "b"]);
         assert_eq!(repos[0].1.len(), 2);
         assert_eq!(worktrees.len(), 1);
+    }
+
+    /// Rendert eine Karte mehrmals; `pointer` = Mauszeiger relativ zur Karte.
+    fn run_card(
+        s: &ClaudeSession,
+        pointer: impl Fn(egui::Rect) -> Option<egui::Pos2>,
+        click: bool,
+    ) -> (egui::Context, ClaudeSessionActions) {
+        let ctx = egui::Context::default();
+        let mut actions = ClaudeSessionActions::default();
+        let mut rect = None;
+        for frame in 0..4 {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 400.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            if let Some(pos) = rect.and_then(&pointer) {
+                raw.events.push(egui::Event::PointerMoved(pos));
+                if click && frame == 3 {
+                    for pressed in [true, false] {
+                        raw.events.push(egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        });
+                    }
+                }
+            }
+            let output = ctx.run_ui(raw, |ui| {
+                show_session_card(ui, s, Language::De, 10, &mut actions);
+            });
+            output.drop_without_applying_deltas();
+            rect = ctx.read_response(card_id(s)).map(|r| r.rect);
+        }
+        (ctx, actions)
+    }
+
+    #[test]
+    fn resume_button_sits_above_card_click_area() {
+        let s = session("a1", "Titel");
+        // Zeiger auf dem „Fortsetzen“-Button (rechts in der Karte)
+        let on_button = |r: egui::Rect| Some(egui::pos2(r.right() - 40.0, r.center().y));
+        let (ctx, _) = run_card(&s, on_button, false);
+        let card = ctx.read_response(card_id(&s)).expect("Karte");
+        assert!(!card.hovered(), "Karte verdeckt den Button");
+
+        let (_, actions) = run_card(&s, on_button, true);
+        assert_eq!(actions.resume, Some((s.cwd.clone(), s.id.clone())));
+    }
+
+    #[test]
+    fn click_on_card_body_resumes() {
+        let s = session("a1", "Titel");
+        let on_body = |r: egui::Rect| Some(egui::pos2(r.left() + 20.0, r.center().y));
+        let (_, actions) = run_card(&s, on_body, true);
+        assert_eq!(actions.resume, Some((s.cwd.clone(), s.id.clone())));
+    }
+
+    #[test]
+    fn card_id_differs_for_same_session_in_two_folders() {
+        let a = session("x", "T");
+        let mut b = a.clone();
+        b.cwd = "C:\\anders".to_string();
+        assert_ne!(card_id(&a), card_id(&b));
     }
 
     #[test]
