@@ -179,15 +179,24 @@ pub(crate) fn parse_session_bytes(
     })
 }
 
-/// Sessions eines Repos oder Worktrees.
+/// Eine Session mit dem Repo/Worktree, in dem sie liegt.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepoSessions {
+pub struct SessionEntry {
+    pub session: ClaudeSession,
     pub repo_path: PathBuf,
     pub repo_name: String,
     /// Verknüpfter Worktree (`RepoInfo::is_linked_worktree`)
     pub is_worktree: bool,
-    /// Neueste zuerst
-    pub sessions: Vec<ClaudeSession>,
+}
+
+/// Ergebnis eines Scans.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionScan {
+    /// Sessions in Repos/Worktrees, neueste zuerst
+    pub entries: Vec<SessionEntry>,
+    /// Alle eingelesenen Sessions nach ID (auch außerhalb der Repos), für
+    /// Titel offener Sessions
+    pub all: HashMap<String, ClaudeSession>,
 }
 
 /// Ergebnisse je Datei, gültig solange Änderungszeit und Größe gleich sind.
@@ -203,29 +212,33 @@ impl SessionCache {
     }
 }
 
-/// `<CLAUDE_CONFIG_DIR oder ~/.claude>/projects`, falls vorhanden.
+/// `CLAUDE_CONFIG_DIR` oder `~/.claude`.
+pub fn claude_config_dir() -> Option<PathBuf> {
+    match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir)),
+        None => Some(directories::BaseDirs::new()?.home_dir().join(".claude")),
+    }
+}
+
+/// `<Claude-Ordner>/projects`, falls vorhanden.
 pub fn claude_projects_dir() -> Option<PathBuf> {
-    let base = match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => directories::BaseDirs::new()?.home_dir().join(".claude"),
-    };
-    let projects = base.join("projects");
+    let projects = claude_config_dir()?.join("projects");
     projects.is_dir().then_some(projects)
 }
 
 /// Ordnet jede Session dem Repo/Worktree mit dem längsten passenden Pfad zu
 /// (ganze Pfadkomponenten). Sessions ohne Treffer oder mit fehlendem Ordner
-/// (`exists`) fallen weg. Gruppen und Sessions: neueste zuerst.
+/// (`exists`) fallen weg. Neueste zuerst.
 pub fn assign_to_repos(
     sessions: Vec<ClaudeSession>,
     repos: &[RepoInfo],
     exists: impl Fn(&str) -> bool,
-) -> Vec<RepoSessions> {
+) -> Vec<SessionEntry> {
     let keys: Vec<String> = repos
         .iter()
         .map(|r| path_key(&r.path.to_string_lossy()))
         .collect();
-    let mut groups: Vec<Option<RepoSessions>> = vec![None; repos.len()];
+    let mut entries = Vec::new();
     for session in sessions {
         let key = path_key(&session.cwd);
         let best = keys
@@ -239,23 +252,15 @@ pub fn assign_to_repos(
             continue;
         }
         let repo = &repos[i];
-        groups[i]
-            .get_or_insert_with(|| RepoSessions {
-                repo_path: repo.path.clone(),
-                repo_name: repo.name.clone(),
-                is_worktree: repo.is_linked_worktree,
-                sessions: Vec::new(),
-            })
-            .sessions
-            .push(session);
+        entries.push(SessionEntry {
+            session,
+            repo_path: repo.path.clone(),
+            repo_name: repo.name.clone(),
+            is_worktree: repo.is_linked_worktree,
+        });
     }
-    let mut groups: Vec<RepoSessions> = groups.into_iter().flatten().collect();
-    for g in &mut groups {
-        g.sessions
-            .sort_by_key(|s| std::cmp::Reverse(s.last_activity));
-    }
-    groups.sort_by_key(|g| std::cmp::Reverse(g.sessions[0].last_activity));
-    groups
+    entries.sort_by_key(|e| std::cmp::Reverse(e.session.last_activity));
+    entries
 }
 
 /// Liest alle `projects/*/*.jsonl` (Unterordner der Projektordner werden
@@ -264,7 +269,7 @@ pub fn scan_sessions(
     projects_dir: &Path,
     repos: &[RepoInfo],
     cache: &mut SessionCache,
-) -> Vec<RepoSessions> {
+) -> SessionScan {
     let mut seen = HashSet::new();
     let mut sessions = Vec::new();
     let project_dirs = std::fs::read_dir(projects_dir)
@@ -305,26 +310,36 @@ pub fn scan_sessions(
         }
     }
     cache.entries.retain(|p, _| seen.contains(p));
-    assign_to_repos(sessions, repos, |p| Path::new(p).exists())
+    let all = sessions.iter().map(|s| (s.id.clone(), s.clone())).collect();
+    let entries = assign_to_repos(sessions, repos, |p| Path::new(p).exists());
+    SessionScan { entries, all }
 }
 
-/// Alle Wörter von `query` kommen (ohne Groß-/Kleinschreibung) in Titel,
-/// letztem Prompt, Repo-Name, Repo-Pfad oder Branch vor.
-pub fn session_matches_search(group: &RepoSessions, session: &ClaudeSession, query: &str) -> bool {
+/// Alle Wörter von `query` kommen (ohne Groß-/Kleinschreibung) in einem der
+/// Felder vor; leere Suche passt immer.
+pub fn matches_words(fields: &[&str], query: &str) -> bool {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     if words.is_empty() {
         return true;
     }
-    let haystack = format!(
-        "{}\n{}\n{}\n{}\n{}",
-        session.title,
-        session.last_prompt.as_deref().unwrap_or(""),
-        group.repo_name,
-        group.repo_path.display(),
-        session.git_branch.as_deref().unwrap_or(""),
-    )
-    .to_lowercase();
+    let haystack = fields.join("\n").to_lowercase();
     words.iter().all(|w| haystack.contains(w.as_str()))
+}
+
+/// Suche über Titel, letzten Prompt, Repo-Name, Repo-Pfad und Branch.
+pub fn session_matches_search(entry: &SessionEntry, query: &str) -> bool {
+    let s = &entry.session;
+    let path = entry.repo_path.to_string_lossy();
+    matches_words(
+        &[
+            &s.title,
+            s.last_prompt.as_deref().unwrap_or(""),
+            &entry.repo_name,
+            &path,
+            s.git_branch.as_deref().unwrap_or(""),
+        ],
+        query,
+    )
 }
 
 /// Profil zum Fortsetzen: das Claude-Profil (sonst `claude`) mit
@@ -516,29 +531,29 @@ mod tests {
 
     #[test]
     fn assign_subfolder_maps_to_repo() {
-        let groups = assign_to_repos(
+        let entries = assign_to_repos(
             vec![session("a", "C:\\Code\\repo1\\src", 1)],
             &[repo("C:\\Code\\repo1", "repo1", false)],
             all,
         );
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].repo_name, "repo1");
-        assert_eq!(groups[0].sessions[0].id, "a");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].repo_name, "repo1");
+        assert_eq!(entries[0].session.id, "a");
     }
 
     #[test]
     fn assign_component_prefix_only() {
-        let groups = assign_to_repos(
+        let entries = assign_to_repos(
             vec![session("a", "C:\\Code\\repo10", 1)],
             &[repo("C:\\Code\\repo1", "repo1", false)],
             all,
         );
-        assert!(groups.is_empty());
+        assert!(entries.is_empty());
     }
 
     #[test]
     fn assign_longest_match_wins() {
-        let groups = assign_to_repos(
+        let entries = assign_to_repos(
             vec![session("a", "C:\\Code\\repo1\\wt\\feat", 1)],
             &[
                 repo("C:\\Code\\repo1", "repo1", false),
@@ -546,34 +561,34 @@ mod tests {
             ],
             all,
         );
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].repo_name, "feat");
-        assert!(groups[0].is_worktree);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].repo_name, "feat");
+        assert!(entries[0].is_worktree);
     }
 
     #[test]
     fn assign_matches_gitbash_and_case() {
-        let groups = assign_to_repos(
+        let entries = assign_to_repos(
             vec![session("a", "/c/code/REPO1", 1)],
             &[repo("C:\\Code\\repo1", "repo1", false)],
             all,
         );
-        assert_eq!(groups.len(), 1);
+        assert_eq!(entries.len(), 1);
     }
 
     #[test]
     fn assign_hides_orphans() {
-        let groups = assign_to_repos(
+        let entries = assign_to_repos(
             vec![session("a", "C:\\Code\\repo1", 1)],
             &[repo("C:\\Code\\repo1", "repo1", false)],
             |_| false,
         );
-        assert!(groups.is_empty());
+        assert!(entries.is_empty());
     }
 
     #[test]
-    fn assign_sorts_by_activity() {
-        let groups = assign_to_repos(
+    fn assign_flat_list_newest_first() {
+        let entries = assign_to_repos(
             vec![
                 session("a1", "C:\\a", 5),
                 session("b1", "C:\\b", 9),
@@ -582,10 +597,8 @@ mod tests {
             &[repo("C:\\a", "a", false), repo("C:\\b", "b", false)],
             all,
         );
-        let names: Vec<&str> = groups.iter().map(|g| g.repo_name.as_str()).collect();
-        assert_eq!(names, ["b", "a"]);
-        let ids: Vec<&str> = groups[1].sessions.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["a2", "a1"]);
+        let ids: Vec<&str> = entries.iter().map(|e| e.session.id.as_str()).collect();
+        assert_eq!(ids, ["b1", "a2", "a1"]);
     }
 
     fn write_session(dir: &Path, rel: &str, cwd: &Path) {
@@ -603,10 +616,25 @@ mod tests {
         let repos = [repo(&work.path().to_string_lossy(), "work", false)];
         let mut cache = SessionCache::default();
 
-        let groups = scan_sessions(projects.path(), &repos, &mut cache);
-        assert_eq!(groups.len(), 1);
-        let ids: Vec<&str> = groups[0].sessions.iter().map(|s| s.id.as_str()).collect();
+        let scan = scan_sessions(projects.path(), &repos, &mut cache);
+        let ids: Vec<&str> = scan.entries.iter().map(|e| e.session.id.as_str()).collect();
         assert_eq!(ids, ["s1"]);
+    }
+
+    #[test]
+    fn scan_all_includes_sessions_outside_repos() {
+        let projects = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        write_session(projects.path(), "C--a/s1.jsonl", work.path());
+        write_session(projects.path(), "C--b/s2.jsonl", other.path());
+        let repos = [repo(&work.path().to_string_lossy(), "work", false)];
+        let mut cache = SessionCache::default();
+
+        let scan = scan_sessions(projects.path(), &repos, &mut cache);
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.all.len(), 2);
+        assert_eq!(scan.all["s2"].title, "Frage");
     }
 
     #[test]
@@ -620,9 +648,10 @@ mod tests {
         scan_sessions(projects.path(), &repos, &mut cache);
         assert_eq!(cache.len(), 1);
         std::fs::remove_file(projects.path().join("C--a/s1.jsonl")).unwrap();
-        let groups = scan_sessions(projects.path(), &repos, &mut cache);
+        let scan = scan_sessions(projects.path(), &repos, &mut cache);
         assert_eq!(cache.len(), 0);
-        assert!(groups.is_empty());
+        assert!(scan.entries.is_empty());
+        assert!(scan.all.is_empty());
     }
 
     #[test]
@@ -631,17 +660,24 @@ mod tests {
         s.title = "Login-Bug fixen".to_string();
         s.git_branch = Some("feature/auth".to_string());
         s.last_prompt = Some("bitte Tests ergänzen".to_string());
-        let group = RepoSessions {
+        let entry = SessionEntry {
+            session: s,
             repo_path: PathBuf::from("C:\\Code\\pvsmefa"),
             repo_name: "pvsmefa".to_string(),
             is_worktree: false,
-            sessions: vec![],
         };
-        assert!(session_matches_search(&group, &s, ""));
-        assert!(session_matches_search(&group, &s, "login AUTH"));
-        assert!(session_matches_search(&group, &s, "pvsmefa"));
-        assert!(session_matches_search(&group, &s, "TESTS"));
-        assert!(!session_matches_search(&group, &s, "login logout"));
+        assert!(session_matches_search(&entry, ""));
+        assert!(session_matches_search(&entry, "login AUTH"));
+        assert!(session_matches_search(&entry, "pvsmefa"));
+        assert!(session_matches_search(&entry, "TESTS"));
+        assert!(!session_matches_search(&entry, "login logout"));
+    }
+
+    #[test]
+    fn matches_words_requires_every_word() {
+        assert!(matches_words(&["Alpha", "beta"], " "));
+        assert!(matches_words(&["Alpha", "beta"], "alpha BETA"));
+        assert!(!matches_words(&["Alpha", "beta"], "alpha gamma"));
     }
 
     fn profile(args: &[&str], command: Option<&str>) -> AgentProfile {

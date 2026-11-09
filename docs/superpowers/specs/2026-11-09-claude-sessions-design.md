@@ -144,3 +144,40 @@ Abschluss: `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`.
 
 Volltextsuche, WSL-Sessions, Löschen/Umbenennen von Sessions, Anzeige
 verwaister Sessions.
+
+---
+
+## v2 (2026-11-09): flache Liste, offene Sessions mit Live-Status
+
+Ersetzt die Gruppierung nach Repo/Worktree.
+
+| Thema | Entscheidung |
+|---|---|
+| Liste | Eine Liste, nach letzter Änderung sortiert (neueste zuerst); Repo-/Worktree-Name auf der Karte |
+| Offene Sessions | Eigener Abschnitt „Offen (n)“ ganz oben, Rahmen in Statusfarbe, danach Trenner; auch außerhalb gescannter Repos |
+| Sortierung offen | wartet auf dich → arbeitet → fertig, darin neuester Statuswechsel zuerst |
+| Klick auf offene Session | Terminal-Fenster in den Vordergrund (bei Windows Terminal: Fenster, nicht zwingend der Tab) |
+| Animationen | Arbeitet: pulsierender, rotierender Stern (gezeichnet) + schimmerndes Verb (eigene Liste, App-Sprache, Wechsel alle 3 s) + Laufzeit; Befehl: „Führt Befehl aus…“; Wartet: blau pulsierender Punkt; Fertig: grüner Haken |
+| Umschalter | „● n“ in Blau, wenn n Sessions warten, sonst Gesamtzahl |
+
+### Erkennung laufender Instanzen
+
+- `<Claude-Ordner>/sessions/<pid>.json`: `pid`, `sessionId`, `cwd`, `kind`,
+  `status` (`busy`, `shell`, `waiting`, `idle`), `statusUpdatedAt`, `name`,
+  `procStart` (Windows: FILETIME der Prozess-Erzeugung).
+- Nur `kind = interactive` (oder fehlend). Unbekannter Status → „arbeitet“,
+  fehlender Status → „fertig“.
+- Verwaiste Dateien: Prozess muss leben (`OpenProcess`/`GetExitCodeProcess`)
+  und seine Erzeugungszeit ±1 s zu `procStart` passen.
+- Mehrere Dateien zur selben Session: neuester Statuswechsel gewinnt.
+- Abfrage im Hintergrund: sichtbar jede Sekunde, sonst alle 5 s (erst nach
+  erstem Öffnen der Ansicht). Ändert sich die Menge offener Sessions, wird
+  (höchstens alle 5 s) neu gescannt.
+
+### Fenster-Fokus (Windows)
+
+Elternkette von `claude.exe` (Toolhelp-Snapshot), erstes sichtbares,
+nicht besessenes Hauptfenster mit Titel eines Prozesses der Kette
+(`EnumWindows`); sonst klassisches Konsolenfenster über `AttachConsole`.
+`ShowWindow(SW_RESTORE)` falls minimiert, dann `SetForegroundWindow` aus dem
+UI-Thread. Misserfolg → Statusmeldung „Terminal-Fenster nicht gefunden“.

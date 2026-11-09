@@ -727,7 +727,15 @@ impl MyApp {
                 } else {
                     Atoms::new(RichText::new(tr(lang, "view_claude")).size(12.0))
                 };
-                if self.claude.scanned_once {
+                // Warten Sessions auf dich: „● n“ in Blau statt der Gesamtzahl
+                let waiting = self.claude.waiting_count();
+                if waiting > 0 {
+                    atoms.push_right(
+                        RichText::new(format!("● {waiting}"))
+                            .size(11.0)
+                            .color(crate::ui::claude_anim::COLOR_WAITING),
+                    );
+                } else if self.claude.scanned_once {
                     let mut count =
                         RichText::new(self.claude.session_count().to_string()).size(11.0);
                     if !claude_on {
@@ -740,7 +748,12 @@ impl MyApp {
                 response.widget_info(|| {
                     WidgetInfo::selected(WidgetType::Button, true, claude_on, &name)
                 });
-                if response.on_hover_text(tr(lang, "view_claude_tt")).clicked() {
+                let tooltip = if waiting > 0 {
+                    tr_fmt(lang, "claude_waiting_tt", &[&waiting.to_string()])
+                } else {
+                    tr(lang, "view_claude_tt")
+                };
+                if response.on_hover_text(tooltip).clicked() {
                     clicked = Some(MainView::ClaudeSessions);
                 }
             });

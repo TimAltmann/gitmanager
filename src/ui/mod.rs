@@ -1,3 +1,4 @@
+pub mod claude_anim;
 pub mod claude_sessions;
 pub mod merge_requests;
 pub mod repo_list;

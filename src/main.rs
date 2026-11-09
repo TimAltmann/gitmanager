@@ -2,6 +2,7 @@
 
 mod app;
 mod autostart;
+mod claude_live;
 mod claude_sessions;
 mod config;
 mod config_parser;

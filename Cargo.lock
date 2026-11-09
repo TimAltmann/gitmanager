@@ -1546,6 +1546,7 @@ dependencies = [
  "tray-icon",
  "ureq",
  "walkdir",
+ "windows-sys 0.59.0",
  "winreg",
  "winres",
 ]
