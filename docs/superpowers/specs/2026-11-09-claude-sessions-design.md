@@ -176,8 +176,23 @@ Ersetzt die Gruppierung nach Repo/Worktree.
 
 ### Fenster-Fokus (Windows)
 
-Elternkette von `claude.exe` (Toolhelp-Snapshot), erstes sichtbares,
-nicht besessenes Hauptfenster mit Titel eines Prozesses der Kette
-(`EnumWindows`); sonst klassisches Konsolenfenster über `AttachConsole`.
+1. Konsole der Instanz: `AttachConsole(pid)` → `GetConsoleWindow()` →
+   `FreeConsole()` (nur ohne eigene Konsole, also im Release-Build). Bei
+   Windows Terminal ist das ein verstecktes Pseudo-Fenster; dessen Besitzer
+   (`GetAncestor(GA_ROOTOWNER)`) ist das Terminal-Fenster mit diesem Tab. Bei
+   conhost ist es das sichtbare Konsolenfenster selbst.
+2. Rückfall: Elternkette von `claude.exe` (Toolhelp-Snapshot); Treffer nur,
+   wenn der erste Prozess der Kette mit Fenstern genau ein sichtbares
+   Hauptfenster hat (mehrere Windows-Terminal-Fenster im selben Prozess wären
+   geraten). Nicht weiter nach oben (Explorer, GitManager).
+
 `ShowWindow(SW_RESTORE)` falls minimiert, dann `SetForegroundWindow` aus dem
 UI-Thread. Misserfolg → Statusmeldung „Terminal-Fenster nicht gefunden“.
+Den Tab innerhalb eines Windows-Terminal-Fensters kann man von außen nicht
+wählen.
+
+### Offene Karten
+
+Alle Karten volle Fensterbreite. Rechts oben wie in der Repo-Liste: IDEs des
+Profils (Repo der Session, sonst ihr Ordner; IDE öffnet das Repo), Shell und
+Explorer im Ordner der Session (Profil-Schalter `show_shell`/`show_explorer`).

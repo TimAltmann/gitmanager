@@ -3,6 +3,7 @@
 
 use crate::claude_live::{open_matches_search, LiveStatus, OpenSession};
 use crate::claude_sessions::{claude_projects_dir, session_matches_search, SessionEntry};
+use crate::config::AppConfig;
 use crate::gitlab::time::relative_time;
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::ui::claude_anim::{
@@ -11,12 +12,15 @@ use crate::ui::claude_anim::{
 };
 use egui::{FontId, RichText, Ui, Vec2};
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
 const ICON_SEARCH: egui::ImageSource = egui::include_image!("../../assets/icons/search.svg");
 const ICON_CROSS: egui::ImageSource = egui::include_image!("../../assets/icons/cross.svg");
 const ICON_GIT_BRANCH: egui::ImageSource =
     egui::include_image!("../../assets/icons/git-branch.svg");
+const ICON_TERMINAL: egui::ImageSource = egui::include_image!("../../assets/icons/terminal.svg");
+const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
 
 /// Was der Nutzer in der Ansicht ausgelöst hat.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -25,6 +29,12 @@ pub struct ClaudeSessionActions {
     pub resume: Option<(String, String)>,
     /// Terminal der laufenden Instanz (PID) nach vorne holen
     pub focus: Option<u32>,
+    /// (Repo, IDE-ID, zu öffnender Pfad) wie in der Repo-Liste
+    pub ide_open: Option<(PathBuf, String, PathBuf)>,
+    /// Shell im Ordner öffnen
+    pub shell_open: Option<PathBuf>,
+    /// Ordner im Explorer öffnen
+    pub explorer_open: Option<PathBuf>,
 }
 
 /// Sichtbare offene Sessions und übrige Sessions (ohne die offenen), jeweils
@@ -52,7 +62,8 @@ pub struct ViewData<'a> {
     pub open: &'a [OpenSession],
     pub entries: &'a [SessionEntry],
     pub scanning: bool,
-    pub lang: Language,
+    /// Sprache, IDEs und Profile (Buttons der offenen Sessions)
+    pub config: &'a AppConfig,
     /// Unix-Millisekunden (Laufzeiten)
     pub now_ms: i64,
 }
@@ -68,9 +79,10 @@ pub fn show_claude_sessions(
         open,
         entries,
         scanning,
-        lang,
+        config,
         now_ms,
     } = *data;
+    let lang = config.language;
     if open.is_empty() && entries.is_empty() {
         show_empty(ui, scanning, lang);
         return;
@@ -107,7 +119,7 @@ pub fn show_claude_sessions(
                     .show_unindented(ui, |ui| {
                         ui.add_space(4.0);
                         for o in &open_hits {
-                            show_open_card(ui, o, lang, now_ms, actions);
+                            show_open_card(ui, o, config, now_ms, actions);
                             ui.add_space(6.0);
                         }
                     });
@@ -235,6 +247,8 @@ fn clickable_card(
         .corner_radius(8)
         .inner_margin(egui::Margin::symmetric(12, 10));
     let card = frame.show(ui, |ui| {
+        // Alle Karten gleich breit: so breit wie das Fenster erlaubt
+        ui.set_min_width(ui.available_width());
         // Markierbare Labels würden den Klick auf die Karte abfangen
         ui.style_mut().interaction.selectable_labels = false;
         add_contents(ui);
@@ -365,24 +379,82 @@ fn status_line(ui: &mut Ui, o: &OpenSession, lang: Language, now_ms: i64) {
     });
 }
 
-/// Offene Session: Rahmen in Statusfarbe, Klick holt das Terminal nach vorne.
+/// Icon-Button wie in der Repo-Liste (Rahmen beim Überfahren).
+fn icon_button(ui: &mut Ui, image: egui::Image<'static>, tooltip: &str) -> bool {
+    let resp = ui.add(egui::Button::image(image)).on_hover_text(tooltip);
+    if resp.hovered() {
+        ui.painter().rect_stroke(
+            resp.rect,
+            egui::CornerRadius::same(4),
+            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 100, 100)),
+            egui::StrokeKind::Outside,
+        );
+    }
+    resp.clicked()
+}
+
+/// IDE-, Shell- und Explorer-Buttons (rechts, Reihenfolge wie in der
+/// Repo-Liste) nach dem Profil des Repos bzw. Ordners.
+fn open_buttons(
+    ui: &mut Ui,
+    o: &OpenSession,
+    config: &AppConfig,
+    actions: &mut ClaudeSessionActions,
+) {
+    let lang = config.language;
+    let cwd = PathBuf::from(&o.live.cwd);
+    let repo = o.repo_path.clone().unwrap_or_else(|| cwd.clone());
+    let profile = config.get_effective_profile_for_repo(&repo);
+    let tint = ui.visuals().text_color();
+    let icon = |src: egui::ImageSource<'static>| {
+        egui::Image::new(src)
+            .fit_to_exact_size(Vec2::splat(18.0))
+            .tint(tint)
+    };
+    if profile.show_explorer && icon_button(ui, icon(ICON_FOLDER), &tr(lang, "open_in_explorer")) {
+        actions.explorer_open = Some(cwd.clone());
+    }
+    if profile.show_shell && icon_button(ui, icon(ICON_TERMINAL), &tr(lang, "open_in_shell")) {
+        actions.shell_open = Some(cwd.clone());
+    }
+    for ide in profile.visible_ides().iter().take(4).rev() {
+        let tooltip = format!("{} {}", tr(lang, "open_in"), ide.display_name);
+        if icon_button(ui, crate::ui::repo_list::ide_image(ide), &tooltip) {
+            actions.ide_open = Some((repo.clone(), ide.id.clone(), repo.clone()));
+        }
+    }
+}
+
+/// Offene Session: Rahmen in Statusfarbe, Klick holt das Terminal nach vorne;
+/// rechts oben IDE, Shell und Explorer.
 fn show_open_card(
     ui: &mut Ui,
     o: &OpenSession,
-    lang: Language,
+    config: &AppConfig,
     now_ms: i64,
     actions: &mut ClaudeSessionActions,
 ) {
+    let lang = config.language;
     let stroke = egui::Stroke::new(1.5_f32, status_color(o.live.status));
     let tooltip = format!("{}\n{}", tr(lang, "claude_focus_tt"), o.live.cwd);
     let clicked = clickable_card(ui, open_card_id(o), stroke, &tooltip, |ui| {
-        ui.vertical(|ui| {
-            status_line(ui, o, lang, now_ms);
-            ui.add(egui::Label::new(RichText::new(&o.title).size(13.0).strong()).truncate());
-            if let Some(prompt) = &o.last_prompt {
-                ui.add(egui::Label::new(RichText::new(prompt).size(11.5).weak()).truncate());
-            }
-            footer(ui, &o.place, o.branch.as_deref(), None);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                open_buttons(ui, o, config, actions);
+                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    status_line(ui, o, lang, now_ms);
+                    ui.add(
+                        egui::Label::new(RichText::new(&o.title).size(13.0).strong()).truncate(),
+                    );
+                    if let Some(prompt) = &o.last_prompt {
+                        ui.add(
+                            egui::Label::new(RichText::new(prompt).size(11.5).weak()).truncate(),
+                        );
+                    }
+                    footer(ui, &o.place, o.branch.as_deref(), None);
+                });
+            });
         });
     });
     if clicked {
@@ -431,6 +503,7 @@ mod tests {
             },
             title: title.to_string(),
             place: "repo".to_string(),
+            repo_path: None,
             branch: None,
             last_prompt: None,
         }
@@ -467,6 +540,8 @@ mod tests {
         mut draw: impl FnMut(&mut Ui, &mut ClaudeSessionActions),
     ) -> (egui::Context, ClaudeSessionActions) {
         let ctx = egui::Context::default();
+        // Echte Icon-Größen (SVG), sonst sind Icon-Buttons zu schmal
+        egui_extras::install_image_loaders(&ctx);
         let mut actions = ClaudeSessionActions::default();
         let mut rect: Option<egui::Rect> = None;
         for frame in 0..4 {
@@ -559,11 +634,39 @@ mod tests {
         ] {
             let o = open(4016, "a1", "Titel", status);
             let (_, actions) = run_ui(open_card_id(&o), on_body, true, |ui, a| {
-                show_open_card(ui, &o, Language::De, 5_000, a);
+                show_open_card(ui, &o, &crate::config::AppConfig::default(), 5_000, a);
             });
             assert_eq!(actions.focus, Some(4016), "{status:?}");
             assert_eq!(actions.resume, None);
         }
+    }
+
+    #[test]
+    fn open_cards_have_equal_full_width() {
+        let short = open(1, "a", "Kurz", LiveStatus::Idle);
+        let mut long = open(2, "b", "Lang", LiveStatus::Busy);
+        long.last_prompt = Some("x ".repeat(30));
+        let config = crate::config::AppConfig::default();
+        let (ctx, _) = run_ui(open_card_id(&short), on_body, false, |ui, a| {
+            show_open_card(ui, &short, &config, 0, a);
+            show_open_card(ui, &long, &config, 0, a);
+        });
+        let w = |o: &OpenSession| ctx.read_response(open_card_id(o)).unwrap().rect.width();
+        assert_eq!(w(&short), w(&long));
+        assert!(w(&short) > 750.0, "volle Breite: {}", w(&short));
+    }
+
+    #[test]
+    fn explorer_button_on_open_card_does_not_focus() {
+        let o = open(7, "a1", "Titel", LiveStatus::Busy);
+        let config = crate::config::AppConfig::default();
+        // Explorer-Button: ganz rechts in der ersten Zeile
+        let on_explorer = |r: egui::Rect| egui::pos2(r.right() - 25.0, r.top() + 23.0);
+        let (_, actions) = run_ui(open_card_id(&o), on_explorer, true, |ui, a| {
+            show_open_card(ui, &o, &config, 0, a);
+        });
+        assert_eq!(actions.explorer_open, Some(PathBuf::from("C:\\a1")));
+        assert_eq!(actions.focus, None);
     }
 
     #[test]

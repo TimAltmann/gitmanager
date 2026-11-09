@@ -219,7 +219,7 @@ impl MyApp {
             open: &open,
             entries: &self.claude.scan.entries,
             scanning: self.claude.scanning,
-            lang: self.config.language,
+            config: &self.config,
             now_ms,
         };
         show_claude_sessions(ui, &data, &mut self.claude.search, &mut actions);
@@ -230,6 +230,15 @@ impl MyApp {
     pub(super) fn apply_claude_actions(&mut self, actions: ClaudeSessionActions) {
         if let Some((cwd, id)) = actions.resume {
             self.resume_claude_session(&cwd, &id);
+        }
+        if let Some((repo, ide_id, file)) = actions.ide_open {
+            self.open_ide(&repo, &ide_id, &file);
+        }
+        if let Some(path) = actions.shell_open {
+            self.open_shell(&path);
+        }
+        if let Some(path) = actions.explorer_open {
+            self.open_explorer(&path);
         }
         if let Some(pid) = actions.focus {
             // Im UI-Thread: nur der Vordergrund-Prozess darf den Fokus abgeben

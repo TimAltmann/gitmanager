@@ -70,7 +70,7 @@ fn agent_icon_for(agent_id: &str) -> egui::ImageSource<'static> {
     }
 }
 
-fn ide_image(ide: &crate::config::IdeConfig) -> egui::Image<'static> {
+pub(crate) fn ide_image(ide: &crate::config::IdeConfig) -> egui::Image<'static> {
     if let Some(path) = &ide.icon {
         let pb = std::path::PathBuf::from(path);
         if pb.exists() {

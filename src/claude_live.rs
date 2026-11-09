@@ -186,13 +186,34 @@ pub fn parent_chain(pid: u32, parents: &HashMap<u32, u32>) -> Vec<u32> {
     chain
 }
 
-/// Erstes Fenster des ersten Prozesses der Kette, der eines hat.
+/// Fenster des ersten Prozesses der Kette, der überhaupt Fenster hat – nur
+/// wenn es genau eines ist. Mehrere (z. B. zwei Windows-Terminal-Fenster im
+/// selben Prozess) wären geraten: dann `None`, und es wird auch nicht weiter
+/// oben (Explorer, GitManager) gesucht.
 /// `windows`: (Prozess-ID, Fenster-Handle) sichtbarer Hauptfenster.
 #[cfg_attr(not(windows), allow(dead_code))] // nur Windows (und Tests)
 pub fn pick_window(chain: &[u32], windows: &[(u32, isize)]) -> Option<isize> {
-    chain
+    let pid = chain
         .iter()
-        .find_map(|pid| windows.iter().find(|(p, _)| p == pid).map(|(_, h)| *h))
+        .find(|pid| windows.iter().any(|(p, _)| p == *pid))?;
+    let mut of_pid = windows.iter().filter(|(p, _)| p == pid);
+    let (_, hwnd) = of_pid.next()?;
+    of_pid.next().is_none().then_some(*hwnd)
+}
+
+/// Fenster zum Konsolenfenster der Instanz: bei Windows Terminal ist es ein
+/// verstecktes Pseudo-Fenster, dessen Besitzer (`root_owner`) das Terminal-
+/// Fenster mit diesem Tab ist; bei conhost das sichtbare Fenster selbst.
+#[cfg_attr(not(windows), allow(dead_code))] // nur Windows (und Tests)
+pub fn console_target(
+    console: isize,
+    console_visible: bool,
+    root_owner: Option<isize>,
+) -> Option<isize> {
+    match root_owner {
+        Some(owner) if owner != console => Some(owner),
+        _ => console_visible.then_some(console),
+    }
 }
 
 /// Holt das Terminal-Fenster der Instanz `pid` in den Vordergrund.
@@ -214,6 +235,8 @@ pub struct OpenSession {
     pub title: String,
     /// Repo-/Worktree-Name, sonst Ordnername
     pub place: String,
+    /// Repo/Worktree der Session, falls sie in einem gescannten liegt
+    pub repo_path: Option<PathBuf>,
     pub branch: Option<String>,
     pub last_prompt: Option<String>,
 }
@@ -240,6 +263,7 @@ pub fn build_open(live: &[LiveSession], scan: &SessionScan) -> Vec<OpenSession> 
                     .or_else(|| l.name.clone())
                     .unwrap_or_else(|| folder.clone()),
                 place: entry.map_or(folder, |e| e.repo_name.clone()),
+                repo_path: entry.map(|e| e.repo_path.clone()),
                 branch: session.and_then(|s| s.git_branch.clone()),
                 last_prompt: session.and_then(|s| s.last_prompt.clone()),
                 live: l.clone(),
@@ -265,7 +289,7 @@ pub fn open_matches_search(o: &OpenSession, query: &str) -> bool {
 
 #[cfg(windows)]
 mod win {
-    use super::{parent_chain, pick_window, proc_start_matches};
+    use super::{console_target, parent_chain, pick_window, proc_start_matches};
     use std::collections::HashMap;
     use windows_sys::Win32::Foundation::{
         CloseHandle, BOOL, FILETIME, HWND, INVALID_HANDLE_VALUE, LPARAM, STILL_ACTIVE,
@@ -279,8 +303,9 @@ mod win {
         GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic,
-        IsWindowVisible, SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE,
+        EnumWindows, GetAncestor, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId,
+        IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, GA_ROOTOWNER, GW_OWNER,
+        SW_RESTORE,
     };
 
     pub(super) fn process_alive(pid: u32, proc_start: Option<&str>) -> bool {
@@ -358,24 +383,30 @@ mod win {
         windows
     }
 
-    /// Klassisches Konsolenfenster (conhost) der Instanz, falls sichtbar.
+    /// Fenster über die Konsole der Instanz: kurz anhängen, Konsolenfenster
+    /// holen, wieder lösen (siehe `console_target`).
     fn console_window_of(pid: u32) -> Option<isize> {
         // SAFETY: Nur wenn dieser Prozess keine eigene Konsole hat (Release-
-        // Build); danach wird sie wieder gelöst.
+        // Build); die Konsole wird sofort wieder gelöst.
         unsafe {
             if !GetConsoleWindow().is_null() || AttachConsole(pid) == 0 {
                 return None;
             }
             let hwnd = GetConsoleWindow();
             FreeConsole();
-            (!hwnd.is_null() && IsWindowVisible(hwnd) != 0).then_some(hwnd as isize)
+            if hwnd.is_null() {
+                return None;
+            }
+            let owner = GetAncestor(hwnd, GA_ROOTOWNER);
+            let owner = (!owner.is_null() && IsWindowVisible(owner) != 0).then_some(owner as isize);
+            console_target(hwnd as isize, IsWindowVisible(hwnd) != 0, owner)
         }
     }
 
     pub(super) fn focus(pid: u32) -> bool {
-        let chain = parent_chain(pid, &parent_map());
-        let Some(hwnd) = pick_window(&chain, &top_windows()).or_else(|| console_window_of(pid))
-        else {
+        let found = console_window_of(pid)
+            .or_else(|| pick_window(&parent_chain(pid, &parent_map()), &top_windows()));
+        let Some(hwnd) = found else {
             return false;
         };
         let hwnd = hwnd as HWND;
@@ -486,13 +517,32 @@ mod tests {
     }
 
     #[test]
-    fn pick_window_takes_first_ancestor_with_window() {
-        // claude.exe(10) → pwsh(20) → WindowsTerminal(30)
-        let chain = [10, 20, 30];
-        let windows = [(99, 1), (30, 7), (20, 5), (30, 8)];
-        assert_eq!(pick_window(&chain, &windows), Some(5));
-        assert_eq!(pick_window(&[10, 30], &windows), Some(7));
-        assert_eq!(pick_window(&[10], &windows), None);
+    fn pick_window_needs_unique_window_of_first_ancestor_with_windows() {
+        // claude.exe(10) → pwsh(20) → WindowsTerminal(30) → explorer(40)
+        let chain = [10, 20, 30, 40];
+        // WT hat zwei Fenster: nicht eindeutig → kein Treffer (und nicht
+        // weiter hoch zum Explorer)
+        let ambiguous = [(30, 7), (30, 8), (40, 9)];
+        assert_eq!(pick_window(&chain, &ambiguous), None);
+        // genau ein Fenster → Treffer
+        let unique = [(99, 1), (30, 7), (40, 9)];
+        assert_eq!(pick_window(&chain, &unique), Some(7));
+        // eigenes Konsolenfenster der Shell zuerst
+        let shell = [(20, 5), (30, 7)];
+        assert_eq!(pick_window(&chain, &shell), Some(5));
+        assert_eq!(pick_window(&[10], &unique), None);
+    }
+
+    #[test]
+    fn console_target_prefers_terminal_owner_then_visible_console() {
+        // Windows Terminal: verstecktes Pseudo-Konsolenfenster, Besitzer = WT-Fenster
+        assert_eq!(console_target(11, false, Some(22)), Some(22));
+        // klassische Konsole: sichtbar, Besitzer ist sie selbst
+        assert_eq!(console_target(11, true, Some(11)), Some(11));
+        assert_eq!(console_target(11, true, None), Some(11));
+        // weder sichtbar noch Besitzer
+        assert_eq!(console_target(11, false, None), None);
+        assert_eq!(console_target(11, false, Some(11)), None);
     }
 
     #[test]
@@ -562,6 +612,8 @@ mod tests {
             ]
         );
         assert_eq!(open[0].branch.as_deref(), Some("main"));
+        assert_eq!(open[0].repo_path, Some(PathBuf::from("C:\\Code\\repo2")));
+        assert_eq!(open[1].repo_path, None);
     }
 
     #[test]
