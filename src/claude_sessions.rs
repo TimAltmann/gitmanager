@@ -27,7 +27,7 @@ pub struct ClaudeSession {
     pub id: String,
     /// Arbeitsordner; Git-Bash-Form (`/c/x`) als Windows-Pfad
     pub cwd: String,
-    /// `custom-title` > `ai-title` > erste Frage > ID
+    /// `custom-title` > `ai-title` > erste Frage > letzter Prompt
     pub title: String,
     pub last_prompt: Option<String>,
     /// Letzter nicht-leerer `gitBranch`
@@ -62,8 +62,8 @@ pub fn display_cwd(raw: &str) -> String {
     raw.to_string()
 }
 
-/// Liest Kopf und Ende einer Session-Datei. `None` ohne `cwd` oder bei
-/// Lesefehlern.
+/// Liest Kopf und Ende einer Session-Datei. `None` ohne `cwd`, ohne
+/// Unterhaltung (kein Titel, keine Frage, kein Prompt) oder bei Lesefehlern.
 pub fn parse_session(path: &Path) -> Option<ClaudeSession> {
     let id = path.file_stem()?.to_string_lossy().into_owned();
     let mut file = File::open(path).ok()?;
@@ -163,10 +163,12 @@ pub(crate) fn parse_session_bytes(
         }
     }
 
+    // Ohne Titel, Frage und Prompt (nur Befehle wie `/effort`) gibt es
+    // nichts fortzusetzen
     let title = custom_title
         .or(ai_title)
         .or(first_question)
-        .unwrap_or_else(|| id.to_string());
+        .or_else(|| last_prompt.clone())?;
     Some(ClaudeSession {
         id: id.to_string(),
         cwd: display_cwd(&cwd?),
@@ -393,8 +395,17 @@ mod tests {
         assert_eq!(parse(&all).unwrap().title, "Mein Name");
         assert_eq!(parse(&format!("{base}{ai}")).unwrap().title, "KI 2");
         assert_eq!(parse(&base).unwrap().title, "Erste Frage");
-        let no_user = line(json!({"type":"system","cwd":"C:\\Code\\a"}));
-        assert_eq!(parse(&no_user).unwrap().title, "abc");
+        let prompt_only = line(json!({"type":"system","cwd":"C:\\Code\\a"}))
+            + &line(json!({"type":"last-prompt","lastPrompt":"/review MR 96"}));
+        assert_eq!(parse(&prompt_only).unwrap().title, "/review MR 96");
+    }
+
+    #[test]
+    fn parse_hides_sessions_without_conversation() {
+        // Nur Slash-Befehle wie `/effort`, nie eine Frage: nichts fortzusetzen
+        let text = user("C:\\a", "<command-name>/effort</command-name>")
+            + &user("C:\\a", "<local-command-stdout>ok</local-command-stdout>");
+        assert!(parse(&text).is_none());
     }
 
     #[test]
