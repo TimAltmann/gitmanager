@@ -1,7 +1,9 @@
 //! Ansicht „Claude Sessions“: Zustand, Hintergrund-Scan und Fortsetzen.
 
 use super::MyApp;
-use crate::claude_sessions::{claude_projects_dir, resume_profile, scan_sessions, RepoSessions, SessionCache};
+use crate::claude_sessions::{
+    claude_projects_dir, resume_profile, scan_sessions, RepoSessions, SessionCache,
+};
 use crate::git::launch_agent;
 use crate::i18n::{tr, tr_fmt};
 use crate::ui::claude_sessions::{show_claude_sessions, ClaudeSessionActions};

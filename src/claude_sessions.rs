@@ -5,9 +5,9 @@
 //! Ordnername ist verlustbehaftet kodiert, maßgeblich ist das Feld `cwd`
 //! in den Zeilen.
 
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -480,7 +480,6 @@ mod tests {
     }
 
     // ── Task 2: Zuordnung, Scan, Suche, Resume ──────────────────────────
-
 
     fn repo(path: &str, name: &str, wt: bool) -> RepoInfo {
         let mut r = RepoInfo::new(PathBuf::from(path), "main".to_string(), false, false);

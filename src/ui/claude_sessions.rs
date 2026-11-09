@@ -1,6 +1,8 @@
 //! Ansicht „Claude Sessions“: Suche, Abschnitte nach Repo/Worktree, Karten.
 
-use crate::claude_sessions::{claude_projects_dir, session_matches_search, ClaudeSession, RepoSessions};
+use crate::claude_sessions::{
+    claude_projects_dir, session_matches_search, ClaudeSession, RepoSessions,
+};
 use crate::gitlab::time::{now_unix, relative_time};
 use crate::i18n::{tr, tr_fmt, Language};
 use egui::{RichText, Ui, Vec2};
@@ -218,7 +220,9 @@ fn show_session_card(
                             .truncate(),
                     );
                     if let Some(prompt) = &session.last_prompt {
-                        ui.add(egui::Label::new(RichText::new(prompt).size(11.5).weak()).truncate());
+                        ui.add(
+                            egui::Label::new(RichText::new(prompt).size(11.5).weak()).truncate(),
+                        );
                     }
                     ui.horizontal(|ui| {
                         if let Some(branch) = &session.git_branch {
@@ -284,7 +288,11 @@ mod tests {
 
     fn groups() -> Vec<RepoSessions> {
         vec![
-            group("a", false, vec![session("a1", "Login fixen"), session("a2", "Doku")]),
+            group(
+                "a",
+                false,
+                vec![session("a1", "Login fixen"), session("a2", "Doku")],
+            ),
             group("b", false, vec![session("b1", "Refactoring")]),
             group("w", true, vec![session("w1", "Login Review")]),
         ]
