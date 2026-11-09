@@ -216,6 +216,34 @@ pub fn console_target(
     }
 }
 
+/// Merkt sich beim Erzeugen `slots` Werte (`get`) und setzt sie beim Drop
+/// zurück (`set`) – auf jedem Weg aus dem Block. Für die Standard-Handles,
+/// die `AttachConsole` ersetzt und `FreeConsole` ungültig zurücklässt (sonst
+/// scheitert danach jeder Prozessstart mit „Das Handle ist ungültig“).
+#[cfg_attr(not(windows), allow(dead_code))] // nur Windows (und Tests)
+pub(crate) struct Restore<T: Copy, S: FnMut(usize, T)> {
+    saved: Vec<T>,
+    set: S,
+}
+
+impl<T: Copy, S: FnMut(usize, T)> Restore<T, S> {
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn save(slots: usize, get: impl Fn(usize) -> T, set: S) -> Self {
+        Self {
+            saved: (0..slots).map(get).collect(),
+            set,
+        }
+    }
+}
+
+impl<T: Copy, S: FnMut(usize, T)> Drop for Restore<T, S> {
+    fn drop(&mut self) {
+        for (i, v) in self.saved.iter().enumerate() {
+            (self.set)(i, *v);
+        }
+    }
+}
+
 /// Holt das Terminal-Fenster der Instanz `pid` in den Vordergrund.
 #[cfg(windows)]
 pub fn focus_session_window(pid: u32) -> bool {
@@ -289,12 +317,15 @@ pub fn open_matches_search(o: &OpenSession, query: &str) -> bool {
 
 #[cfg(windows)]
 mod win {
-    use super::{console_target, parent_chain, pick_window, proc_start_matches};
+    use super::{console_target, parent_chain, pick_window, proc_start_matches, Restore};
     use std::collections::HashMap;
     use windows_sys::Win32::Foundation::{
         CloseHandle, BOOL, FILETIME, HWND, INVALID_HANDLE_VALUE, LPARAM, STILL_ACTIVE,
     };
-    use windows_sys::Win32::System::Console::{AttachConsole, FreeConsole, GetConsoleWindow};
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, FreeConsole, GetConsoleWindow, GetStdHandle, SetStdHandle, STD_ERROR_HANDLE,
+        STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
@@ -389,11 +420,26 @@ mod win {
         // SAFETY: Nur wenn dieser Prozess keine eigene Konsole hat (Release-
         // Build); die Konsole wird sofort wieder gelöst.
         unsafe {
-            if !GetConsoleWindow().is_null() || AttachConsole(pid) == 0 {
+            if !GetConsoleWindow().is_null() {
+                return None;
+            }
+            // AttachConsole ersetzt stdin/stdout/stderr; nach FreeConsole wären
+            // sie ungültig und jeder spätere Prozessstart (IDE, Explorer,
+            // Shell) scheiterte mit os error 6 → vorher sichern, danach zurück.
+            const STD: [STD_HANDLE; 3] = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE];
+            let restore = Restore::save(
+                STD.len(),
+                |i| GetStdHandle(STD[i]),
+                |i, h| {
+                    SetStdHandle(STD[i], h);
+                },
+            );
+            if AttachConsole(pid) == 0 {
                 return None;
             }
             let hwnd = GetConsoleWindow();
             FreeConsole();
+            drop(restore);
             if hwnd.is_null() {
                 return None;
             }
@@ -531,6 +577,26 @@ mod tests {
         let shell = [(20, 5), (30, 7)];
         assert_eq!(pick_window(&chain, &shell), Some(5));
         assert_eq!(pick_window(&[10], &unique), None);
+    }
+
+    #[test]
+    fn restore_guard_resets_values_on_drop_even_on_early_return() {
+        use std::cell::RefCell;
+        // simuliert die Standard-Handles des Prozesses
+        let handles = RefCell::new([1, 2, 3]);
+        let attach_and_bail = || -> Option<()> {
+            let _guard = Restore::save(
+                3,
+                |i| handles.borrow()[i],
+                |i, v| handles.borrow_mut()[i] = v,
+            );
+            // AttachConsole ersetzt die Handles …
+            *handles.borrow_mut() = [7, 8, 9];
+            // … und ein vorzeitiges Ende darf sie nicht so lassen
+            None
+        };
+        assert_eq!(attach_and_bail(), None);
+        assert_eq!(*handles.borrow(), [1, 2, 3]);
     }
 
     #[test]
