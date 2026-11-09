@@ -1,3 +1,4 @@
+mod claude_sessions;
 mod merge_requests;
 mod mr_checkout;
 mod mr_settings;
@@ -26,7 +27,7 @@ use std::sync::Arc;
 /// Fenstergröße beim Start (ohne gespeicherte Größe: eframe ohne
 /// `persistence`). Mindestens `TOP_BAR_COMPACT_WIDTH` breit, damit
 /// „Aktualisieren“ und „Einstellungen“ beim Start ihren Text zeigen.
-pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1100.0, 680.0];
+pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1200.0, 680.0];
 const _: () = assert!(DEFAULT_WINDOW_SIZE[0] >= TOP_BAR_COMPACT_WIDTH);
 
 const ICON_GEAR: egui::ImageSource = egui::include_image!("../assets/icons/gear.svg");
@@ -254,6 +255,7 @@ enum UsageType {
 enum MainView {
     Repos,
     MergeRequests,
+    ClaudeSessions,
 }
 
 /// Was gerade die Refs der Repos hält: höchstens ein Scan, manueller Fetch
@@ -357,6 +359,8 @@ pub struct MyApp {
     config_save_pending: bool,
     last_config_save: Option<std::time::Instant>,
     main_view: MainView,
+    /// Ansicht „Claude Sessions“
+    claude: claude_sessions::ClaudeViewState,
     /// glab-Aufrufe der Sitzung (immer `GatedRunner`, E16); Tests: `FakeGlab`
     glab: Arc<dyn GlabRunner>,
     /// Programm hinter `glab`; ein anderes nach „Speichern“ → neuer Runner
@@ -490,6 +494,7 @@ impl MyApp {
             config_save_pending: false,
             last_config_save: None,
             main_view: MainView::Repos,
+            claude: claude_sessions::ClaudeViewState::new(),
             glab,
             glab_program,
             glab_factory,
@@ -692,6 +697,7 @@ impl MyApp {
                     self.pending_scan = false;
                     self.error = None;
                     self.mr_after_scan();
+                    self.claude_after_scan();
                     // K1: IDE nach dem Auschecken, sobald der Ordner bekannt ist
                     self.run_pending_after_checkout();
                     // Review-Fix: dirty VOR dem direkten Sync markieren — bei
@@ -727,6 +733,7 @@ impl MyApp {
                     self.repos = repos;
                     self.repo_sort_dirty = false;
                     self.mr_after_scan();
+                    self.claude_after_scan();
                     if let Some(raw) = fetch_error {
                         let key = fetch_error_i18n_key(fetch_partial);
                         // I2: auth_hint nur bei echten Remote-Fehlern — bei
@@ -2153,14 +2160,20 @@ impl MyApp {
                         ui.add_space(8.0);
                         // E19: in der MR-Ansicht lädt „Aktualisieren“ die MRs neu.
                         let mr_view = self.main_view == MainView::MergeRequests;
+                        // Claude-Ansicht: „Aktualisieren“ sucht die Sessions neu
+                        let claude_view = self.main_view == MainView::ClaudeSessions;
                         let checkout = matches!(self.git_busy, GitBusy::Checkout { .. });
                         let busy = if mr_view {
                             self.mr_loading || self.mr_discovering || checkout
+                        } else if claude_view {
+                            self.claude.scanning
                         } else {
                             self.git_busy.holds_refs()
                         };
                         // Beim Auschecken kein „Scanne…“
-                        let refresh_label = if !mr_view && self.git_busy.scans_repos() {
+                        let refresh_label = if claude_view {
+                            tr(lang, "refresh")
+                        } else if !mr_view && self.git_busy.scans_repos() {
                             tr(lang, "scanning")
                         } else {
                             tr(lang, "refresh")
@@ -2184,6 +2197,8 @@ impl MyApp {
                         if refresh.clicked() {
                             if mr_view {
                                 self.mr_user_refresh();
+                            } else if claude_view {
+                                self.start_claude_scan();
                             } else {
                                 self.start_scan();
                             }
@@ -2193,7 +2208,7 @@ impl MyApp {
                             ui.spinner();
                         }
                         // E19: Sortierung wirkt nur auf die Repo-Liste.
-                        if mr_view {
+                        if mr_view || claude_view {
                             return;
                         }
                         // Task 4: Sort-Modus als Icon-Button mit Dropdown
@@ -2321,6 +2336,12 @@ impl MyApp {
                             Color32::from_rgb(60, 120, 60)
                         } else {
                             crate::ui::theme::mr_palette(&self.config.theme, ui.visuals()).text2
+                        };
+                        ui.label(RichText::new(text).size(11.0).color(color));
+                    } else if self.main_view == MainView::ClaudeSessions {
+                        let (text, color) = match &self.status_message {
+                            Some(msg) => (msg.clone(), Color32::from_rgb(60, 120, 60)),
+                            None => (self.claude_status_line(), Color32::from_rgb(100, 100, 100)),
                         };
                         ui.label(RichText::new(text).size(11.0).color(color));
                     } else if let Some(msg) = &self.status_message {
@@ -2603,6 +2624,7 @@ impl eframe::App for MyApp {
         // sonst doppelte Channel-Drains und doppeltes Visible(false).
         // F-01: Service ist einzige Windows-Quelle, kein Fallback mehr.
         self.poll_scan(ctx);
+        self.poll_claude(ctx);
         #[cfg(target_os = "windows")]
         {
             if self.tray_shared.is_some() {
@@ -2665,6 +2687,10 @@ impl eframe::App for MyApp {
                 self.show_error_banner(ui);
                 if self.main_view == MainView::MergeRequests {
                     self.show_mr_view(ui);
+                    return;
+                }
+                if self.main_view == MainView::ClaudeSessions {
+                    self.show_claude_view(ui);
                     return;
                 }
 
@@ -3066,6 +3092,7 @@ mod tests {
             last_config_save: None,
             repo_sort_dirty: true,
             main_view: MainView::Repos,
+            claude: claude_sessions::ClaudeViewState::new(),
             glab,
             glab_program,
             glab_factory,

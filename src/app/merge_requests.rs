@@ -38,13 +38,19 @@ use std::time::{Duration, Instant};
 
 /// Unter dieser Fensterbreite zeigen „Aktualisieren“ und „Einstellungen“ nur
 /// ihr Icon (mit Tooltip), damit die Top-Leiste mit Umschalter passt.
-pub(super) const TOP_BAR_COMPACT_WIDTH: f32 = 1100.0;
+pub(super) const TOP_BAR_COMPACT_WIDTH: f32 = 1200.0;
 
 /// Unter dieser Fensterbreite entfallen zusätzlich die Beschriftungen
 /// „Profil:“, „AI:“ und „Sprache“ (dann Tooltip der Combos), damit die
 /// Top-Leiste beim Mindestfenster (920 px) passt; das Standardfenster
-/// (`DEFAULT_WINDOW_SIZE`, 1100 px) behält sie samt Button-Texten.
-pub(super) const TOP_BAR_CAPTIONS_WIDTH: f32 = 1000.0;
+/// (`DEFAULT_WINDOW_SIZE`, 1200 px) behält sie samt Button-Texten.
+pub(super) const TOP_BAR_CAPTIONS_WIDTH: f32 = 1060.0;
+
+/// Ab dieser Fensterbreite heißt der dritte Umschalter-Eintrag „Claude
+/// Sessions“, darunter nur Claude-Icon (passt sonst im Standardfenster nicht).
+pub(super) const CLAUDE_FULL_LABEL_WIDTH: f32 = 1300.0;
+
+const ICON_CLAUDE: ImageSource<'static> = egui::include_image!("../../assets/icons/claude.svg");
 
 /// Ergebnis der MR-Hintergrundarbeit (Kanal `mr_tx`/`mr_rx`).
 pub(super) enum MrResult {
@@ -642,9 +648,12 @@ impl MyApp {
         if view == MainView::MergeRequests && self.mr_snapshot.is_none() && !self.mr_loading {
             self.start_mr_refresh();
         }
+        if view == MainView::ClaudeSessions {
+            self.ensure_claude_scan();
+        }
     }
 
-    /// Umschalter „Repositories N | Merge Requests [Badge]“ in der Top-Leiste.
+    /// Umschalter „Repositories N | Merge Requests [Badge] | Claude Sessions N“ in der Top-Leiste.
     pub(super) fn view_switcher(&mut self, ui: &mut Ui) {
         let lang = self.config.language;
         let p = mr_palette(&self.config.theme, ui.visuals());
@@ -708,6 +717,31 @@ impl MyApp {
                 };
                 if out.response.on_hover_text(tooltip).clicked() {
                     clicked = Some(MainView::MergeRequests);
+                }
+
+                let claude_on = self.main_view == MainView::ClaudeSessions;
+                // Bis zum Standardfenster nur das Claude-Icon, Name im Tooltip
+                let short = self.last_window_size[0] < CLAUDE_FULL_LABEL_WIDTH;
+                let mut atoms = if short {
+                    Atoms::new(Image::new(ICON_CLAUDE).fit_to_exact_size(vec2(14.0, 14.0)))
+                } else {
+                    Atoms::new(RichText::new(tr(lang, "view_claude")).size(12.0))
+                };
+                if self.claude.scanned_once {
+                    let mut count =
+                        RichText::new(self.claude.session_count().to_string()).size(11.0);
+                    if !claude_on {
+                        count = count.color(p.text2);
+                    }
+                    atoms.push_right(count);
+                }
+                let response = ui.add(segment(claude_on, atoms));
+                let name = tr(lang, "view_claude");
+                response.widget_info(|| {
+                    WidgetInfo::selected(WidgetType::Button, true, claude_on, &name)
+                });
+                if response.on_hover_text(tr(lang, "view_claude_tt")).clicked() {
+                    clicked = Some(MainView::ClaudeSessions);
                 }
             });
         if let Some(view) = clicked {
@@ -2210,11 +2244,18 @@ pub(super) mod tests {
 
     /// Mindestfenster (920 px, nur Icons, ohne Beschriftungen), ab
     /// `TOP_BAR_CAPTIONS_WIDTH` mit Beschriftungen, 1080 px und ab
-    /// `TOP_BAR_COMPACT_WIDTH` (Standardfenster) mit Button-Texten: in
+    /// `TOP_BAR_COMPACT_WIDTH` (Standardfenster) mit Button-Texten und ab
+    /// `CLAUDE_FULL_LABEL_WIDTH` mit „Claude Sessions“ als Text: in
     /// Zeile 1 überlappt nichts, alles bleibt im Fenster.
     #[test]
     fn top_bar_fits_at_min_width() {
-        for width in [920.0, TOP_BAR_CAPTIONS_WIDTH, 1080.0, TOP_BAR_COMPACT_WIDTH] {
+        for width in [
+            920.0,
+            TOP_BAR_CAPTIONS_WIDTH,
+            1080.0,
+            TOP_BAR_COMPACT_WIDTH,
+            CLAUDE_FULL_LABEL_WIDTH,
+        ] {
             for lang in [Language::De, Language::En] {
                 for view in [MainView::Repos, MainView::MergeRequests] {
                     let case = format!("{width} {lang:?} {view:?}");
