@@ -135,7 +135,9 @@ pub fn show_claude_sessions(
                         ui.add_space(4.0);
                         for o in &open_hits {
                             let preview = Preview::of(&o.live.session_id, expanded, previews);
-                            show_open_card(ui, o, config, now_ms, preview, actions);
+                            culled(ui, open_card_id(o), |ui| {
+                                show_open_card(ui, o, config, now_ms, preview, actions)
+                            });
                             ui.add_space(6.0);
                         }
                     });
@@ -153,7 +155,9 @@ pub fn show_claude_sessions(
                         ui.add_space(4.0);
                         for e in &rest {
                             let preview = Preview::of(&e.session.id, expanded, previews);
-                            show_session_card(ui, e, lang, now_secs, preview, actions);
+                            culled(ui, card_id(e), |ui| {
+                                show_session_card(ui, e, lang, now_secs, preview, actions)
+                            });
                             ui.add_space(6.0);
                         }
                     });
@@ -203,6 +207,26 @@ pub(crate) fn card_id(entry: &SessionEntry) -> egui::Id {
 /// Id der Klickfläche einer offenen Karte.
 pub(crate) fn open_card_id(o: &OpenSession) -> egui::Id {
     egui::Id::new(("claude_open_card", o.live.pid, &o.live.session_id))
+}
+
+/// Zeichnet eine Karte nur, wenn sie im sichtbaren Bereich liegt. Außerhalb
+/// wird lediglich ihre zuletzt gemessene Höhe freigehalten: Bei laufender
+/// Animation (20 Bilder pro Sekunde) sollen nicht hunderte Karten außerhalb
+/// des Sichtbereichs jedes Mal neu aufgebaut werden. Ohne Messwert oder nach
+/// geänderter Breite (Umbruch) wird gezeichnet und neu gemessen.
+fn culled(ui: &mut Ui, id: egui::Id, draw: impl FnOnce(&mut Ui)) {
+    let key = id.with("culled_size");
+    let width = ui.available_width();
+    let top = ui.cursor().min.y;
+    if let Some((w, h)) = ui.ctx().data(|d| d.get_temp::<(f32, f32)>(key)) {
+        let clip = ui.clip_rect();
+        if (w - width).abs() < 0.5 && (top > clip.max.y || top + h < clip.min.y) {
+            ui.allocate_space(Vec2::new(width, h));
+            return;
+        }
+    }
+    let height = ui.scope(draw).response.rect.height();
+    ui.ctx().data_mut(|d| d.insert_temp(key, (width, height)));
 }
 
 /// Karte im Stil der Repo-Karte. Die Klickfläche wird VOR dem Inhalt
@@ -927,5 +951,35 @@ mod tests {
                 assert_ne!(tr(lang, key), key, "{key} fehlt für {lang:?}");
             }
         }
+    }
+
+    #[test]
+    fn cards_outside_viewport_are_not_built() {
+        let entries: Vec<SessionEntry> = (0..60)
+            .map(|i| entry(&format!("s{i}"), &format!("Titel {i}")))
+            .collect();
+        let config = AppConfig::default();
+        let expanded = HashSet::new();
+        let previews = HashMap::new();
+        let data = ViewData {
+            open: &[],
+            entries: &entries,
+            scanning: false,
+            config: &config,
+            now_ms: 10_000,
+            expanded: &expanded,
+            previews: &previews,
+        };
+        let mut search = String::new();
+        let first = card_id(&entries[0]);
+        let last = card_id(&entries[59]);
+        let (ctx, _) = run_ui(first, on_body, false, |ui, a| {
+            show_claude_sessions(ui, &data, &mut search, a);
+        });
+        assert!(ctx.read_response(first).is_some(), "sichtbare Karte fehlt");
+        assert!(
+            ctx.read_response(last).is_none(),
+            "Karte außerhalb des Sichtbereichs wurde aufgebaut"
+        );
     }
 }
