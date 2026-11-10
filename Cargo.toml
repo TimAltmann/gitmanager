@@ -25,10 +25,11 @@ roxmltree = "0.20"
 image = { version = "0.25", default-features = false, features = ["png", "ico", "jpeg"] }
 ureq = { version = "2.9", features = ["json", "tls"] }
 semver = "1.0"
+resvg = "0.45"
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-icon = "0.24"
 winreg = "0.52"
-tauri-winrt-notification = "0.7"
+windows = { version = "0.61", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications"] }
 raw-window-handle = "0.6"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",

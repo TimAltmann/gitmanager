@@ -7,7 +7,9 @@ use crate::claude_live::{
     LiveSession, LiveStatus,
 };
 use crate::claude_new::{new_session_targets, preselect};
-use crate::claude_notify::{show_notification, transitions, NotifyKind};
+use crate::claude_notify::{
+    show_notification, snippet_of, transitions, NotifyKind, Toast, ToastClick,
+};
 use crate::claude_preview::{find_session_file, read_preview, PreviewItem, PREVIEW_ITEMS};
 use crate::claude_sessions::{
     claude_projects_dir, new_session_profile, resume_profile, scan_sessions, SessionCache,
@@ -88,12 +90,13 @@ fn check_preview(
     }
 }
 
-/// Fertig formulierte Benachrichtigung (Titel, Text, PID für den Klick).
+/// Fertig formulierte Benachrichtigung; die Vorschau der letzten Antwort
+/// liest erst der Hintergrund-Thread (`session_id`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct NoticeText {
-    pub(super) title: String,
-    pub(super) body: String,
+    pub(super) toast: Toast,
     pub(super) pid: u32,
+    pub(super) session_id: String,
 }
 /// Frühestens so oft neu scannen, wenn sich die offenen Sessions ändern
 const RESCAN_ON_LIVE_CHANGE: Duration = Duration::from_secs(5);
@@ -137,8 +140,8 @@ pub(super) struct ClaudeViewState {
     /// Noch zu zeigende Benachrichtigungen
     pub(super) outbox: Vec<NoticeText>,
     /// PID aus einem Klick auf eine Benachrichtigung
-    notify_click_tx: Sender<u32>,
-    notify_click_rx: Receiver<u32>,
+    notify_click_tx: Sender<(u32, ToastClick)>,
+    notify_click_rx: Receiver<(u32, ToastClick)>,
 }
 
 impl ClaudeViewState {
@@ -287,10 +290,8 @@ impl MyApp {
 
     /// Neuer Live-Stand. Kommt eine Session dazu oder fällt weg, wird
     /// (gedrosselt) neu gescannt: Titel neuer Sessions, geschlossene wandern
-    /// in die Liste.
-    /// `watching`: Fenster im Vordergrund mit dieser Ansicht – dann keine
-    /// Benachrichtigung, der Status ist ja zu sehen.
-    pub(super) fn apply_live_result(&mut self, live: Option<Vec<LiveSession>>, watching: bool) {
+    /// in die Liste. Benachrichtigt auch bei offenem GitManager.
+    pub(super) fn apply_live_result(&mut self, live: Option<Vec<LiveSession>>) {
         self.claude.live_inflight = false;
         self.claude.live_backoff_until = live
             .is_none()
@@ -306,7 +307,7 @@ impl MyApp {
         }
         let notices = transitions(&self.claude.live, &live);
         self.claude.live = live;
-        if self.config.claude_notify && !watching && !notices.is_empty() {
+        if self.config.claude_notify && !notices.is_empty() {
             self.queue_notices(&notices);
         }
         if !self.claude.scanned_once {
@@ -328,22 +329,37 @@ impl MyApp {
                 self.apply_claude_result(scan);
             }
         }
-        let watching = self.main_view == MainView::ClaudeSessions
-            && ctx.input(|i| i.viewport().focused.unwrap_or(false));
         while let Ok(live) = self.claude.live_rx.try_recv() {
-            self.apply_live_result(live, watching);
+            self.apply_live_result(live);
         }
         for n in std::mem::take(&mut self.claude.outbox) {
             let tx = self.claude.notify_click_tx.clone();
             let ctx = ctx.clone();
-            show_notification(&n.title, &n.body, move || {
-                let _ = tx.send(n.pid);
-                ctx.request_repaint();
+            // Letzte Antwort aus der Session-Datei: Dateizugriff nicht im UI-Thread
+            std::thread::spawn(move || {
+                let mut toast = n.toast;
+                toast.snippet = claude_projects_dir()
+                    .and_then(|p| find_session_file(&p, &n.session_id))
+                    .and_then(|f| read_preview(&f, PREVIEW_ITEMS).ok())
+                    .and_then(|items| snippet_of(&items));
+                let pid = n.pid;
+                show_notification(toast, move |click| {
+                    let _ = tx.send((pid, click));
+                    ctx.request_repaint();
+                });
             });
         }
-        while let Ok(pid) = self.claude.notify_click_rx.try_recv() {
-            // Klappt das nicht, blinkt wenigstens das Terminal in der Taskleiste
-            let _ = focus_session_window(pid);
+        while let Ok((pid, click)) = self.claude.notify_click_rx.try_recv() {
+            match click {
+                ToastClick::Terminal => {
+                    // Klappt das nicht, blinkt wenigstens das Terminal in der Taskleiste
+                    let _ = focus_session_window(pid);
+                }
+                ToastClick::Show => {
+                    self.main_view = MainView::ClaudeSessions;
+                    self.show_main_window(ctx);
+                }
+            }
         }
         if self.live_poll_due(Instant::now()) {
             self.start_live_poll();
@@ -360,19 +376,38 @@ impl MyApp {
         let lang = self.config.language;
         let open = build_open(&self.claude.live, &self.claude.scan);
         for n in notices {
-            let key = match n.kind {
-                NotifyKind::Waiting => "claude_notify_waiting",
-                NotifyKind::Done => "claude_notify_done",
+            let (key, attr_key) = match n.kind {
+                NotifyKind::Waiting => ("claude_notify_waiting", "claude_notify_attr_waiting"),
+                NotifyKind::Done => ("claude_notify_done", "claude_notify_attr_done"),
             };
-            let body = open
-                .iter()
-                .find(|o| o.live.session_id == n.session_id)
-                .map(|o| format!("{} · {}", o.title, o.place))
-                .unwrap_or_else(|| n.cwd.clone());
+            let session = open.iter().find(|o| o.live.session_id == n.session_id);
+            let place = session.map_or_else(|| n.cwd.clone(), |o| o.place.clone());
+            // „fertig nach 4m 12s · repo · branch“
+            let mut attribution = match n.busy_ms {
+                Some(ms) => tr_fmt(
+                    lang,
+                    &format!("{attr_key}_after"),
+                    &[&crate::ui::claude_anim::format_elapsed(ms)],
+                ),
+                None => tr(lang, attr_key),
+            };
+            attribution.push_str(&format!(" · {place}"));
+            if let Some(branch) = session.and_then(|o| o.branch.as_deref()) {
+                attribution.push_str(&format!(" · {branch}"));
+            }
             self.claude.outbox.push(NoticeText {
-                title: tr(lang, key),
-                body,
+                toast: Toast {
+                    kind: n.kind,
+                    header: tr(lang, "view_claude"),
+                    title: session.map_or_else(|| place.clone(), |o| o.title.clone()),
+                    snippet: None,
+                    status: tr(lang, key),
+                    attribution,
+                    button_terminal: tr(lang, "claude_notify_btn_terminal"),
+                    button_show: tr(lang, "claude_notify_btn_show"),
+                },
                 pid: n.pid,
+                session_id: n.session_id.clone(),
             });
         }
     }
@@ -739,28 +774,28 @@ mod tests {
         let mut app = test_app();
         app.claude.scanned_once = true;
         app.claude.live_inflight = true;
-        app.apply_live_result(Some(vec![live("a", LiveStatus::Busy)]), false);
+        app.apply_live_result(Some(vec![live("a", LiveStatus::Busy)]));
         assert!(!app.claude.live_inflight);
         assert_eq!(app.claude.scan_generation, 1, "neue Session → Scan");
 
         // gleiche Sessions, nur Status anders → kein Scan
         app.apply_claude_result(SessionScan::default());
         app.claude.last_scan_start = None;
-        app.apply_live_result(Some(vec![live("a", LiveStatus::Idle)]), false);
+        app.apply_live_result(Some(vec![live("a", LiveStatus::Idle)]));
         assert_eq!(app.claude.scan_generation, 1);
 
         // Session weg, aber gerade erst gescannt → gedrosselt
         app.claude.last_scan_start = Some(Instant::now());
-        app.apply_live_result(Some(vec![]), false);
+        app.apply_live_result(Some(vec![]));
         assert_eq!(app.claude.scan_generation, 1);
 
         // Drosselung vorbei, Sessions unverändert → Scan wird nachgeholt
         app.claude.last_scan_start = Some(Instant::now() - RESCAN_ON_LIVE_CHANGE);
-        app.apply_live_result(Some(vec![]), false);
+        app.apply_live_result(Some(vec![]));
         assert_eq!(app.claude.scan_generation, 2, "nachgeholt");
         app.apply_claude_result(SessionScan::default());
         app.claude.last_scan_start = None;
-        app.apply_live_result(Some(vec![]), false);
+        app.apply_live_result(Some(vec![]));
         assert_eq!(app.claude.scan_generation, 2, "nur einmal");
     }
 
@@ -769,10 +804,10 @@ mod tests {
         let mut app = test_app();
         app.claude.scanned_once = true;
         app.claude.scanning = true;
-        app.apply_live_result(Some(vec![live("a", LiveStatus::Busy)]), false);
+        app.apply_live_result(Some(vec![live("a", LiveStatus::Busy)]));
         assert_eq!(app.claude.scan_generation, 0, "Scan läuft noch");
         app.apply_claude_result(SessionScan::default());
-        app.apply_live_result(Some(vec![live("a", LiveStatus::Busy)]), false);
+        app.apply_live_result(Some(vec![live("a", LiveStatus::Busy)]));
         assert_eq!(app.claude.scan_generation, 1);
     }
 
@@ -783,11 +818,11 @@ mod tests {
         let now = Instant::now();
         assert!(app.live_poll_due(now));
         app.claude.live_inflight = true;
-        app.apply_live_result(None, false);
+        app.apply_live_result(None);
         assert!(app.claude.live.is_empty());
         assert!(!app.live_poll_due(now + Duration::from_secs(5)));
         assert!(app.live_poll_due(now + LIVE_DIR_MISSING_BACKOFF + Duration::from_secs(1)));
-        app.apply_live_result(Some(vec![]), false);
+        app.apply_live_result(Some(vec![]));
         assert!(app.live_poll_due(Instant::now() + Duration::from_secs(2)));
     }
 
@@ -812,28 +847,36 @@ mod tests {
     }
 
     #[test]
-    fn busy_to_waiting_queues_notice_unless_watching_or_disabled() {
+    fn busy_to_waiting_queues_notice_unless_disabled() {
         let mut app = test_app();
         app.config.language = crate::i18n::Language::De;
         app.claude.live = vec![live("a", LiveStatus::Busy)];
-        app.apply_live_result(Some(vec![live("a", LiveStatus::Waiting)]), false);
+        app.apply_live_result(Some(vec![live("a", LiveStatus::Waiting)]));
         assert_eq!(app.claude.outbox.len(), 1);
-        assert_eq!(app.claude.outbox[0].title, "Claude wartet auf dich");
+        let toast = &app.claude.outbox[0].toast;
+        assert_eq!(toast.status, "Claude wartet auf dich");
+        assert_eq!(toast.header, "Claude Sessions");
+        assert!(toast.attribution.starts_with("wartet auf dich · "));
+        assert!(toast.attribution.contains('a'), "Ort im Text");
+        assert_eq!(toast.kind, NotifyKind::Waiting);
+        assert_eq!(toast.button_terminal, "Terminal öffnen");
         assert_eq!(app.claude.outbox[0].pid, 1);
-        assert!(app.claude.outbox[0].body.contains('a'), "Ort im Text");
+        assert_eq!(app.claude.outbox[0].session_id, "a");
         assert_eq!(
             app.claude.scan_generation, 0,
             "ohne geöffnete Ansicht kein Scan"
         );
 
         app.claude.outbox.clear();
+        app.main_view = MainView::ClaudeSessions;
         app.claude.live = vec![live("a", LiveStatus::Busy)];
-        app.apply_live_result(Some(vec![live("a", LiveStatus::Idle)]), true);
-        assert!(app.claude.outbox.is_empty(), "Ansicht im Blick");
+        app.apply_live_result(Some(vec![live("a", LiveStatus::Idle)]));
+        assert_eq!(app.claude.outbox.len(), 1, "auch bei offener Ansicht");
+        app.claude.outbox.clear();
 
         app.config.claude_notify = false;
         app.claude.live = vec![live("a", LiveStatus::Busy)];
-        app.apply_live_result(Some(vec![live("a", LiveStatus::Idle)]), false);
+        app.apply_live_result(Some(vec![live("a", LiveStatus::Idle)]));
         assert!(app.claude.outbox.is_empty(), "abgeschaltet");
     }
 
