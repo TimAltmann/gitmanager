@@ -10,7 +10,17 @@ keywords = ["git", "manager", "gui", "windows"]
 categories = ["development-tools"]
 
 [dependencies]
-eframe = { version = "0.36", features = ["default_fonts", "glow"] }
+# Ohne Standard-Features: sonst kommt `wgpu` mit, und eframe zieht es `glow`
+# vor (Vulkan/DX12 auf der dedizierten GPU, ~600 MB Treiberspeicher)
+eframe = { version = "0.36", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "links",
+    "wayland",
+    "web_screen_reader",
+    "x11",
+] }
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["svg"] }
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https", "ssh"] }
