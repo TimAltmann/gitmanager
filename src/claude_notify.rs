@@ -89,8 +89,10 @@ pub enum ToastClick {
     Show,
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 const ACTION_TERMINAL: &str = "terminal";
 const ACTION_SHOW: &str = "show";
+#[cfg_attr(not(windows), allow(dead_code))]
 /// Kennung der Kopfzeile (bündelt die Toasts im Benachrichtigungscenter)
 const HEADER_ID: &str = "claude-sessions";
 
@@ -103,6 +105,7 @@ fn click_of(action: &str) -> ToastClick {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn xml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -118,6 +121,7 @@ fn xml_escape(s: &str) -> String {
     out
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 /// Toast-XML (Vorlage `ToastGeneric`); `logo` = rundes Logo mit Statusring.
 pub fn toast_xml(toast: &Toast, logo: Option<&Path>) -> String {
     let e = xml_escape;
