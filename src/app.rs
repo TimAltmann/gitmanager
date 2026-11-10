@@ -30,6 +30,9 @@ use std::sync::Arc;
 pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1200.0, 680.0];
 const _: () = assert!(DEFAULT_WINDOW_SIZE[0] >= TOP_BAR_COMPACT_WIDTH);
 
+/// Kleinste Fenstergröße (Punkte, also unabhängig von der Skalierung).
+pub const MIN_WINDOW_SIZE: [f32; 2] = [920.0, 560.0];
+
 const ICON_GEAR: egui::ImageSource = egui::include_image!("../assets/icons/gear.svg");
 const ICON_REFRESH: egui::ImageSource = egui::include_image!("../assets/icons/refresh.svg");
 const ICON_WARNING: egui::ImageSource = egui::include_image!("../assets/icons/warning.svg");
@@ -422,6 +425,10 @@ pub struct MyApp {
 
 impl MyApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        #[cfg(target_os = "windows")]
+        if !crate::dpi_fix::install(cc) {
+            eprintln!("DPI-Korrektur für das Hauptfenster nicht installiert");
+        }
         let config = AppConfig::load();
         // Startup-Sync: Run-Key mit aktueller exe synchronisieren (falls exe verschoben).
         // Best effort — kein Start-Abbruch bei Registry-Fehlern.

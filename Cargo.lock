@@ -1536,6 +1536,7 @@ dependencies = [
  "egui_extras",
  "git2",
  "image",
+ "raw-window-handle",
  "rayon",
  "rfd",
  "roxmltree",

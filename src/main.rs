@@ -9,6 +9,8 @@ mod claude_preview;
 mod claude_sessions;
 mod config;
 mod config_parser;
+#[cfg(target_os = "windows")]
+mod dpi_fix;
 mod git;
 mod gitlab;
 mod i18n;
@@ -140,8 +142,13 @@ fn main() -> eframe::Result<()> {
     let start_minimized = start_minimized_flag();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size(app::DEFAULT_WINDOW_SIZE)
-        .with_min_inner_size([920.0, 560.0])
+        // Mindestgröße unter Windows in `dpi_fix` (eframe rechnet sie sonst
+        // einmalig in feste Pixel des Start-Monitors um)
         .with_title("GitManager - Git Repository Manager");
+    #[cfg(not(target_os = "windows"))]
+    {
+        viewport = viewport.with_min_inner_size(app::MIN_WINDOW_SIZE);
+    }
     if start_minimized {
         viewport = viewport.with_visible(false);
     }

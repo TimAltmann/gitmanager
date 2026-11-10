@@ -29,11 +29,14 @@ semver = "1.0"
 tray-icon = "0.24"
 winreg = "0.52"
 tauri-winrt-notification = "0.7"
+raw-window-handle = "0.6"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Console",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
