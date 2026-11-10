@@ -41,8 +41,9 @@ pub(super) struct PreviewMeta {
     mtime: Option<std::time::SystemTime>,
     /// Letzte Prüfung (`None`: noch nie)
     checked: Option<Instant>,
-    /// Prüfung läuft im Hintergrund
-    inflight: bool,
+    /// Nummer der laufenden Prüfung im Hintergrund. Ein Ergebnis mit anderer
+    /// Nummer stammt von vor dem Zu- und wieder Aufklappen und wird verworfen.
+    inflight: Option<u64>,
 }
 
 /// Ergebnis einer Vorschau-Prüfung aus dem Hintergrund. `items` ist `None`,
@@ -129,8 +130,10 @@ pub(super) struct ClaudeViewState {
     pub(super) expanded: HashSet<String>,
     pub(super) previews: HashMap<String, Vec<PreviewItem>>,
     preview_meta: HashMap<String, PreviewMeta>,
-    preview_tx: Sender<PreviewUpdate>,
-    preview_rx: Receiver<PreviewUpdate>,
+    /// Laufende Nummer der Vorschau-Prüfungen
+    preview_seq: u64,
+    preview_tx: Sender<(u64, PreviewUpdate)>,
+    preview_rx: Receiver<(u64, PreviewUpdate)>,
     /// Noch zu zeigende Benachrichtigungen
     pub(super) outbox: Vec<NoticeText>,
     /// PID aus einem Klick auf eine Benachrichtigung
@@ -165,6 +168,7 @@ impl ClaudeViewState {
             expanded: HashSet::new(),
             previews: HashMap::new(),
             preview_meta: HashMap::new(),
+            preview_seq: 0,
             preview_tx,
             preview_rx,
             outbox: Vec::new(),
@@ -254,14 +258,19 @@ impl MyApp {
         if self.claude.live_inflight || !self.live_polling_active(now) {
             return false;
         }
-        let interval = if self.main_view == MainView::ClaudeSessions {
-            LIVE_POLL_VISIBLE
-        } else {
-            LIVE_POLL_HIDDEN
-        };
+        let interval = self.live_poll_interval();
         self.claude
             .last_live_poll
             .is_none_or(|last| now.duration_since(last) >= interval)
+    }
+
+    /// Abstand der Live-Abfragen: kürzer, solange die Ansicht offen ist.
+    fn live_poll_interval(&self) -> Duration {
+        if self.main_view == MainView::ClaudeSessions {
+            LIVE_POLL_VISIBLE
+        } else {
+            LIVE_POLL_HIDDEN
+        }
     }
 
     fn start_live_poll(&mut self) {
@@ -342,12 +351,7 @@ impl MyApp {
         if self.claude.scanning {
             ctx.request_repaint_after(Duration::from_millis(100));
         } else if self.live_polling_active(Instant::now()) {
-            let interval = if self.main_view == MainView::ClaudeSessions {
-                LIVE_POLL_VISIBLE
-            } else {
-                LIVE_POLL_HIDDEN
-            };
-            ctx.request_repaint_after(interval);
+            ctx.request_repaint_after(self.live_poll_interval());
         }
     }
 
@@ -380,12 +384,16 @@ impl MyApp {
         let expanded = &claude.expanded;
         claude.previews.retain(|id, _| expanded.contains(id));
         claude.preview_meta.retain(|id, _| expanded.contains(id));
-        while let Ok(u) = claude.preview_rx.try_recv() {
-            // Inzwischen zugeklappt: Ergebnis verwerfen
-            let Some(meta) = claude.preview_meta.get_mut(&u.id) else {
+        while let Ok((seq, u)) = claude.preview_rx.try_recv() {
+            // Inzwischen zugeklappt (oder zu- und wieder aufgeklappt): verwerfen
+            let Some(meta) = claude
+                .preview_meta
+                .get_mut(&u.id)
+                .filter(|m| m.inflight == Some(seq))
+            else {
                 continue;
             };
-            meta.inflight = false;
+            meta.inflight = None;
             meta.file = u.file;
             meta.mtime = u.mtime;
             if let Some(items) = u.items {
@@ -403,23 +411,25 @@ impl MyApp {
                     file: None,
                     mtime: None,
                     checked: None,
-                    inflight: false,
+                    inflight: None,
                 });
             let fresh = meta
                 .checked
                 .is_some_and(|t| now.duration_since(t) < PREVIEW_CHECK);
-            if meta.inflight || fresh {
+            if meta.inflight.is_some() || fresh {
                 continue;
             }
             meta.checked = Some(now);
-            meta.inflight = true;
+            claude.preview_seq += 1;
+            let seq = claude.preview_seq;
+            meta.inflight = Some(seq);
             let (projects, id, file, mtime) =
                 (projects.clone(), id.clone(), meta.file.clone(), meta.mtime);
             let have_items = claude.previews.contains_key(&id);
             let tx = claude.preview_tx.clone();
             let ctx = ctx.clone();
             std::thread::spawn(move || {
-                let _ = tx.send(check_preview(&projects, id, file, mtime, have_items));
+                let _ = tx.send((seq, check_preview(&projects, id, file, mtime, have_items)));
                 ctx.request_repaint();
             });
         }

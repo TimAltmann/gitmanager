@@ -104,8 +104,12 @@ pub fn show_claude_sessions(
 
     let (open_hits, rest) = visible_lists(open, entries, search);
     if open_hits.iter().any(|o| o.live.status.animated()) {
+        // Flüssig nur im Vordergrund; sonst reicht ein grober Takt, statt
+        // stundenlang 20 Bilder pro Sekunde für ein Fenster im Hintergrund
+        let focused = ui.ctx().input(|i| i.viewport().focused.unwrap_or(true));
+        let ms = if focused { 50 } else { 500 };
         ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(50));
+            .request_repaint_after(std::time::Duration::from_millis(ms));
     }
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])

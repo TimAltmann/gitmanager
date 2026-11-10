@@ -1,6 +1,6 @@
 use crate::gitlab::checkout::MrCheckoutPlan;
 use crate::gitlab::remote::RemoteInfo;
-use crate::process::{self, Keep, Limits, CREATE_NO_WINDOW};
+use crate::process::{self, Keep, Limits, SpawnLocked, CREATE_NO_WINDOW};
 use git2::{BranchType, Repository, StatusOptions};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -1060,7 +1060,7 @@ pub fn open_in_explorer(path: &Path) -> anyhow::Result<()> {
         {
             std::process::Command::new("explorer")
                 .arg(path)
-                .spawn()
+                .spawn_locked()
                 .map(|_| ())
                 .map_err(|e| anyhow::anyhow!("Explorer konnte nicht geöffnet werden: {e}"))
         }
@@ -1069,13 +1069,17 @@ pub fn open_in_explorer(path: &Path) -> anyhow::Result<()> {
             // Linux: xdg-open, WSL: explorer.exe, macOS: open – plus gio als Fallback
             std::process::Command::new("xdg-open")
                 .arg(path)
-                .spawn()
-                .or_else(|_| std::process::Command::new("explorer.exe").arg(path).spawn())
-                .or_else(|_| std::process::Command::new("open").arg(path).spawn())
+                .spawn_locked()
+                .or_else(|_| {
+                    std::process::Command::new("explorer.exe")
+                        .arg(path)
+                        .spawn_locked()
+                })
+                .or_else(|_| std::process::Command::new("open").arg(path).spawn_locked())
                 .or_else(|_| {
                     std::process::Command::new("gio")
                         .args(["open", &path.display().to_string()])
-                        .spawn()
+                        .spawn_locked()
                 })
                 .map(|_| ())
                 .map_err(|e| anyhow::anyhow!("Dateimanager konnte nicht geöffnet werden: {e}"))
@@ -1839,14 +1843,7 @@ pub fn add_worktree(
     let repo = Repository::open(base_path)
         .map_err(|e| CheckoutError::Git(format!("Repo öffnen fehlgeschlagen: {e}")))?;
     let full = format!("refs/heads/{local_branch}");
-    // Branch darf in keinem Worktree HEAD sein – auch nicht im Basis-Klon,
-    // den `branch_checked_out_elsewhere` als eigenen Worktree auslässt.
-    let elsewhere = if repo.head().is_ok_and(|h| h.name().is_ok_and(|n| n == full)) {
-        repo.workdir().map(|w| w.components().collect())
-    } else {
-        branch_checked_out_elsewhere(&repo, local_branch)
-    };
-    if let Some(path) = elsewhere {
+    if let Some(path) = branch_checked_out_anywhere(&repo, local_branch) {
         return Err(CheckoutError::CheckedOutElsewhere {
             branch: local_branch.to_string(),
             path,
@@ -1890,6 +1887,64 @@ pub fn add_worktree(
     })
 }
 
+/// Ordner, in dem `branch` ausgecheckt ist – auch der Basis-Klon selbst,
+/// den `branch_checked_out_elsewhere` als eigenen Worktree auslässt.
+fn branch_checked_out_anywhere(repo: &Repository, branch: &str) -> Option<PathBuf> {
+    let full = format!("refs/heads/{branch}");
+    if repo.head().is_ok_and(|h| h.name().is_ok_and(|n| n == full)) {
+        repo.workdir().map(|w| w.components().collect())
+    } else {
+        branch_checked_out_elsewhere(repo, branch)
+    }
+}
+
+/// Vorhandenen lokalen Branch `local` für die Wahl des Remote-Branches
+/// `remote_name` nutzen: liegt er zurück, auf den Remote-Stand vorspulen
+/// (nur wenn nirgends ausgecheckt); enthält er den Remote-Stand schon,
+/// bleibt er. Abgewichen → Fehler statt still den alten Stand auszuchecken.
+fn sync_local_with_remote(
+    repo: &Repository,
+    local: &str,
+    remote_name: &str,
+    remote: &git2::Branch,
+) -> Result<(), CheckoutError> {
+    let err = |e: git2::Error| CheckoutError::Git(format!("Branch {local}: {e}"));
+    let remote_oid = remote.get().peel_to_commit().map_err(err)?.id();
+    let mut local_ref = repo
+        .find_branch(local, BranchType::Local)
+        .map_err(err)?
+        .into_reference();
+    let local_oid = local_ref.peel_to_commit().map_err(err)?.id();
+    if local_oid == remote_oid
+        || repo
+            .graph_descendant_of(local_oid, remote_oid)
+            .map_err(err)?
+    {
+        return Ok(());
+    }
+    if !repo
+        .graph_descendant_of(remote_oid, local_oid)
+        .map_err(err)?
+    {
+        return Err(CheckoutError::Git(format!(
+            "Lokaler Branch {local} weicht von {remote_name} ab – lokalen Branch wählen oder zuerst abgleichen"
+        )));
+    }
+    if let Some(path) = branch_checked_out_anywhere(repo, local) {
+        return Err(CheckoutError::CheckedOutElsewhere {
+            branch: local.to_string(),
+            path,
+        });
+    }
+    local_ref
+        .set_target(
+            remote_oid,
+            &format!("worktree: fast-forward auf {remote_name}"),
+        )
+        .map_err(err)?;
+    Ok(())
+}
+
 /// Branch-Quelle für „Neuer Worktree“ aus der Repo-Liste.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeBranch {
@@ -1923,6 +1978,7 @@ pub fn create_worktree(
             let local = remote_local_name(&repo, name)
                 .ok_or_else(|| CheckoutError::Git(format!("Branch {name} nicht gefunden")))?;
             if has_local(&local) {
+                sync_local_with_remote(&repo, &local, name, &remote_branch)?;
                 (local, false)
             } else {
                 let commit = remote_branch
@@ -2679,7 +2735,7 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
         cmd.args(args);
         cmd.current_dir(repo_path);
         set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
-        cmd.spawn()
+        cmd.spawn_locked()
     };
 
     // Validierung: nur wenn Shell verwendet wird (use_shell) und nicht allow_unsafe, blockiere gefährliche Zeichen
@@ -2737,7 +2793,7 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
                 cmd.args(&shell_args);
                 cmd.current_dir(repo_path);
                 set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
-                cmd.spawn().map(|_| ()).map_err(|e2| {
+                cmd.spawn_locked().map(|_| ()).map_err(|e2| {
                     anyhow::anyhow!(
                         "IDE nicht gefunden (weder '{}' noch 'cmd /C'): {} / {}",
                         effective_program,
@@ -2769,7 +2825,7 @@ fn spawn_wt(repo_str: &str, cmd_string: &str, repo_path: &Path) -> anyhow::Resul
     cmd.args(["-d", repo_str, "--", "cmd", "/k", cmd_string]);
     cmd.current_dir(repo_path);
     set_creation_flags(&mut cmd, 0x00000010);
-    cmd.spawn()
+    cmd.spawn_locked()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("Windows Terminal starten fehlgeschlagen: {e}"))
 }
@@ -2795,7 +2851,7 @@ fn spawn_powershell(ps_script: &str, repo_path: &Path) -> anyhow::Result<()> {
     }
     cmd.current_dir(repo_path);
     set_creation_flags(&mut cmd, 0x00000010);
-    cmd.spawn()
+    cmd.spawn_locked()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("Powershell starten fehlgeschlagen: {e}"))
 }
@@ -2825,7 +2881,7 @@ fn spawn_powershell_shell(repo_path: &Path) -> anyhow::Result<()> {
     }
     cmd.current_dir(repo_path);
     set_creation_flags(&mut cmd, 0x00000010);
-    cmd.spawn()
+    cmd.spawn_locked()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("Powershell starten fehlgeschlagen: {e}"))
 }
@@ -2837,7 +2893,7 @@ fn spawn_wt_shell(repo_path: &Path) -> anyhow::Result<()> {
     cmd.args(["-d", &repo_str]);
     cmd.current_dir(repo_path);
     set_creation_flags(&mut cmd, 0x00000010);
-    cmd.spawn()
+    cmd.spawn_locked()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("Windows Terminal starten fehlgeschlagen: {e}"))
 }
@@ -2848,7 +2904,7 @@ fn spawn_cmd_shell(repo_str: &str, repo_path: &Path) -> anyhow::Result<()> {
     cmd.args(["/C", "start", "", "/D", repo_str, "cmd", "/K", ""]);
     cmd.current_dir(repo_path);
     set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
-    cmd.spawn()
+    cmd.spawn_locked()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("cmd starten fehlgeschlagen: {e}"))
 }
@@ -2859,7 +2915,7 @@ fn spawn_cmd(agent_string: &str, repo_str: &str, repo_path: &Path) -> anyhow::Re
     cmd.args(["/C", "start", "", "/D", repo_str, "cmd", "/K", agent_string]);
     cmd.current_dir(repo_path);
     set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
-    cmd.spawn()
+    cmd.spawn_locked()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("cmd starten fehlgeschlagen: {e}"))
 }
@@ -2916,7 +2972,7 @@ pub fn launch_agent(
                 }
                 cmd.current_dir(repo_path);
                 set_creation_flags(&mut cmd, 0x00000010);
-                cmd.spawn().map(|_| ()).map_err(|e| {
+                cmd.spawn_locked().map(|_| ()).map_err(|e| {
                     anyhow::anyhow!("Custom Terminal '{}' starten fehlgeschlagen: {e}", custom)
                 })
             }
@@ -2950,7 +3006,7 @@ pub fn open_shell(repo_path: &Path, terminal_pref: &TerminalPreference) -> anyho
                 let mut cmd = std::process::Command::new(custom);
                 cmd.current_dir(repo_path);
                 set_creation_flags(&mut cmd, 0x00000010);
-                cmd.spawn().map(|_| ()).map_err(|e| {
+                cmd.spawn_locked().map(|_| ()).map_err(|e| {
                     anyhow::anyhow!("Custom Terminal '{}' starten fehlgeschlagen: {e}", custom)
                 })
             }
@@ -5318,6 +5374,42 @@ mod tests {
             upstream.as_str().ok(),
             Some("refs/remotes/origin/feature/x")
         );
+    }
+
+    #[test]
+    fn create_worktree_from_remote_branch_fast_forwards_stale_local() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        push_from_second_clone(base.path(), "feature/x", "y.txt");
+        git_cmd(&c1, &["fetch", "origin"]);
+        let remote = ref_oid(&c1, "refs/remotes/origin/feature/x");
+        assert_ne!(ref_oid(&c1, "refs/heads/feature/x"), remote);
+        let target = base.path().join("c1-feature-x");
+        let branch = WorktreeBranch::Existing("origin/feature/x".to_string());
+        assert_eq!(create_worktree(&c1, &target, &branch).unwrap(), "feature/x");
+        assert_eq!(ref_oid(&c1, "refs/heads/feature/x"), remote);
+        assert!(target.join("y.txt").exists());
+    }
+
+    #[test]
+    fn create_worktree_from_remote_branch_rejects_diverged_local() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        push_from_second_clone(base.path(), "feature/x", "y.txt");
+        git_cmd(&c1, &["fetch", "origin"]);
+        git_cmd(&c1, &["checkout", "feature/x"]);
+        commit_file(&c1, "z.txt", "lokal\n", "local commit");
+        git_cmd(&c1, &["checkout", "main"]);
+        let local = ref_oid(&c1, "refs/heads/feature/x");
+        let target = base.path().join("c1-feature-x");
+        let branch = WorktreeBranch::Existing("origin/feature/x".to_string());
+        assert!(create_worktree(&c1, &target, &branch).is_err());
+        assert_eq!(
+            ref_oid(&c1, "refs/heads/feature/x"),
+            local,
+            "lokal unverändert"
+        );
+        assert!(!target.exists());
     }
 
     #[test]

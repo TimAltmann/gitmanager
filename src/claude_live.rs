@@ -423,6 +423,8 @@ mod win {
             if !GetConsoleWindow().is_null() {
                 return None;
             }
+            // Kein Prozessstart mit geerbten Handles, solange sie fremd sind
+            let _std_lock = crate::process::lock_std_handles();
             // AttachConsole ersetzt stdin/stdout/stderr; nach FreeConsole wären
             // sie ungültig und jeder spätere Prozessstart (IDE, Explorer,
             // Shell) scheiterte mit os error 6 → vorher sichern, danach zurück.

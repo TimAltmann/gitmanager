@@ -51,15 +51,20 @@ fn gitbash_drive(p: &str, gitbash: bool) -> Option<char> {
         .then(|| b[1] as char)
 }
 
-/// Vergleichsschlüssel für Pfade unabhängig von Schreibweise:
-/// `C:\Code\X\`, `/c/Code/x` (nur Windows) und `c:/code/x` → `c:/code/x`.
+/// Vergleichsschlüssel für Pfade: `C:\Code\X\`, `/c/Code/x` und
+/// `c:/code/x` → `c:/code/x`. Klein geschrieben und mit Git-Bash-Pfaden nur
+/// unter Windows; unter Linux unterscheiden sich `/a/App` und `/a/app`.
 pub fn path_key(p: &str) -> String {
     path_key_with(p, GITBASH_PATHS)
 }
 
-fn path_key_with(p: &str, gitbash: bool) -> String {
-    let mut s = p.replace('\\', "/").to_lowercase();
-    if let Some(drive) = gitbash_drive(&s, gitbash) {
+fn path_key_with(p: &str, windows: bool) -> String {
+    let mut s = p.replace('\\', "/");
+    // Wie `AppConfig::repo_state_key`: nur Windows ist case-insensitiv
+    if windows {
+        s = s.to_lowercase();
+    }
+    if let Some(drive) = gitbash_drive(&s, windows) {
         s = format!("{drive}:{}", &s[2..]);
     }
     while s.len() > 1 && s.ends_with('/') && !s.ends_with(":/") {
@@ -100,11 +105,18 @@ pub fn parse_session(path: &Path) -> Option<ClaudeSession> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_secs() as i64);
 
+    // Passt die Datei in Kopf + Ende, ganz lesen: sonst ginge die Zeile an
+    // der Grenze verloren (im Kopf angeschnitten, im Ende verworfen)
+    let head_bytes = if len <= HEAD_BYTES + TAIL_BYTES {
+        len
+    } else {
+        HEAD_BYTES
+    };
     let mut head = Vec::new();
-    (&mut file).take(HEAD_BYTES).read_to_end(&mut head).ok()?;
+    (&mut file).take(head_bytes).read_to_end(&mut head).ok()?;
     let mut tail = Vec::new();
-    if len > HEAD_BYTES {
-        let n = TAIL_BYTES.min(len - HEAD_BYTES);
+    if len > head_bytes {
+        let n = TAIL_BYTES.min(len - head_bytes);
         file.seek(SeekFrom::Start(len - n)).ok()?;
         file.take(n).read_to_end(&mut tail).ok()?;
     }
@@ -419,10 +431,16 @@ mod tests {
 
     #[test]
     fn path_key_normalizes_windows_and_gitbash() {
-        assert_eq!(path_key("C:\\Code\\Repo1\\"), "c:/code/repo1");
+        assert_eq!(path_key_with("C:\\Code\\Repo1\\", true), "c:/code/repo1");
         assert_eq!(path_key_with("/c/Code/repo1", true), "c:/code/repo1");
-        assert_eq!(path_key("c:/code/REPO1"), "c:/code/repo1");
+        assert_eq!(path_key_with("c:/code/REPO1", true), "c:/code/repo1");
         assert_eq!(path_key_with("/d/projects/app", false), "/d/projects/app");
+        // Linux: Groß-/Kleinschreibung bleibt, `/a/App` ≠ `/a/app`
+        assert_eq!(path_key_with("/code/App/", false), "/code/App");
+        assert_ne!(
+            path_key_with("/code/App", false),
+            path_key_with("/code/app", false)
+        );
     }
 
     #[test]
