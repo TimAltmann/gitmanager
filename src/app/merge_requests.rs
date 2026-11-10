@@ -2259,7 +2259,8 @@ pub(super) mod tests {
     /// `TOP_BAR_CAPTIONS_WIDTH` mit Beschriftungen, 1080 px und ab
     /// `TOP_BAR_COMPACT_WIDTH` (Standardfenster) mit Button-Texten und ab
     /// `CLAUDE_FULL_LABEL_WIDTH` mit „Claude Sessions“ als Text: in
-    /// Zeile 1 überlappt nichts, alles bleibt im Fenster.
+    /// Zeile 1 überlappt in keiner der drei Ansichten etwas, alles bleibt im
+    /// Fenster.
     #[test]
     fn top_bar_fits_at_min_width() {
         for width in [
@@ -2270,7 +2271,11 @@ pub(super) mod tests {
             CLAUDE_FULL_LABEL_WIDTH,
         ] {
             for lang in [Language::De, Language::En] {
-                for view in [MainView::Repos, MainView::MergeRequests] {
+                for view in [
+                    MainView::Repos,
+                    MainView::MergeRequests,
+                    MainView::ClaudeSessions,
+                ] {
                     let case = format!("{width} {lang:?} {view:?}");
                     let mut app = test_app();
                     app.config.language = lang;
@@ -2286,6 +2291,18 @@ pub(super) mod tests {
                     }));
                     app.repos = (0..120)
                         .map(|i| repo(&format!("r{i}"), "https://github.com/a/b.git"))
+                        .collect();
+                    // Claude-Ansicht: Badge „● n“ für wartende Sessions, zweistellig
+                    app.claude.live = (0..12)
+                        .map(|i| crate::claude_live::LiveSession {
+                            pid: i,
+                            session_id: format!("s{i}"),
+                            cwd: "C:\\Dev\\r1".into(),
+                            status: crate::claude_live::LiveStatus::Waiting,
+                            status_since_ms: 0,
+                            name: None,
+                            proc_start: None,
+                        })
                         .collect();
                     app.last_window_size = [width, 680.0];
                     let row = assert_top_bar_row_fits(&mut app, width, &case);

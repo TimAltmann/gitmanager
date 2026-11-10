@@ -11,13 +11,12 @@ use crate::ui::claude_anim::{
     brighten, format_elapsed, paint_check, paint_pulse_dot, paint_star, seed_of, shimmer_job,
     status_color, verb,
 };
+use crate::ui::search_field::search_field;
 use egui::{FontId, RichText, Ui, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
-const ICON_SEARCH: egui::ImageSource = egui::include_image!("../../assets/icons/search.svg");
-const ICON_CROSS: egui::ImageSource = egui::include_image!("../../assets/icons/cross.svg");
 const ICON_GIT_BRANCH: egui::ImageSource =
     egui::include_image!("../../assets/icons/git-branch.svg");
 const ICON_TERMINAL: egui::ImageSource = egui::include_image!("../../assets/icons/terminal.svg");
@@ -187,44 +186,8 @@ fn show_empty(ui: &mut Ui, scanning: bool, lang: Language) {
 
 fn show_toolbar(ui: &mut Ui, lang: Language, search: &mut String) {
     ui.horizontal(|ui| {
-        ui.add(
-            egui::Image::new(ICON_SEARCH)
-                .fit_to_exact_size(Vec2::splat(14.0))
-                .tint(ui.visuals().weak_text_color()),
-        );
-        let edit = ui.add(
-            egui::TextEdit::singleline(search)
-                .id(egui::Id::new("claude_sessions_search"))
-                .hint_text(tr(lang, "claude_search_hint"))
-                .desired_width(340.0),
-        );
-        let focus_shortcut = ui.ctx().input_mut(|i| {
-            i.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND,
-                egui::Key::F,
-            ))
-        });
-        if focus_shortcut {
-            edit.request_focus();
-        }
-        if edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            search.clear();
-        }
-        if !search.is_empty()
-            && ui
-                .add(
-                    egui::Button::image(
-                        egui::Image::new(ICON_CROSS)
-                            .fit_to_exact_size(Vec2::splat(12.0))
-                            .tint(ui.visuals().text_color()),
-                    )
-                    .small(),
-                )
-                .on_hover_text(tr(lang, "repo_search_clear"))
-                .clicked()
-        {
-            search.clear();
-        }
+        let hint = tr(lang, "claude_search_hint");
+        search_field(ui, "claude_sessions_search", &hint, search, lang);
     });
 }
 
@@ -242,12 +205,15 @@ pub(crate) fn open_card_id(o: &OpenSession) -> egui::Id {
 /// registriert (Rechteck des vorigen Frames), damit Buttons im Inhalt darüber
 /// liegen und Hover/Tooltip behalten. Liefert, ob der Kartenkörper geklickt
 /// wurde.
+/// `header` ist klickbar, `below` (die Vorschau) nicht: dort soll ein Klick
+/// zum Lesen oder Markieren keine Session starten.
 fn clickable_card(
     ui: &mut Ui,
     id: egui::Id,
     stroke: egui::Stroke,
     tooltip: &str,
-    add_contents: impl FnOnce(&mut Ui),
+    header: impl FnOnce(&mut Ui),
+    below: impl FnOnce(&mut Ui),
 ) -> bool {
     let rect_key = id.with("rect");
     let response = ui
@@ -264,11 +230,20 @@ fn clickable_card(
         // Alle Karten gleich breit: so breit wie das Fenster erlaubt
         ui.set_min_width(ui.available_width());
         // Markierbare Labels würden den Klick auf die Karte abfangen
+        let selectable = ui.style().interaction.selectable_labels;
         ui.style_mut().interaction.selectable_labels = false;
-        add_contents(ui);
+        let header_bottom = ui.scope(header).response.rect.max.y;
+        ui.style_mut().interaction.selectable_labels = selectable;
+        let before = ui.min_rect().max.y;
+        below(ui);
+        (ui.min_rect().max.y > before).then_some(header_bottom)
     });
-    ui.ctx()
-        .data_mut(|d| d.insert_temp(rect_key, card.response.rect));
+    // Mit Vorschau endet die Klickfläche unter dem Kopf der Karte
+    let mut click_rect = card.response.rect;
+    if let Some(bottom) = card.inner {
+        click_rect.max.y = click_rect.max.y.min(bottom + 4.0);
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(rect_key, click_rect));
 
     let Some(response) = response else {
         // Erster Frame: Rechteck erst jetzt bekannt, nächster Frame übernimmt
@@ -411,40 +386,47 @@ fn show_session_card(
     let stroke = egui::Stroke::new(1.0_f32, ui.visuals().widgets.inactive.fg_stroke.color);
     let tooltip = format!("{}\n{}", session.cwd, session.id);
     let mut button_clicked = false;
-    let card_clicked = clickable_card(ui, card_id(entry), stroke, &tooltip, |ui| {
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let btn = egui::Button::image_and_text(
-                    egui::Image::new(ICON_CLAUDE).fit_to_exact_size(Vec2::splat(14.0)),
-                    tr(lang, "claude_resume"),
-                );
-                button_clicked = ui
-                    .add(btn)
-                    .on_hover_text(tr_fmt(lang, "claude_resume_tt", &[&session.cwd]))
-                    .clicked();
-                preview_toggle(ui, &session.id, preview, lang, actions);
-                ui.add_space(8.0);
-                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.add(
-                        egui::Label::new(RichText::new(&session.title).size(13.0).strong())
-                            .truncate(),
+    let card_clicked = clickable_card(
+        ui,
+        card_id(entry),
+        stroke,
+        &tooltip,
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let btn = egui::Button::image_and_text(
+                        egui::Image::new(ICON_CLAUDE).fit_to_exact_size(Vec2::splat(14.0)),
+                        tr(lang, "claude_resume"),
                     );
-                    if let Some(prompt) = &session.last_prompt {
+                    button_clicked = ui
+                        .add(btn)
+                        .on_hover_text(tr_fmt(lang, "claude_resume_tt", &[&session.cwd]))
+                        .clicked();
+                    preview_toggle(ui, &session.id, preview, lang, actions);
+                    ui.add_space(8.0);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         ui.add(
-                            egui::Label::new(RichText::new(prompt).size(11.5).weak()).truncate(),
+                            egui::Label::new(RichText::new(&session.title).size(13.0).strong())
+                                .truncate(),
                         );
-                    }
-                    footer(
-                        ui,
-                        &entry.repo_name,
-                        session.git_branch.as_deref(),
-                        Some(relative_time(session.last_activity, now_secs, lang)),
-                    );
+                        if let Some(prompt) = &session.last_prompt {
+                            ui.add(
+                                egui::Label::new(RichText::new(prompt).size(11.5).weak())
+                                    .truncate(),
+                            );
+                        }
+                        footer(
+                            ui,
+                            &entry.repo_name,
+                            session.git_branch.as_deref(),
+                            Some(relative_time(session.last_activity, now_secs, lang)),
+                        );
+                    });
                 });
             });
-        });
-        show_preview(ui, preview, lang);
-    });
+        },
+        |ui| show_preview(ui, preview, lang),
+    );
     if button_clicked || card_clicked {
         actions.resume = Some((session.cwd.clone(), session.id.clone()));
     }
@@ -556,28 +538,36 @@ fn show_open_card(
     let lang = config.language;
     let stroke = egui::Stroke::new(1.5_f32, status_color(o.live.status));
     let tooltip = format!("{}\n{}", tr(lang, "claude_focus_tt"), o.live.cwd);
-    let clicked = clickable_card(ui, open_card_id(o), stroke, &tooltip, |ui| {
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                open_buttons(ui, o, config, actions);
-                preview_toggle(ui, &o.live.session_id, preview, lang, actions);
-                ui.add_space(8.0);
-                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    status_line(ui, o, lang, now_ms);
-                    ui.add(
-                        egui::Label::new(RichText::new(&o.title).size(13.0).strong()).truncate(),
-                    );
-                    if let Some(prompt) = &o.last_prompt {
+    let clicked = clickable_card(
+        ui,
+        open_card_id(o),
+        stroke,
+        &tooltip,
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    open_buttons(ui, o, config, actions);
+                    preview_toggle(ui, &o.live.session_id, preview, lang, actions);
+                    ui.add_space(8.0);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        status_line(ui, o, lang, now_ms);
                         ui.add(
-                            egui::Label::new(RichText::new(prompt).size(11.5).weak()).truncate(),
+                            egui::Label::new(RichText::new(&o.title).size(13.0).strong())
+                                .truncate(),
                         );
-                    }
-                    footer(ui, &o.place, o.branch.as_deref(), None);
+                        if let Some(prompt) = &o.last_prompt {
+                            ui.add(
+                                egui::Label::new(RichText::new(prompt).size(11.5).weak())
+                                    .truncate(),
+                            );
+                        }
+                        footer(ui, &o.place, o.branch.as_deref(), None);
+                    });
                 });
             });
-        });
-        show_preview(ui, preview, lang);
-    });
+        },
+        |ui| show_preview(ui, preview, lang),
+    );
     if clicked {
         actions.focus = Some(o.live.pid);
     }
@@ -870,30 +860,40 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let mut a = ClaudeSessionActions::default();
+        // (gefunden, Höhe der gezeichneten Karte, Höhe der Klickfläche)
         let mut height = |preview: Preview| {
+            let mut card = 0.0;
             let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                show_open_card(ui, &o, &config, 0, preview, &mut a);
+                card = ui
+                    .scope(|ui| show_open_card(ui, &o, &config, 0, preview, &mut a))
+                    .response
+                    .rect
+                    .height();
             });
             let found = (
                 find_label(&output, "Fix den Login").is_some(),
                 find_label(&output, "→ Edit src/login.rs").is_some(),
             );
             output.drop_without_applying_deltas();
-            // Gezeichnete Karte (die Klickfläche hängt einen Frame hinterher)
-            let h = ctx
+            let click = ctx
                 .data(|d| d.get_temp::<egui::Rect>(open_card_id(&o).with("rect")))
                 .map_or(0.0, |r| r.height());
-            (found, h)
+            (found, card, click)
         };
         height(Preview::Collapsed);
-        let (found, collapsed) = height(Preview::Collapsed);
+        let (found, collapsed, click_collapsed) = height(Preview::Collapsed);
         assert_eq!(found, (false, false));
         height(Preview::Expanded(Some(&items)));
-        let (found, expanded) = height(Preview::Expanded(Some(&items)));
+        let (found, expanded, click_expanded) = height(Preview::Expanded(Some(&items)));
         assert_eq!(found, (true, true));
         assert!(expanded > collapsed + 20.0, "{collapsed} → {expanded}");
+        assert!(
+            click_expanded <= click_collapsed + 4.0,
+            "Klick in die Vorschau zählt nicht als Kartenklick: \
+             {click_collapsed} → {click_expanded}"
+        );
         height(Preview::Expanded(None));
-        let (_, loading) = height(Preview::Expanded(None));
+        let (_, loading, _) = height(Preview::Expanded(None));
         assert!(loading > collapsed, "Spinner braucht Platz");
     }
 

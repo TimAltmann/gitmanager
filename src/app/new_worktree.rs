@@ -110,12 +110,9 @@ struct WorktreeDone {
 
 /// `origin/feature/x` → `feature/x`, wenn ein Remote so heißt (längster
 /// Remote-Name gewinnt); lokale Branches bleiben unverändert.
+/// Gleiche Regel wie beim Anlegen ([`crate::git::strip_remote_prefix`]).
 pub(super) fn local_branch_name(branch: &str, remotes: &[RemoteInfo]) -> String {
-    remotes
-        .iter()
-        .filter_map(|r| branch.strip_prefix(r.name.as_str())?.strip_prefix('/'))
-        .filter(|rest| !rest.is_empty())
-        .min_by_key(|rest| rest.len())
+    crate::git::strip_remote_prefix(branch, remotes.iter().map(|r| r.name.as_str()))
         .unwrap_or(branch)
         .to_string()
 }

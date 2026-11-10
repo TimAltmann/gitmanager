@@ -1,6 +1,8 @@
+use crate::claude_sessions::matches_words;
 use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt};
+use crate::ui::search_field::search_field;
 use egui::{Color32, RichText, Ui, Vec2};
 
 // Icons via egui include_image! (Simple Icons CC0 + Phosphor for folder)
@@ -27,7 +29,6 @@ const ICON_SEARCH: egui::ImageSource = egui::include_image!("../../assets/icons/
 const ICON_REFRESH: egui::ImageSource = egui::include_image!("../../assets/icons/refresh.svg");
 const ICON_WARNING: egui::ImageSource = egui::include_image!("../../assets/icons/warning.svg");
 const ICON_PLUS: egui::ImageSource = egui::include_image!("../../assets/icons/plus.svg");
-const ICON_CROSS: egui::ImageSource = egui::include_image!("../../assets/icons/cross.svg");
 
 /// Tooltip-Text für den Branch-Button: Basis + optional `branch_behind`-Hinweis.
 pub fn branch_button_tooltip(
@@ -195,17 +196,9 @@ pub struct RepoListActions {
 /// Name, Branch, Pfad oder – bei Worktrees – im Namen des Haupt-Repos
 /// vorkommen, ohne Groß-/Kleinschreibung. Leere Suche passt immer.
 pub fn repo_matches_search(repo: &RepoInfo, query: &str) -> bool {
-    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    if words.is_empty() {
-        return true;
-    }
-    let mut haystack =
-        format!("{}\n{}\n{}", repo.name, repo.branch, repo.path.display()).to_lowercase();
-    if let Some(main) = main_repo_name(repo) {
-        haystack.push('\n');
-        haystack.push_str(&main.to_lowercase());
-    }
-    words.iter().all(|w| haystack.contains(w.as_str()))
+    let path = repo.path.to_string_lossy();
+    let main = main_repo_name(repo).unwrap_or_default();
+    matches_words(&[&repo.name, &repo.branch, &path, &main], query)
 }
 
 /// Ordnername des Haupt-Repos eines verknüpften Worktrees (aus
@@ -319,9 +312,16 @@ pub fn show_repo_list(
                     continue;
                 }
                 let title = format!("{} ({})", tr(config.language, title_key), indices.len());
+                // „In Repo-Liste zeigen“: eingeklappten Bereich der Zielkarte
+                // aufklappen, sonst wird sie nicht gezeichnet und nicht
+                // angesprungen
+                let reveal = highlight
+                    .filter(|h| h.scroll)
+                    .is_some_and(|h| indices.iter().any(|&i| repos[i].path == h.path));
                 egui::CollapsingHeader::new(RichText::new(title).size(13.0).strong())
                     .id_salt(("repo_section", salt))
                     .default_open(true)
+                    .open(reveal.then_some(true))
                     .show_unindented(ui, |ui| {
                         ui.add_space(4.0);
                         for &i in indices.iter() {
@@ -346,44 +346,8 @@ fn show_list_toolbar(
 ) {
     let lang = config.language;
     ui.horizontal(|ui| {
-        ui.add(
-            egui::Image::new(ICON_SEARCH)
-                .fit_to_exact_size(Vec2::splat(14.0))
-                .tint(ui.visuals().weak_text_color()),
-        );
-        let edit = ui.add(
-            egui::TextEdit::singleline(search)
-                .id(egui::Id::new("repo_list_search"))
-                .hint_text(tr(lang, "repo_search_hint"))
-                .desired_width(340.0),
-        );
-        let focus_shortcut = ui.ctx().input_mut(|i| {
-            i.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND,
-                egui::Key::F,
-            ))
-        });
-        if focus_shortcut {
-            edit.request_focus();
-        }
-        if edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            search.clear();
-        }
-        if !search.is_empty()
-            && ui
-                .add(
-                    egui::Button::image(
-                        egui::Image::new(ICON_CROSS)
-                            .fit_to_exact_size(Vec2::splat(12.0))
-                            .tint(ui.visuals().text_color()),
-                    )
-                    .small(),
-                )
-                .on_hover_text(tr(lang, "repo_search_clear"))
-                .clicked()
-        {
-            search.clear();
-        }
+        let hint = tr(lang, "repo_search_hint");
+        search_field(ui, "repo_list_search", &hint, search, lang);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let btn = egui::Button::image_and_text(
                 egui::Image::new(ICON_PLUS)

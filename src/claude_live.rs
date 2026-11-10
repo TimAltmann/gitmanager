@@ -682,6 +682,7 @@ mod tests {
         assert_eq!(open[1].repo_path, None);
     }
 
+    #[cfg(windows)]
     #[test]
     fn parse_live_converts_gitbash_cwd() {
         let text = json!({"pid":1,"sessionId":"a","cwd":"/c/Code/leer"}).to_string();

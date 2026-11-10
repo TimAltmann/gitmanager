@@ -1978,17 +1978,22 @@ pub fn create_worktree(
 }
 
 /// `origin/feature/x` → `feature/x`: längster passender Remote-Name als
-/// Präfix (Remotes dürfen `/` enthalten).
-fn remote_local_name(repo: &Repository, remote_branch: &str) -> Option<String> {
-    let remotes = repo.remotes().ok()?;
+/// Präfix (Remotes dürfen `/` enthalten). `None`, wenn kein Remote passt
+/// oder nach dem Präfix nichts übrig bleibt (`origin/`).
+pub fn strip_remote_prefix<'a, 'r>(
+    remote_branch: &'a str,
+    remotes: impl IntoIterator<Item = &'r str>,
+) -> Option<&'a str> {
     remotes
-        .iter()
-        .flatten()
-        .flatten()
+        .into_iter()
         .filter_map(|r| remote_branch.strip_prefix(r)?.strip_prefix('/'))
         .filter(|rest| !rest.is_empty())
         .min_by_key(|rest| rest.len())
-        .map(str::to_string)
+}
+
+fn remote_local_name(repo: &Repository, remote_branch: &str) -> Option<String> {
+    let remotes = repo.remotes().ok()?;
+    strip_remote_prefix(remote_branch, remotes.iter().flatten().flatten()).map(str::to_string)
 }
 
 /// Verwaiste Worktree-Einträge, die auf genau `target` zeigen (Ordner im

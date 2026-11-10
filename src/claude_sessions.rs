@@ -36,14 +36,31 @@ pub struct ClaudeSession {
     pub last_activity: i64,
 }
 
+/// Git-Bash-Laufwerkspfade (`/c/...`) gibt es nur unter Windows; unter
+/// Linux ist `/d/projects` ein ganz normaler Pfad.
+const GITBASH_PATHS: bool = cfg!(windows);
+
+/// Laufwerksbuchstabe eines Git-Bash-Pfads (`/c` oder `/c/...`).
+fn gitbash_drive(p: &str, gitbash: bool) -> Option<char> {
+    let b = p.as_bytes();
+    (gitbash
+        && b.len() >= 2
+        && b[0] == b'/'
+        && b[1].is_ascii_alphabetic()
+        && (b.len() == 2 || b[2] == b'/'))
+        .then(|| b[1] as char)
+}
+
 /// Vergleichsschlüssel für Pfade unabhängig von Schreibweise:
-/// `C:\Code\X\`, `/c/Code/x` und `c:/code/x` → `c:/code/x`.
+/// `C:\Code\X\`, `/c/Code/x` (nur Windows) und `c:/code/x` → `c:/code/x`.
 pub fn path_key(p: &str) -> String {
+    path_key_with(p, GITBASH_PATHS)
+}
+
+fn path_key_with(p: &str, gitbash: bool) -> String {
     let mut s = p.replace('\\', "/").to_lowercase();
-    let b = s.as_bytes();
-    if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/')
-    {
-        s = format!("{}:{}", b[1] as char, &s[2..]);
+    if let Some(drive) = gitbash_drive(&s, gitbash) {
+        s = format!("{drive}:{}", &s[2..]);
     }
     while s.len() > 1 && s.ends_with('/') && !s.ends_with(":/") {
         s.pop();
@@ -51,15 +68,23 @@ pub fn path_key(p: &str) -> String {
     s
 }
 
-/// Git-Bash-Pfad (`/c/Code/x`) als Windows-Pfad (`C:\Code\x`), sonst
-/// unverändert.
+/// Git-Bash-Pfad (`/c/Code/x`) unter Windows als Windows-Pfad
+/// (`C:\Code\x`), sonst unverändert.
 pub fn display_cwd(raw: &str) -> String {
-    let b = raw.as_bytes();
-    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b'/' {
-        let drive = (b[1] as char).to_ascii_uppercase();
-        return format!("{drive}:{}", raw[2..].replace('/', "\\"));
+    display_cwd_with(raw, GITBASH_PATHS)
+}
+
+fn display_cwd_with(raw: &str, gitbash: bool) -> String {
+    match gitbash_drive(raw, gitbash) {
+        Some(drive) if raw.len() > 2 => {
+            format!(
+                "{}:{}",
+                drive.to_ascii_uppercase(),
+                raw[2..].replace('/', "\\")
+            )
+        }
+        _ => raw.to_string(),
     }
-    raw.to_string()
 }
 
 /// Liest Kopf und Ende einer Session-Datei. `None` ohne `cwd`, ohne
@@ -395,15 +420,21 @@ mod tests {
     #[test]
     fn path_key_normalizes_windows_and_gitbash() {
         assert_eq!(path_key("C:\\Code\\Repo1\\"), "c:/code/repo1");
-        assert_eq!(path_key("/c/Code/repo1"), "c:/code/repo1");
+        assert_eq!(path_key_with("/c/Code/repo1", true), "c:/code/repo1");
         assert_eq!(path_key("c:/code/REPO1"), "c:/code/repo1");
+        assert_eq!(path_key_with("/d/projects/app", false), "/d/projects/app");
     }
 
     #[test]
     fn display_cwd_converts_gitbash() {
-        assert_eq!(display_cwd("/c/Code/repo1"), "C:\\Code\\repo1");
+        assert_eq!(display_cwd_with("/c/Code/repo1", true), "C:\\Code\\repo1");
         assert_eq!(display_cwd("C:\\Code\\x"), "C:\\Code\\x");
         assert_eq!(display_cwd("/home/u/x"), "/home/u/x");
+        assert_eq!(
+            display_cwd_with("/d/projects/app", false),
+            "/d/projects/app"
+        );
+        assert_eq!(display_cwd("/x"), "/x");
     }
 
     #[test]
@@ -573,6 +604,7 @@ mod tests {
         assert!(entries[0].is_worktree);
     }
 
+    #[cfg(windows)]
     #[test]
     fn assign_matches_gitbash_and_case() {
         let entries = assign_to_repos(
