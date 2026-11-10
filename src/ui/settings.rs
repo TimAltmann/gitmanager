@@ -9,8 +9,9 @@ use std::path::PathBuf;
 mod merge_requests;
 
 pub use merge_requests::{
-    error_reason, forget_token_fields, project_paths_for_host, rediscover_candidates, set_alias,
-    verify_error, GlabCheck, MrSettingsInput, MrSettingsOutput, TokenEvent,
+    error_reason, forget_token_fields, project_paths_for_host, rediscover_candidates,
+    review_root_hit, set_alias, verify_error, GlabCheck, MrSettingsInput, MrSettingsOutput,
+    TokenEvent,
 };
 
 const ICON_CHEVRON_DOWN: egui::ImageSource =
@@ -839,6 +840,97 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
                 state.draft.auto_fetch_interval_min = mins.min(120);
             }
         });
+    }
+    // Standard-Ordner für „Neuer Worktree“ (leer = neben dem Repo)
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    show_worktree_root_setting(ui, &mut state.draft);
+    // Standard-Ordner für „Neue Claude Session“
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    show_claude_dir_setting(ui, &mut state.draft);
+    ui.add_space(10.0);
+    let lang = state.draft.language;
+    ui.checkbox(
+        &mut state.draft.claude_notify,
+        RichText::new(tr(lang, "claude_notify_label"))
+            .size(13.0)
+            .strong(),
+    );
+    ui.label(
+        RichText::new(tr(lang, "claude_notify_hint"))
+            .size(11.0)
+            .color(Color32::from_rgb(100, 100, 100)),
+    );
+}
+
+fn show_worktree_root_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
+    let lang = draft.language;
+    let keys = ["wt_root_label", "wt_root_hint", "wt_root_placeholder"];
+    show_dir_setting(ui, lang, keys, &mut draft.worktree_root);
+}
+
+/// Standard-Ordner für „Neue Claude Session“ (leer = zuletzt benutztes Repo)
+fn show_claude_dir_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
+    let lang = draft.language;
+    let keys = [
+        "claude_dir_label",
+        "claude_dir_hint",
+        "claude_dir_placeholder",
+    ];
+    show_dir_setting(ui, lang, keys, &mut draft.claude_default_dir);
+}
+
+/// Ordner-Einstellung: Textfeld, „Durchsuchen …“, „Zurücksetzen“, Hinweis bei
+/// relativem Pfad. `keys` = Überschrift, Erklärung, Platzhalter.
+fn show_dir_setting(
+    ui: &mut egui::Ui,
+    lang: Language,
+    [label, hint, placeholder]: [&str; 3],
+    value: &mut Option<String>,
+) {
+    let absolute = |v: &Option<String>| crate::config::absolute_dir(v.as_deref());
+    ui.label(RichText::new(tr(lang, label)).size(13.0).strong());
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(tr(lang, hint))
+            .size(11.0)
+            .color(Color32::from_rgb(100, 100, 100)),
+    );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let mut text = value.clone().unwrap_or_default();
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut text)
+                    .hint_text(tr(lang, placeholder))
+                    .desired_width(320.0),
+            )
+            .changed()
+        {
+            *value = Some(text).filter(|r| !r.trim().is_empty());
+        }
+        if ui.button(format!("{} …", tr(lang, "browse"))).clicked() {
+            let mut dialog = rfd::FileDialog::new();
+            if let Some(dir) = absolute(value).filter(|d| d.is_dir()) {
+                dialog = dialog.set_directory(dir);
+            }
+            if let Some(path) = dialog.pick_folder() {
+                *value = Some(path.display().to_string());
+            }
+        }
+        if value.is_some() && ui.button(tr(lang, "wt_root_reset")).clicked() {
+            *value = None;
+        }
+    });
+    if value.is_some() && absolute(value).is_none() {
+        ui.label(
+            RichText::new(tr(lang, "wt_root_relative"))
+                .size(11.0)
+                .color(Color32::from_rgb(200, 120, 40)),
+        );
     }
 }
 

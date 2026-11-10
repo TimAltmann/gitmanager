@@ -38,13 +38,13 @@ use std::time::{Duration, Instant};
 
 /// Unter dieser Fensterbreite zeigen „Aktualisieren“ und „Einstellungen“ nur
 /// ihr Icon (mit Tooltip), damit die Top-Leiste mit Umschalter passt.
-pub(super) const TOP_BAR_COMPACT_WIDTH: f32 = 1100.0;
+pub(super) const TOP_BAR_COMPACT_WIDTH: f32 = 1260.0;
 
 /// Unter dieser Fensterbreite entfallen zusätzlich die Beschriftungen
 /// „Profil:“, „AI:“ und „Sprache“ (dann Tooltip der Combos), damit die
 /// Top-Leiste beim Mindestfenster (920 px) passt; das Standardfenster
-/// (`DEFAULT_WINDOW_SIZE`, 1100 px) behält sie samt Button-Texten.
-pub(super) const TOP_BAR_CAPTIONS_WIDTH: f32 = 1000.0;
+/// (`DEFAULT_WINDOW_SIZE`, 1260 px) behält sie samt Button-Texten.
+pub(super) const TOP_BAR_CAPTIONS_WIDTH: f32 = 1120.0;
 
 /// Ergebnis der MR-Hintergrundarbeit (Kanal `mr_tx`/`mr_rx`).
 pub(super) enum MrResult {
@@ -642,9 +642,12 @@ impl MyApp {
         if view == MainView::MergeRequests && self.mr_snapshot.is_none() && !self.mr_loading {
             self.start_mr_refresh();
         }
+        if view == MainView::ClaudeSessions {
+            self.ensure_claude_scan();
+        }
     }
 
-    /// Umschalter „Repositories N | Merge Requests [Badge]“ in der Top-Leiste.
+    /// Umschalter „Repositories N | Merge Requests [Badge] | Claude Sessions N“ in der Top-Leiste.
     pub(super) fn view_switcher(&mut self, ui: &mut Ui) {
         let lang = self.config.language;
         let p = mr_palette(&self.config.theme, ui.visuals());
@@ -708,6 +711,38 @@ impl MyApp {
                 };
                 if out.response.on_hover_text(tooltip).clicked() {
                     clicked = Some(MainView::MergeRequests);
+                }
+
+                let claude_on = self.main_view == MainView::ClaudeSessions;
+                let mut atoms = Atoms::new(RichText::new(tr(lang, "view_claude")).size(12.0));
+                // Warten Sessions auf dich: „● n“ in Blau statt der Gesamtzahl
+                let waiting = self.claude.waiting_count();
+                if waiting > 0 {
+                    atoms.push_right(
+                        RichText::new(format!("● {waiting}"))
+                            .size(11.0)
+                            .color(crate::ui::claude_anim::COLOR_WAITING),
+                    );
+                } else if self.claude.scanned_once {
+                    let mut count =
+                        RichText::new(self.claude.session_count().to_string()).size(11.0);
+                    if !claude_on {
+                        count = count.color(p.text2);
+                    }
+                    atoms.push_right(count);
+                }
+                let response = ui.add(segment(claude_on, atoms));
+                let name = tr(lang, "view_claude");
+                response.widget_info(|| {
+                    WidgetInfo::selected(WidgetType::Button, true, claude_on, &name)
+                });
+                let tooltip = if waiting > 0 {
+                    tr_fmt(lang, "claude_waiting_tt", &[&waiting.to_string()])
+                } else {
+                    tr(lang, "view_claude_tt")
+                };
+                if response.on_hover_text(tooltip).clicked() {
+                    clicked = Some(MainView::ClaudeSessions);
                 }
             });
         if let Some(view) = clicked {
@@ -2209,14 +2244,19 @@ pub(super) mod tests {
     }
 
     /// Mindestfenster (920 px, nur Icons, ohne Beschriftungen), ab
-    /// `TOP_BAR_CAPTIONS_WIDTH` mit Beschriftungen, 1080 px und ab
-    /// `TOP_BAR_COMPACT_WIDTH` (Standardfenster) mit Button-Texten: in
-    /// Zeile 1 überlappt nichts, alles bleibt im Fenster.
+    /// `TOP_BAR_CAPTIONS_WIDTH` mit Beschriftungen, 1080/1200 px und ab
+    /// `TOP_BAR_COMPACT_WIDTH` (Standardfenster) mit Button-Texten, immer
+    /// mit „Claude Sessions“ als Text: in Zeile 1 überlappt in keiner der drei Ansichten etwas, alles bleibt im
+    /// Fenster.
     #[test]
     fn top_bar_fits_at_min_width() {
         for width in [920.0, TOP_BAR_CAPTIONS_WIDTH, 1080.0, TOP_BAR_COMPACT_WIDTH] {
             for lang in [Language::De, Language::En] {
-                for view in [MainView::Repos, MainView::MergeRequests] {
+                for view in [
+                    MainView::Repos,
+                    MainView::MergeRequests,
+                    MainView::ClaudeSessions,
+                ] {
                     let case = format!("{width} {lang:?} {view:?}");
                     let mut app = test_app();
                     app.config.language = lang;
@@ -2232,6 +2272,18 @@ pub(super) mod tests {
                     }));
                     app.repos = (0..120)
                         .map(|i| repo(&format!("r{i}"), "https://github.com/a/b.git"))
+                        .collect();
+                    // Claude-Ansicht: Badge „● n“ für wartende Sessions, zweistellig
+                    app.claude.live = (0..12)
+                        .map(|i| crate::claude_live::LiveSession {
+                            pid: i,
+                            session_id: format!("s{i}"),
+                            cwd: "C:\\Dev\\r1".into(),
+                            status: crate::claude_live::LiveStatus::Waiting,
+                            status_since_ms: 0,
+                            name: None,
+                            proc_start: None,
+                        })
                         .collect();
                     app.last_window_size = [width, 680.0];
                     let row = assert_top_bar_row_fits(&mut app, width, &case);

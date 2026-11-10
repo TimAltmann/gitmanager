@@ -655,7 +655,7 @@ fn failure_text(lang: Language, iid: u64, failure: &MrCheckoutFailure) -> String
 
 /// `CheckoutError` lokalisiert (Display bleibt Deutsch wie in `git.rs`);
 /// sonstige git-Fehler unverändert.
-fn checkout_error_text(lang: Language, error: &CheckoutError) -> String {
+pub(super) fn checkout_error_text(lang: Language, error: &CheckoutError) -> String {
     match error {
         CheckoutError::CheckedOutElsewhere { branch, path } => tr_fmt(
             lang,

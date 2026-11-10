@@ -8,8 +8,33 @@
 use std::fmt;
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus};
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+/// Schützt die Std-Handles des Prozesses: `claude_live` hängt sich zum
+/// Fokussieren kurz an eine fremde Konsole (`AttachConsole` ersetzt
+/// stdin/stdout/stderr prozessweit). Ein Kindprozess, der die Handles erbt,
+/// darf in diesem Moment nicht starten, sonst erbt er die fremde Konsole
+/// oder ungültige Handles (os error 6).
+static STD_HANDLES: Mutex<()> = Mutex::new(());
+
+/// Sperre für Code, der die Std-Handles austauscht (siehe [`STD_HANDLES`]).
+pub fn lock_std_handles() -> MutexGuard<'static, ()> {
+    STD_HANDLES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `spawn` unter [`lock_std_handles`] – für Starts mit geerbten
+/// Std-Handles (Terminal, IDE, Explorer).
+pub trait SpawnLocked {
+    fn spawn_locked(&mut self) -> std::io::Result<Child>;
+}
+
+impl SpawnLocked for Command {
+    fn spawn_locked(&mut self) -> std::io::Result<Child> {
+        let _guard = lock_std_handles();
+        self.spawn()
+    }
+}
 
 /// Windows: Konsolenprogramm ohne eigenes Konsolenfenster starten.
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;

@@ -1,5 +1,9 @@
+pub mod claude_anim;
+pub mod claude_sessions;
 pub mod merge_requests;
+pub mod new_claude_session;
 pub mod repo_list;
+pub mod search_field;
 pub mod settings;
 pub mod theme;
 // Nur auf Windows via tray_service live verdrahtet; auf Linux nur für Tests

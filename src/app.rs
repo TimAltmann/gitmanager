@@ -1,6 +1,8 @@
+mod claude_sessions;
 mod merge_requests;
 mod mr_checkout;
 mod mr_settings;
+mod new_worktree;
 
 use crate::config::{AfterAction, AppConfig, RepoSortMode};
 use crate::git::{launch_agent, launch_ide, MrPrep, RepoInfo};
@@ -25,8 +27,11 @@ use std::sync::Arc;
 /// Fenstergröße beim Start (ohne gespeicherte Größe: eframe ohne
 /// `persistence`). Mindestens `TOP_BAR_COMPACT_WIDTH` breit, damit
 /// „Aktualisieren“ und „Einstellungen“ beim Start ihren Text zeigen.
-pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1100.0, 680.0];
+pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1260.0, 700.0];
 const _: () = assert!(DEFAULT_WINDOW_SIZE[0] >= TOP_BAR_COMPACT_WIDTH);
+
+/// Kleinste Fenstergröße (Punkte, also unabhängig von der Skalierung).
+pub const MIN_WINDOW_SIZE: [f32; 2] = [920.0, 560.0];
 
 const ICON_GEAR: egui::ImageSource = egui::include_image!("../assets/icons/gear.svg");
 const ICON_REFRESH: egui::ImageSource = egui::include_image!("../assets/icons/refresh.svg");
@@ -155,6 +160,7 @@ fn repo_busy_text(lang: Language, busy: &GitBusy) -> Option<String> {
         GitBusy::Idle => None,
         GitBusy::Scan | GitBusy::Fetch { .. } => Some(tr(lang, "scanning_repos")),
         GitBusy::Checkout { iid } => Some(tr_fmt(lang, "mr_checkout_running", &[&iid.to_string()])),
+        GitBusy::Worktree => Some(tr(lang, "wt_creating")),
     }
 }
 
@@ -252,6 +258,7 @@ enum UsageType {
 enum MainView {
     Repos,
     MergeRequests,
+    ClaudeSessions,
 }
 
 /// Was gerade die Refs der Repos hält: höchstens ein Scan, manueller Fetch
@@ -268,6 +275,8 @@ enum GitBusy {
     Fetch { repo: PathBuf },
     /// K1: Auschecken dieses MR, ohne abschließenden Scan
     Checkout { iid: u64 },
+    /// „Neuer Worktree“ aus der Repo-Liste läuft, danach Rescan
+    Worktree,
 }
 
 impl GitBusy {
@@ -353,6 +362,8 @@ pub struct MyApp {
     config_save_pending: bool,
     last_config_save: Option<std::time::Instant>,
     main_view: MainView,
+    /// Ansicht „Claude Sessions“
+    claude: claude_sessions::ClaudeViewState,
     /// glab-Aufrufe der Sitzung (immer `GatedRunner`, E16); Tests: `FakeGlab`
     glab: Arc<dyn GlabRunner>,
     /// Programm hinter `glab`; ein anderes nach „Speichern“ → neuer Runner
@@ -408,10 +419,16 @@ pub struct MyApp {
     mr_settings_tx: Sender<MrSettingsResult>,
     mr_settings_rx: Receiver<MrSettingsResult>,
     mr_settings: MrSettingsCache,
+    /// Repo-Liste: Suche und Dialog „Neuer Worktree“
+    worktree_ui: new_worktree::WorktreeUi,
 }
 
 impl MyApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        #[cfg(target_os = "windows")]
+        if !crate::dpi_fix::install(cc) {
+            eprintln!("DPI-Korrektur für das Hauptfenster nicht installiert");
+        }
         let config = AppConfig::load();
         // Startup-Sync: Run-Key mit aktueller exe synchronisieren (falls exe verschoben).
         // Best effort — kein Start-Abbruch bei Registry-Fehlern.
@@ -484,6 +501,7 @@ impl MyApp {
             config_save_pending: false,
             last_config_save: None,
             main_view: MainView::Repos,
+            claude: claude_sessions::ClaudeViewState::new(),
             glab,
             glab_program,
             glab_factory,
@@ -515,6 +533,7 @@ impl MyApp {
             mr_settings_tx,
             mr_settings_rx,
             mr_settings: MrSettingsCache::default(),
+            worktree_ui: Default::default(),
         };
         #[cfg(target_os = "windows")]
         {
@@ -630,7 +649,7 @@ impl MyApp {
             GitBusy::Scan | GitBusy::Fetch { .. } => return,
             // K1: das Auschecken endet ohne Scan – Wunsch merken, `poll_scan`
             // holt ihn danach nach
-            GitBusy::Checkout { .. } => {
+            GitBusy::Checkout { .. } | GitBusy::Worktree => {
                 self.pending_scan = true;
                 return;
             }
@@ -685,6 +704,7 @@ impl MyApp {
                     self.pending_scan = false;
                     self.error = None;
                     self.mr_after_scan();
+                    self.claude_after_scan();
                     // K1: IDE nach dem Auschecken, sobald der Ordner bekannt ist
                     self.run_pending_after_checkout();
                     // Review-Fix: dirty VOR dem direkten Sync markieren — bei
@@ -720,6 +740,7 @@ impl MyApp {
                     self.repos = repos;
                     self.repo_sort_dirty = false;
                     self.mr_after_scan();
+                    self.claude_after_scan();
                     if let Some(raw) = fetch_error {
                         let key = fetch_error_i18n_key(fetch_partial);
                         // I2: auth_hint nur bei echten Remote-Fehlern — bei
@@ -2146,14 +2167,20 @@ impl MyApp {
                         ui.add_space(8.0);
                         // E19: in der MR-Ansicht lädt „Aktualisieren“ die MRs neu.
                         let mr_view = self.main_view == MainView::MergeRequests;
+                        // Claude-Ansicht: „Aktualisieren“ sucht die Sessions neu
+                        let claude_view = self.main_view == MainView::ClaudeSessions;
                         let checkout = matches!(self.git_busy, GitBusy::Checkout { .. });
                         let busy = if mr_view {
                             self.mr_loading || self.mr_discovering || checkout
+                        } else if claude_view {
+                            self.claude.scanning
                         } else {
                             self.git_busy.holds_refs()
                         };
                         // Beim Auschecken kein „Scanne…“
-                        let refresh_label = if !mr_view && self.git_busy.scans_repos() {
+                        let refresh_label = if claude_view {
+                            tr(lang, "refresh")
+                        } else if !mr_view && self.git_busy.scans_repos() {
                             tr(lang, "scanning")
                         } else {
                             tr(lang, "refresh")
@@ -2177,6 +2204,8 @@ impl MyApp {
                         if refresh.clicked() {
                             if mr_view {
                                 self.mr_user_refresh();
+                            } else if claude_view {
+                                self.start_claude_scan();
                             } else {
                                 self.start_scan();
                             }
@@ -2186,7 +2215,7 @@ impl MyApp {
                             ui.spinner();
                         }
                         // E19: Sortierung wirkt nur auf die Repo-Liste.
-                        if mr_view {
+                        if mr_view || claude_view {
                             return;
                         }
                         // Task 4: Sort-Modus als Icon-Button mit Dropdown
@@ -2314,6 +2343,12 @@ impl MyApp {
                             Color32::from_rgb(60, 120, 60)
                         } else {
                             crate::ui::theme::mr_palette(&self.config.theme, ui.visuals()).text2
+                        };
+                        ui.label(RichText::new(text).size(11.0).color(color));
+                    } else if self.main_view == MainView::ClaudeSessions {
+                        let (text, color) = match &self.status_message {
+                            Some(msg) => (msg.clone(), Color32::from_rgb(60, 120, 60)),
+                            None => (self.claude_status_line(), Color32::from_rgb(100, 100, 100)),
                         };
                         ui.label(RichText::new(text).size(11.0).color(color));
                     } else if let Some(msg) = &self.status_message {
@@ -2596,6 +2631,7 @@ impl eframe::App for MyApp {
         // sonst doppelte Channel-Drains und doppeltes Visible(false).
         // F-01: Service ist einzige Windows-Quelle, kein Fallback mehr.
         self.poll_scan(ctx);
+        self.poll_claude(ctx);
         #[cfg(target_os = "windows")]
         {
             if self.tray_shared.is_some() {
@@ -2613,6 +2649,7 @@ impl eframe::App for MyApp {
         // Merge Requests: Ergebnisse übernehmen, Intervall nur bei sichtbarem Fenster.
         self.poll_mr(ctx);
         self.poll_mr_settings(ctx);
+        self.poll_new_worktree(ctx);
         self.maybe_refresh_mr(ctx);
         self.handle_close_request(ctx);
         // P5: gebatchte Usage-Saves hier flush (deckt auch ui()-Actions vom
@@ -2643,6 +2680,8 @@ impl eframe::App for MyApp {
         self.show_top_bar(ui);
         self.show_status_bar(ui);
         self.show_branch_dialog(&ctx);
+        self.show_new_worktree_dialog(&ctx);
+        self.show_new_claude_dialog(&ctx);
         self.show_update_dialog(&ctx);
 
         egui::CentralPanel::default()
@@ -2656,6 +2695,10 @@ impl eframe::App for MyApp {
                 self.show_error_banner(ui);
                 if self.main_view == MainView::MergeRequests {
                     self.show_mr_view(ui);
+                    return;
+                }
+                if self.main_view == MainView::ClaudeSessions {
+                    self.show_claude_view(ui);
                     return;
                 }
 
@@ -2693,6 +2736,8 @@ impl eframe::App for MyApp {
                     explorer_open: None,
                     shell_open: None,
                     custom_select: None,
+                    new_worktree: None,
+                    new_claude_session: false,
                 };
 
                 // Wir brauchen &mut für repo_list, um selektierte Werte zu zeigen, aber hier clonen wir mut
@@ -2715,7 +2760,14 @@ impl eframe::App for MyApp {
                     &mut actions,
                     fetching,
                     highlight.as_ref(),
+                    &mut self.worktree_ui.search,
                 );
+                if let Some(base) = actions.new_worktree.take() {
+                    self.open_new_worktree_dialog(base);
+                }
+                if actions.new_claude_session {
+                    self.open_new_claude_dialog();
+                }
 
                 // Handle Actions
                 if let Some((repo_path, branch)) = actions.branch_switch {
@@ -3052,6 +3104,7 @@ mod tests {
             last_config_save: None,
             repo_sort_dirty: true,
             main_view: MainView::Repos,
+            claude: claude_sessions::ClaudeViewState::new(),
             glab,
             glab_program,
             glab_factory,
@@ -3083,6 +3136,7 @@ mod tests {
             mr_settings_tx,
             mr_settings_rx,
             mr_settings: MrSettingsCache::default(),
+            worktree_ui: Default::default(),
         }
     }
 
