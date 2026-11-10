@@ -204,3 +204,11 @@ Explorer im Ordner der Session (Profil-Schalter `show_shell`/`show_explorer`).
 - Vorauswahl: Standard-Ordner aus den Einstellungen (`claude_default_dir`), sonst das zuletzt geöffnete Repo, sonst der erste Eintrag. Liegt der Standard-Ordner außerhalb der Repos, steht er als eigener Eintrag vorne.
 - Start mit dem Claude-Agent-Profil ohne `--resume` (Terminal und Befehl aus den Agent-Einstellungen); zählt als Nutzung des Repos.
 - Einstellung im Tab „Allgemein“ unter dem Worktree-Ordner: Textfeld, „Durchsuchen …“, „Zurücksetzen“; nur absolute Pfade gelten.
+
+## v5: Benachrichtigungen und Vorschau
+
+- **Benachrichtigung:** Springt eine laufende Session von „arbeitet“ (auch Shell) auf „wartet auf dich“ oder „fertig“, zeigt Windows eine Benachrichtigung („Claude wartet auf dich“ / „Claude ist fertig“, Text: Titel · Ort). Ein Klick darauf holt das Terminal nach vorne. Neue Sessions und Wechsel ohne vorheriges „arbeitet“ lösen nichts aus. Keine Benachrichtigung, solange das Fenster im Vordergrund ist und die Ansicht „Claude Sessions“ zeigt.
+- Der Live-Status wird dafür auch ohne geöffnete Ansicht und im Tray gelesen (alle 2 s, sichtbar jede Sekunde); Session-Scans laufen weiterhin erst nach dem ersten Öffnen.
+- Toasts laufen über eine eigene App-ID (`TimAltmann.GitManager`, unter `HKCU\Software\Classes\AppUserModelId` mit Name und Icon registriert); klappt das nicht, über die von PowerShell.
+- Einstellung „Benachrichtigen, wenn eine Claude Session dich braucht“ (`claude_notify`, Standard an) im Tab „Allgemein“.
+- **Vorschau:** Pfeil-Button auf jeder Karte klappt die letzten 8 Einträge auf: Fragen („Du“), Antworten („Claude“) und Werkzeugaufrufe („→ Edit src/x.rs“), je höchstens 320 Zeichen. Gelesen werden die letzten 256 KiB der Session-Datei; Systemtexte, Meta- und Subagent-Zeilen entfallen. Aufgeklappte Vorschauen prüfen höchstens jede Sekunde, ob sich die Datei geändert hat.

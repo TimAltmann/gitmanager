@@ -4,6 +4,8 @@ mod app;
 mod autostart;
 mod claude_live;
 mod claude_new;
+mod claude_notify;
+mod claude_preview;
 mod claude_sessions;
 mod config;
 mod config_parser;

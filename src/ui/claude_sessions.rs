@@ -2,6 +2,7 @@
 //! darunter alle übrigen in einer Liste, neueste zuerst.
 
 use crate::claude_live::{open_matches_search, LiveStatus, OpenSession};
+use crate::claude_preview::{PreviewItem, PreviewRole};
 use crate::claude_sessions::{claude_projects_dir, session_matches_search, SessionEntry};
 use crate::config::AppConfig;
 use crate::gitlab::time::relative_time;
@@ -11,7 +12,7 @@ use crate::ui::claude_anim::{
     status_color, verb,
 };
 use egui::{FontId, RichText, Ui, Vec2};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
@@ -21,6 +22,10 @@ const ICON_GIT_BRANCH: egui::ImageSource =
     egui::include_image!("../../assets/icons/git-branch.svg");
 const ICON_TERMINAL: egui::ImageSource = egui::include_image!("../../assets/icons/terminal.svg");
 const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
+const ICON_CHEVRON_DOWN: egui::ImageSource =
+    egui::include_image!("../../assets/icons/chevron-down.svg");
+const ICON_CHEVRON_UP: egui::ImageSource =
+    egui::include_image!("../../assets/icons/chevron-up.svg");
 
 /// Was der Nutzer in der Ansicht ausgelöst hat.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -35,6 +40,8 @@ pub struct ClaudeSessionActions {
     pub shell_open: Option<PathBuf>,
     /// Ordner im Explorer öffnen
     pub explorer_open: Option<PathBuf>,
+    /// Vorschau der Session (ID) auf- bzw. zuklappen
+    pub toggle_preview: Option<String>,
 }
 
 /// Sichtbare offene Sessions und übrige Sessions (ohne die offenen), jeweils
@@ -66,6 +73,9 @@ pub struct ViewData<'a> {
     pub config: &'a AppConfig,
     /// Unix-Millisekunden (Laufzeiten)
     pub now_ms: i64,
+    /// Aufgeklappte Vorschauen (Session-IDs) und ihre Einträge
+    pub expanded: &'a HashSet<String>,
+    pub previews: &'a HashMap<String, Vec<PreviewItem>>,
 }
 
 /// Zeichnet die Ansicht.
@@ -81,6 +91,8 @@ pub fn show_claude_sessions(
         scanning,
         config,
         now_ms,
+        expanded,
+        previews,
     } = *data;
     let lang = config.language;
     if open.is_empty() && entries.is_empty() {
@@ -119,7 +131,8 @@ pub fn show_claude_sessions(
                     .show_unindented(ui, |ui| {
                         ui.add_space(4.0);
                         for o in &open_hits {
-                            show_open_card(ui, o, config, now_ms, actions);
+                            let preview = Preview::of(&o.live.session_id, expanded, previews);
+                            show_open_card(ui, o, config, now_ms, preview, actions);
                             ui.add_space(6.0);
                         }
                     });
@@ -136,7 +149,8 @@ pub fn show_claude_sessions(
                     .show_unindented(ui, |ui| {
                         ui.add_space(4.0);
                         for e in &rest {
-                            show_session_card(ui, e, lang, now_secs, actions);
+                            let preview = Preview::of(&e.session.id, expanded, previews);
+                            show_session_card(ui, e, lang, now_secs, preview, actions);
                             ui.add_space(6.0);
                         }
                     });
@@ -288,12 +302,109 @@ fn footer(ui: &mut Ui, place: &str, branch: Option<&str>, time: Option<String>) 
     });
 }
 
+/// Vorschau-Zustand einer Karte.
+#[derive(Clone, Copy)]
+enum Preview<'a> {
+    Collapsed,
+    /// Aufgeklappt; `None` = wird noch geladen
+    Expanded(Option<&'a [PreviewItem]>),
+}
+
+impl<'a> Preview<'a> {
+    fn of(
+        id: &str,
+        expanded: &HashSet<String>,
+        previews: &'a HashMap<String, Vec<PreviewItem>>,
+    ) -> Self {
+        if expanded.contains(id) {
+            Preview::Expanded(previews.get(id).map(Vec::as_slice))
+        } else {
+            Preview::Collapsed
+        }
+    }
+}
+
+/// Auf-/Zuklapp-Button der Vorschau; setzt `actions.toggle_preview`.
+fn preview_toggle(
+    ui: &mut Ui,
+    id: &str,
+    preview: Preview,
+    lang: Language,
+    actions: &mut ClaudeSessionActions,
+) {
+    let (icon, tip) = match preview {
+        Preview::Collapsed => (ICON_CHEVRON_DOWN, "claude_preview_show"),
+        Preview::Expanded(_) => (ICON_CHEVRON_UP, "claude_preview_hide"),
+    };
+    let image = egui::Image::new(icon)
+        .fit_to_exact_size(Vec2::splat(16.0))
+        .tint(ui.visuals().text_color());
+    let tip = tr(lang, tip);
+    let resp = ui.add(egui::Button::image(image)).on_hover_text(&tip);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &tip));
+    hover_frame(ui, &resp);
+    if resp.clicked() {
+        actions.toggle_preview = Some(id.to_string());
+    }
+}
+
+/// Letzte Nachrichten unter dem Karteninhalt.
+fn show_preview(ui: &mut Ui, preview: Preview, lang: Language) {
+    let Preview::Expanded(items) = preview else {
+        return;
+    };
+    ui.add_space(6.0);
+    ui.separator();
+    let Some(items) = items else {
+        ui.spinner();
+        return;
+    };
+    if items.is_empty() {
+        ui.label(
+            RichText::new(tr(lang, "claude_preview_empty"))
+                .size(11.5)
+                .weak(),
+        );
+        return;
+    }
+    let you = tr(lang, "claude_preview_you");
+    let claude_color = crate::ui::claude_anim::COLOR_BUSY;
+    for item in items {
+        ui.horizontal_top(|ui| {
+            let (who, color) = match item.role {
+                PreviewRole::User => (you.as_str(), ui.visuals().hyperlink_color),
+                PreviewRole::Assistant => ("Claude", claude_color),
+                PreviewRole::Tool => ("", ui.visuals().weak_text_color()),
+            };
+            let label_width = 48.0;
+            ui.allocate_ui_with_layout(
+                Vec2::new(label_width, 0.0),
+                egui::Layout::left_to_right(egui::Align::Min),
+                |ui| {
+                    ui.set_min_width(label_width);
+                    ui.label(RichText::new(who).size(11.5).strong().color(color));
+                },
+            );
+            let text = match item.role {
+                PreviewRole::Tool => RichText::new(format!("→ {}", item.text))
+                    .size(11.0)
+                    .monospace()
+                    .weak(),
+                _ => RichText::new(&item.text).size(11.5),
+            };
+            ui.add(egui::Label::new(text).wrap());
+        });
+        ui.add_space(2.0);
+    }
+}
+
 /// Session-Karte; Klick auf Karte oder „Fortsetzen“ setzt `actions.resume`.
 fn show_session_card(
     ui: &mut Ui,
     entry: &SessionEntry,
     lang: Language,
     now_secs: i64,
+    preview: Preview,
     actions: &mut ClaudeSessionActions,
 ) {
     let session = &entry.session;
@@ -311,6 +422,7 @@ fn show_session_card(
                     .add(btn)
                     .on_hover_text(tr_fmt(lang, "claude_resume_tt", &[&session.cwd]))
                     .clicked();
+                preview_toggle(ui, &session.id, preview, lang, actions);
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     ui.add(
@@ -331,6 +443,7 @@ fn show_session_card(
                 });
             });
         });
+        show_preview(ui, preview, lang);
     });
     if button_clicked || card_clicked {
         actions.resume = Some((session.cwd.clone(), session.id.clone()));
@@ -382,6 +495,12 @@ fn status_line(ui: &mut Ui, o: &OpenSession, lang: Language, now_ms: i64) {
 /// Icon-Button wie in der Repo-Liste (Rahmen beim Überfahren).
 fn icon_button(ui: &mut Ui, image: egui::Image<'static>, tooltip: &str) -> bool {
     let resp = ui.add(egui::Button::image(image)).on_hover_text(tooltip);
+    hover_frame(ui, &resp);
+    resp.clicked()
+}
+
+/// Rahmen um einen Icon-Button beim Überfahren.
+fn hover_frame(ui: &Ui, resp: &egui::Response) {
     if resp.hovered() {
         ui.painter().rect_stroke(
             resp.rect,
@@ -390,7 +509,6 @@ fn icon_button(ui: &mut Ui, image: egui::Image<'static>, tooltip: &str) -> bool 
             egui::StrokeKind::Outside,
         );
     }
-    resp.clicked()
 }
 
 /// IDE-, Shell- und Explorer-Buttons (rechts, Reihenfolge wie in der
@@ -432,6 +550,7 @@ fn show_open_card(
     o: &OpenSession,
     config: &AppConfig,
     now_ms: i64,
+    preview: Preview,
     actions: &mut ClaudeSessionActions,
 ) {
     let lang = config.language;
@@ -441,6 +560,7 @@ fn show_open_card(
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 open_buttons(ui, o, config, actions);
+                preview_toggle(ui, &o.live.session_id, preview, lang, actions);
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     status_line(ui, o, lang, now_ms);
@@ -456,6 +576,7 @@ fn show_open_card(
                 });
             });
         });
+        show_preview(ui, preview, lang);
     });
     if clicked {
         actions.focus = Some(o.live.pid);
@@ -584,7 +705,7 @@ mod tests {
     fn resume_button_sits_above_card_click_area() {
         let e = entry("a1", "Titel");
         let draw = |ui: &mut Ui, a: &mut ClaudeSessionActions| {
-            show_session_card(ui, &e, Language::De, 10, a);
+            show_session_card(ui, &e, Language::De, 10, Preview::Collapsed, a);
         };
         let (ctx, _) = run_ui(card_id(&e), on_button, false, draw);
         let card = ctx.read_response(card_id(&e)).expect("Karte");
@@ -601,7 +722,7 @@ mod tests {
     fn click_on_card_body_resumes() {
         let e = entry("a1", "Titel");
         let (_, actions) = run_ui(card_id(&e), on_body, true, |ui, a| {
-            show_session_card(ui, &e, Language::De, 10, a);
+            show_session_card(ui, &e, Language::De, 10, Preview::Collapsed, a);
         });
         assert_eq!(
             actions.resume,
@@ -616,7 +737,7 @@ mod tests {
         // Titelzeile: oben links in der Karte
         let on_title = |r: egui::Rect| egui::pos2(r.left() + 30.0, r.top() + 18.0);
         let (_, actions) = run_ui(card_id(&e), on_title, true, |ui, a| {
-            show_session_card(ui, &e, Language::De, 10, a);
+            show_session_card(ui, &e, Language::De, 10, Preview::Collapsed, a);
         });
         assert_eq!(
             actions.resume,
@@ -634,7 +755,14 @@ mod tests {
         ] {
             let o = open(4016, "a1", "Titel", status);
             let (_, actions) = run_ui(open_card_id(&o), on_body, true, |ui, a| {
-                show_open_card(ui, &o, &crate::config::AppConfig::default(), 5_000, a);
+                show_open_card(
+                    ui,
+                    &o,
+                    &crate::config::AppConfig::default(),
+                    5_000,
+                    Preview::Collapsed,
+                    a,
+                );
             });
             assert_eq!(actions.focus, Some(4016), "{status:?}");
             assert_eq!(actions.resume, None);
@@ -648,8 +776,8 @@ mod tests {
         long.last_prompt = Some("x ".repeat(30));
         let config = crate::config::AppConfig::default();
         let (ctx, _) = run_ui(open_card_id(&short), on_body, false, |ui, a| {
-            show_open_card(ui, &short, &config, 0, a);
-            show_open_card(ui, &long, &config, 0, a);
+            show_open_card(ui, &short, &config, 0, Preview::Collapsed, a);
+            show_open_card(ui, &long, &config, 0, Preview::Collapsed, a);
         });
         let w = |o: &OpenSession| ctx.read_response(open_card_id(o)).unwrap().rect.width();
         assert_eq!(w(&short), w(&long));
@@ -663,7 +791,7 @@ mod tests {
         // Explorer-Button: ganz rechts in der ersten Zeile
         let on_explorer = |r: egui::Rect| egui::pos2(r.right() - 25.0, r.top() + 23.0);
         let (_, actions) = run_ui(open_card_id(&o), on_explorer, true, |ui, a| {
-            show_open_card(ui, &o, &config, 0, a);
+            show_open_card(ui, &o, &config, 0, Preview::Collapsed, a);
         });
         assert_eq!(actions.explorer_open, Some(PathBuf::from("C:\\a1")));
         assert_eq!(actions.focus, None);
@@ -675,6 +803,98 @@ mod tests {
         let mut b = a.clone();
         b.session.cwd = "C:\\anders".to_string();
         assert_ne!(card_id(&a), card_id(&b));
+    }
+
+    /// Knoten-Mitte per AccessKit-Label (Teilstring).
+    fn find_label(output: &egui::FullOutput, needle: &str) -> Option<egui::Pos2> {
+        let update = output.platform_output.accesskit_update.as_ref()?;
+        update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label().or(n.value()).is_some_and(|l| l.contains(needle)))
+            .and_then(|(_, n)| n.bounds())
+            .map(|b| egui::pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32))
+    }
+
+    #[test]
+    fn preview_toggle_click_toggles_without_resuming() {
+        let e = entry("a1", "Titel");
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        egui_extras::install_image_loaders(&ctx);
+        let mut target = None;
+        let mut actions = ClaudeSessionActions::default();
+        for frame in 0..4 {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 400.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            if let (Some(pos), 3) = (target, frame) {
+                raw.events.push(egui::Event::PointerMoved(pos));
+                for pressed in [true, false] {
+                    raw.events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+            }
+            let output = ctx.run_ui(raw, |ui| {
+                show_session_card(ui, &e, Language::De, 10, Preview::Collapsed, &mut actions);
+            });
+            target = find_label(&output, "Letzte Nachrichten zeigen");
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(actions.toggle_preview.as_deref(), Some("a1"));
+        assert_eq!(actions.resume, None);
+    }
+
+    #[test]
+    fn expanded_preview_shows_messages_and_spinner_while_loading() {
+        let o = open(3, "a1", "Titel", LiveStatus::Idle);
+        let config = crate::config::AppConfig::default();
+        let items = vec![
+            PreviewItem {
+                role: PreviewRole::User,
+                text: "Fix den Login".into(),
+            },
+            PreviewItem {
+                role: PreviewRole::Tool,
+                text: "Edit src/login.rs".into(),
+            },
+        ];
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut a = ClaudeSessionActions::default();
+        let mut height = |preview: Preview| {
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                show_open_card(ui, &o, &config, 0, preview, &mut a);
+            });
+            let found = (
+                find_label(&output, "Fix den Login").is_some(),
+                find_label(&output, "→ Edit src/login.rs").is_some(),
+            );
+            output.drop_without_applying_deltas();
+            // Gezeichnete Karte (die Klickfläche hängt einen Frame hinterher)
+            let h = ctx
+                .data(|d| d.get_temp::<egui::Rect>(open_card_id(&o).with("rect")))
+                .map_or(0.0, |r| r.height());
+            (found, h)
+        };
+        height(Preview::Collapsed);
+        let (found, collapsed) = height(Preview::Collapsed);
+        assert_eq!(found, (false, false));
+        height(Preview::Expanded(Some(&items)));
+        let (found, expanded) = height(Preview::Expanded(Some(&items)));
+        assert_eq!(found, (true, true));
+        assert!(expanded > collapsed + 20.0, "{collapsed} → {expanded}");
+        height(Preview::Expanded(None));
+        let (_, loading) = height(Preview::Expanded(None));
+        assert!(loading > collapsed, "Spinner braucht Platz");
     }
 
     #[test]

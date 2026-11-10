@@ -876,6 +876,15 @@ pub struct AppConfig {
     /// Versionen ignorieren das Feld.
     #[serde(default)]
     pub claude_default_dir: Option<String>,
+
+    /// Windows-Benachrichtigung, wenn eine Claude Session wartet oder fertig
+    /// ist. Ältere Versionen ignorieren das Feld.
+    #[serde(default = "default_claude_notify")]
+    pub claude_notify: bool,
+}
+
+fn default_claude_notify() -> bool {
+    true
 }
 
 impl AppConfig {
@@ -930,6 +939,7 @@ impl Default for AppConfig {
             merge_requests: MrConfig::default(),
             worktree_root: None,
             claude_default_dir: None,
+            claude_notify: default_claude_notify(),
         }
     }
 }
@@ -3664,6 +3674,16 @@ mod tests {
         let before = sorted.clone();
         assert!(!sorted.normalize());
         assert_eq!(sorted, before);
+    }
+
+    #[test]
+    fn claude_notify_defaults_on_for_old_configs() {
+        let cfg = AppConfig::default();
+        assert!(cfg.claude_notify);
+        let mut value = serde_json::to_value(&cfg).unwrap();
+        value.as_object_mut().unwrap().remove("claude_notify");
+        let old: AppConfig = serde_json::from_value(value).unwrap();
+        assert!(old.claude_notify);
     }
 
     #[test]

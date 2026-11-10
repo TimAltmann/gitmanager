@@ -851,6 +851,19 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
     ui.separator();
     ui.add_space(8.0);
     show_claude_dir_setting(ui, &mut state.draft);
+    ui.add_space(10.0);
+    let lang = state.draft.language;
+    ui.checkbox(
+        &mut state.draft.claude_notify,
+        RichText::new(tr(lang, "claude_notify_label"))
+            .size(13.0)
+            .strong(),
+    );
+    ui.label(
+        RichText::new(tr(lang, "claude_notify_hint"))
+            .size(11.0)
+            .color(Color32::from_rgb(100, 100, 100)),
+    );
 }
 
 fn show_worktree_root_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
