@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// Fenstergröße beim Start (ohne gespeicherte Größe: eframe ohne
 /// `persistence`). Mindestens `TOP_BAR_COMPACT_WIDTH` breit, damit
 /// „Aktualisieren“ und „Einstellungen“ beim Start ihren Text zeigen.
-pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1200.0, 680.0];
+pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1260.0, 700.0];
 const _: () = assert!(DEFAULT_WINDOW_SIZE[0] >= TOP_BAR_COMPACT_WIDTH);
 
 /// Kleinste Fenstergröße (Punkte, also unabhängig von der Skalierung).

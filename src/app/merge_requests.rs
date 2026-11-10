@@ -38,19 +38,13 @@ use std::time::{Duration, Instant};
 
 /// Unter dieser Fensterbreite zeigen „Aktualisieren“ und „Einstellungen“ nur
 /// ihr Icon (mit Tooltip), damit die Top-Leiste mit Umschalter passt.
-pub(super) const TOP_BAR_COMPACT_WIDTH: f32 = 1200.0;
+pub(super) const TOP_BAR_COMPACT_WIDTH: f32 = 1260.0;
 
 /// Unter dieser Fensterbreite entfallen zusätzlich die Beschriftungen
 /// „Profil:“, „AI:“ und „Sprache“ (dann Tooltip der Combos), damit die
 /// Top-Leiste beim Mindestfenster (920 px) passt; das Standardfenster
-/// (`DEFAULT_WINDOW_SIZE`, 1200 px) behält sie samt Button-Texten.
-pub(super) const TOP_BAR_CAPTIONS_WIDTH: f32 = 1060.0;
-
-/// Ab dieser Fensterbreite heißt der dritte Umschalter-Eintrag „Claude
-/// Sessions“, darunter nur Claude-Icon (passt sonst im Standardfenster nicht).
-pub(super) const CLAUDE_FULL_LABEL_WIDTH: f32 = 1300.0;
-
-const ICON_CLAUDE: ImageSource<'static> = egui::include_image!("../../assets/icons/claude.svg");
+/// (`DEFAULT_WINDOW_SIZE`, 1260 px) behält sie samt Button-Texten.
+pub(super) const TOP_BAR_CAPTIONS_WIDTH: f32 = 1120.0;
 
 /// Ergebnis der MR-Hintergrundarbeit (Kanal `mr_tx`/`mr_rx`).
 pub(super) enum MrResult {
@@ -720,13 +714,7 @@ impl MyApp {
                 }
 
                 let claude_on = self.main_view == MainView::ClaudeSessions;
-                // Bis zum Standardfenster nur das Claude-Icon, Name im Tooltip
-                let short = self.last_window_size[0] < CLAUDE_FULL_LABEL_WIDTH;
-                let mut atoms = if short {
-                    Atoms::new(Image::new(ICON_CLAUDE).fit_to_exact_size(vec2(14.0, 14.0)))
-                } else {
-                    Atoms::new(RichText::new(tr(lang, "view_claude")).size(12.0))
-                };
+                let mut atoms = Atoms::new(RichText::new(tr(lang, "view_claude")).size(12.0));
                 // Warten Sessions auf dich: „● n“ in Blau statt der Gesamtzahl
                 let waiting = self.claude.waiting_count();
                 if waiting > 0 {
@@ -2256,20 +2244,13 @@ pub(super) mod tests {
     }
 
     /// Mindestfenster (920 px, nur Icons, ohne Beschriftungen), ab
-    /// `TOP_BAR_CAPTIONS_WIDTH` mit Beschriftungen, 1080 px und ab
-    /// `TOP_BAR_COMPACT_WIDTH` (Standardfenster) mit Button-Texten und ab
-    /// `CLAUDE_FULL_LABEL_WIDTH` mit „Claude Sessions“ als Text: in
-    /// Zeile 1 überlappt in keiner der drei Ansichten etwas, alles bleibt im
+    /// `TOP_BAR_CAPTIONS_WIDTH` mit Beschriftungen, 1080/1200 px und ab
+    /// `TOP_BAR_COMPACT_WIDTH` (Standardfenster) mit Button-Texten, immer
+    /// mit „Claude Sessions“ als Text: in Zeile 1 überlappt in keiner der drei Ansichten etwas, alles bleibt im
     /// Fenster.
     #[test]
     fn top_bar_fits_at_min_width() {
-        for width in [
-            920.0,
-            TOP_BAR_CAPTIONS_WIDTH,
-            1080.0,
-            TOP_BAR_COMPACT_WIDTH,
-            CLAUDE_FULL_LABEL_WIDTH,
-        ] {
+        for width in [920.0, TOP_BAR_CAPTIONS_WIDTH, 1080.0, TOP_BAR_COMPACT_WIDTH] {
             for lang in [Language::De, Language::En] {
                 for view in [
                     MainView::Repos,
