@@ -846,44 +846,73 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
     ui.separator();
     ui.add_space(8.0);
     show_worktree_root_setting(ui, &mut state.draft);
+    // Standard-Ordner für „Neue Claude Session“
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    show_claude_dir_setting(ui, &mut state.draft);
 }
 
 fn show_worktree_root_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
     let lang = draft.language;
-    ui.label(RichText::new(tr(lang, "wt_root_label")).size(13.0).strong());
+    let keys = ["wt_root_label", "wt_root_hint", "wt_root_placeholder"];
+    show_dir_setting(ui, lang, keys, &mut draft.worktree_root);
+}
+
+/// Standard-Ordner für „Neue Claude Session“ (leer = zuletzt benutztes Repo)
+fn show_claude_dir_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
+    let lang = draft.language;
+    let keys = [
+        "claude_dir_label",
+        "claude_dir_hint",
+        "claude_dir_placeholder",
+    ];
+    show_dir_setting(ui, lang, keys, &mut draft.claude_default_dir);
+}
+
+/// Ordner-Einstellung: Textfeld, „Durchsuchen …“, „Zurücksetzen“, Hinweis bei
+/// relativem Pfad. `keys` = Überschrift, Erklärung, Platzhalter.
+fn show_dir_setting(
+    ui: &mut egui::Ui,
+    lang: Language,
+    [label, hint, placeholder]: [&str; 3],
+    value: &mut Option<String>,
+) {
+    let absolute = |v: &Option<String>| crate::config::absolute_dir(v.as_deref());
+    ui.label(RichText::new(tr(lang, label)).size(13.0).strong());
     ui.add_space(4.0);
     ui.label(
-        RichText::new(tr(lang, "wt_root_hint"))
+        RichText::new(tr(lang, hint))
             .size(11.0)
             .color(Color32::from_rgb(100, 100, 100)),
     );
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        let mut text = draft.worktree_root.clone().unwrap_or_default();
+        let mut text = value.clone().unwrap_or_default();
         if ui
             .add(
                 egui::TextEdit::singleline(&mut text)
-                    .hint_text(tr(lang, "wt_root_placeholder"))
+                    .hint_text(tr(lang, placeholder))
                     .desired_width(320.0),
             )
             .changed()
         {
-            draft.worktree_root = Some(text).filter(|r| !r.trim().is_empty());
+            *value = Some(text).filter(|r| !r.trim().is_empty());
         }
         if ui.button(format!("{} …", tr(lang, "browse"))).clicked() {
             let mut dialog = rfd::FileDialog::new();
-            if let Some(dir) = draft.worktree_root_dir().filter(|d| d.is_dir()) {
+            if let Some(dir) = absolute(value).filter(|d| d.is_dir()) {
                 dialog = dialog.set_directory(dir);
             }
             if let Some(path) = dialog.pick_folder() {
-                draft.worktree_root = Some(path.display().to_string());
+                *value = Some(path.display().to_string());
             }
         }
-        if draft.worktree_root.is_some() && ui.button(tr(lang, "wt_root_reset")).clicked() {
-            draft.worktree_root = None;
+        if value.is_some() && ui.button(tr(lang, "wt_root_reset")).clicked() {
+            *value = None;
         }
     });
-    if draft.worktree_root.is_some() && draft.worktree_root_dir().is_none() {
+    if value.is_some() && absolute(value).is_none() {
         ui.label(
             RichText::new(tr(lang, "wt_root_relative"))
                 .size(11.0)

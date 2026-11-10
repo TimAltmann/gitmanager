@@ -6,12 +6,16 @@ use crate::claude_live::{
     build_open, claude_live_dir, focus_session_window, process_alive, read_live_sessions,
     LiveSession, LiveStatus,
 };
+use crate::claude_new::{new_session_targets, preselect};
 use crate::claude_sessions::{
-    claude_projects_dir, resume_profile, scan_sessions, SessionCache, SessionScan,
+    claude_projects_dir, new_session_profile, resume_profile, scan_sessions, SessionCache,
+    SessionScan,
 };
+use crate::config::AgentProfile;
 use crate::git::launch_agent;
 use crate::i18n::{tr, tr_fmt};
 use crate::ui::claude_sessions::{show_claude_sessions, ClaudeSessionActions, ViewData};
+use crate::ui::new_claude_session::{show_new_claude_contents, DialogOutcome, NewClaudeDialog};
 use egui::Ui;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -46,6 +50,8 @@ pub(super) struct ClaudeViewState {
     pub(super) last_live_poll: Option<Instant>,
     live_tx: Sender<Vec<LiveSession>>,
     live_rx: Receiver<Vec<LiveSession>>,
+    /// Offener Dialog „Neue Claude Session“
+    pub(super) new_dialog: Option<NewClaudeDialog>,
 }
 
 impl ClaudeViewState {
@@ -67,6 +73,7 @@ impl ClaudeViewState {
             last_live_poll: None,
             live_tx,
             live_rx,
+            new_dialog: None,
         }
     }
 
@@ -267,10 +274,62 @@ impl MyApp {
 
     /// `claude --resume <id>` in `cwd` im Terminal (wie `open_agent`).
     pub(super) fn resume_claude_session(&mut self, cwd: &str, id: &str) {
+        let profile = resume_profile(self.claude_profile(), id);
+        self.launch_claude(profile, cwd);
+    }
+
+    /// Gezielt das Claude-Profil: der aktive Agent kann ein anderer sein.
+    fn claude_profile(&self) -> Option<&AgentProfile> {
+        self.config.agents.iter().find(|a| a.id == "claude")
+    }
+
+    /// Dialog „Neue Claude Session“ öffnen: alle Repos und Worktrees,
+    /// vorausgewählt der Standard-Ordner bzw. das zuletzt benutzte Repo.
+    pub(super) fn open_new_claude_dialog(&mut self) {
+        let default_dir = self.config.claude_default_dir_path();
+        let targets = new_session_targets(&self.repos, default_dir.as_deref());
+        if targets.is_empty() {
+            self.set_status(tr(self.config.language, "claude_new_no_folders"));
+            return;
+        }
+        let selected = preselect(&targets, default_dir.as_deref(), &self.config.repo_usage);
+        self.claude.new_dialog = Some(NewClaudeDialog::new(targets, selected));
+    }
+
+    pub(super) fn show_new_claude_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.claude.new_dialog.take() else {
+            return;
+        };
         let lang = self.config.language;
-        // Gezielt das Claude-Profil: der aktive Agent kann ein anderer sein
-        let claude = self.config.agents.iter().find(|a| a.id == "claude");
-        let profile = resume_profile(claude, id);
+        let mut open = true;
+        let mut outcome = DialogOutcome::None;
+        egui::Window::new(tr(lang, "claude_new_title"))
+            .id(egui::Id::new("new_claude_dialog"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_width(520.0);
+                outcome = show_new_claude_contents(ui, &mut dialog, lang);
+            });
+        match outcome {
+            DialogOutcome::Start(path) => self.start_new_claude_session(&path),
+            DialogOutcome::Cancel => {}
+            DialogOutcome::None if open => self.claude.new_dialog = Some(dialog),
+            DialogOutcome::None => {}
+        }
+    }
+
+    /// Neue Session im Ordner `path` starten (Claude-Profil ohne `--resume`).
+    fn start_new_claude_session(&mut self, path: &std::path::Path) {
+        let profile = new_session_profile(self.claude_profile());
+        self.record_usage(path, super::UsageType::Open);
+        self.launch_claude(profile, &path.display().to_string());
+    }
+
+    fn launch_claude(&mut self, profile: AgentProfile, cwd: &str) {
+        let lang = self.config.language;
         let term_pref = profile
             .terminal_override
             .clone()
@@ -300,6 +359,40 @@ mod tests {
     use super::super::{MainView, ScanResult};
     use super::*;
     use crate::claude_sessions::{ClaudeSession, SessionEntry};
+
+    #[test]
+    fn new_claude_dialog_preselects_default_dir_and_lists_repos() {
+        let mut app = test_app();
+        let repo =
+            |p: &str| crate::git::RepoInfo::new(PathBuf::from(p), "main".into(), false, false);
+        app.repos = vec![repo("/dev/a"), repo("/dev/b")];
+        app.config.claude_default_dir = Some("/dev/b".into());
+        app.open_new_claude_dialog();
+        let d = app.claude.new_dialog.as_ref().expect("Dialog offen");
+        assert_eq!(d.targets.len(), 2);
+        assert_eq!(d.selected, Some(1));
+
+        app.claude.new_dialog = None;
+        app.config.claude_default_dir = Some("/home/me/play".into());
+        app.open_new_claude_dialog();
+        let d = app.claude.new_dialog.as_ref().expect("Dialog offen");
+        assert_eq!(
+            d.targets.len(),
+            3,
+            "Standard-Ordner außerhalb als eigener Eintrag"
+        );
+        assert_eq!(d.selected, Some(0));
+    }
+
+    #[test]
+    fn new_claude_dialog_without_folders_shows_status() {
+        let mut app = test_app();
+        app.repos.clear();
+        app.config.claude_default_dir = None;
+        app.open_new_claude_dialog();
+        assert!(app.claude.new_dialog.is_none());
+        assert!(app.status_message.is_some());
+    }
 
     fn entry(id: &str) -> SessionEntry {
         SessionEntry {

@@ -196,3 +196,11 @@ wählen.
 Alle Karten volle Fensterbreite. Rechts oben wie in der Repo-Liste: IDEs des
 Profils (Repo der Session, sonst ihr Ordner; IDE öffnet das Repo), Shell und
 Explorer im Ordner der Session (Profil-Schalter `show_shell`/`show_explorer`).
+
+## v4: Neue Claude Session
+
+- Button „Neue Claude Session“ in der Werkzeugleiste der Repo-Liste neben „Neuer Worktree“.
+- Dialog mit Suche und Liste aller gefundenen Repos und Worktrees (Name, Branch bzw. „Worktree von …“, Pfad); Pfeiltasten, Enter, Doppelklick oder „Starten“ starten, Esc bricht ab.
+- Vorauswahl: Standard-Ordner aus den Einstellungen (`claude_default_dir`), sonst das zuletzt geöffnete Repo, sonst der erste Eintrag. Liegt der Standard-Ordner außerhalb der Repos, steht er als eigener Eintrag vorne.
+- Start mit dem Claude-Agent-Profil ohne `--resume` (Terminal und Befehl aus den Agent-Einstellungen); zählt als Nutzung des Repos.
+- Einstellung im Tab „Allgemein“ unter dem Worktree-Ordner: Textfeld, „Durchsuchen …“, „Zurücksetzen“; nur absolute Pfade gelten.

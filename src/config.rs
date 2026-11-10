@@ -871,16 +871,30 @@ pub struct AppConfig {
     /// neben dem Basis-Repo. Ältere Versionen ignorieren das Feld.
     #[serde(default)]
     pub worktree_root: Option<String>,
+
+    /// Standard-Ordner für „Neue Claude Session“ (vorausgewählt). Ältere
+    /// Versionen ignorieren das Feld.
+    #[serde(default)]
+    pub claude_default_dir: Option<String>,
 }
 
 impl AppConfig {
     /// Standard-Ordner für neue Worktrees: getrimmt, einheitliche Trenner,
     /// nur absolut (ein relativer Pfad hinge vom Arbeitsordner ab).
     pub fn worktree_root_dir(&self) -> Option<PathBuf> {
-        let root = self.worktree_root.as_deref()?.trim();
-        let dir: PathBuf = Path::new(root).components().collect();
-        dir.is_absolute().then_some(dir)
+        absolute_dir(self.worktree_root.as_deref())
     }
+
+    /// Standard-Ordner für neue Claude Sessions, wie `worktree_root_dir`.
+    pub fn claude_default_dir_path(&self) -> Option<PathBuf> {
+        absolute_dir(self.claude_default_dir.as_deref())
+    }
+}
+
+/// Getrimmt, einheitliche Trenner, nur absolut.
+pub fn absolute_dir(raw: Option<&str>) -> Option<PathBuf> {
+    let dir: PathBuf = Path::new(raw?.trim()).components().collect();
+    dir.is_absolute().then_some(dir)
 }
 
 impl Default for AppConfig {
@@ -915,6 +929,7 @@ impl Default for AppConfig {
             auto_fetch_interval_min: default_auto_fetch_interval(),
             merge_requests: MrConfig::default(),
             worktree_root: None,
+            claude_default_dir: None,
         }
     }
 }
@@ -3649,6 +3664,27 @@ mod tests {
         let before = sorted.clone();
         assert!(!sorted.normalize());
         assert_eq!(sorted, before);
+    }
+
+    #[test]
+    fn claude_default_dir_only_absolute_and_serde_default() {
+        let mut cfg = AppConfig::default();
+        assert_eq!(cfg.claude_default_dir_path(), None);
+        cfg.claude_default_dir = Some("relative".to_string());
+        assert_eq!(cfg.claude_default_dir_path(), None);
+        let abs = if cfg!(windows) {
+            "C:\\dev\\play"
+        } else {
+            "/dev/play"
+        };
+        cfg.claude_default_dir = Some(format!(" {abs} "));
+        assert_eq!(cfg.claude_default_dir_path(), Some(PathBuf::from(abs)));
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("claude_default_dir"));
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("claude_default_dir");
+        let old: AppConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(old.claude_default_dir, None);
     }
 
     #[test]

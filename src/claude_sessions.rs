@@ -345,6 +345,22 @@ pub fn session_matches_search(entry: &SessionEntry, query: &str) -> bool {
 /// Profil zum Fortsetzen: das Claude-Profil (sonst `claude`) mit
 /// `--resume <id>` am Ende der Argumente bzw. des Befehls-Templates.
 pub fn resume_profile(claude: Option<&AgentProfile>, session_id: &str) -> AgentProfile {
+    let mut p = new_session_profile(claude);
+    match &mut p.command {
+        Some(cmd) if p.args.is_empty() => {
+            cmd.push_str(" --resume ");
+            cmd.push_str(session_id);
+        }
+        _ => p
+            .args
+            .extend(["--resume".to_string(), session_id.to_string()]),
+    }
+    p
+}
+
+/// Profil für eine neue Session: das Claude-Profil (sonst `claude`),
+/// immer im Terminal.
+pub fn new_session_profile(claude: Option<&AgentProfile>) -> AgentProfile {
     let mut p = claude.cloned().unwrap_or_else(|| AgentProfile {
         id: "claude".to_string(),
         display_name: "Claude Code".to_string(),
@@ -356,15 +372,6 @@ pub fn resume_profile(claude: Option<&AgentProfile>, session_id: &str) -> AgentP
         icon: None,
     });
     p.launch_mode = AgentLaunchMode::Terminal;
-    match &mut p.command {
-        Some(cmd) if p.args.is_empty() => {
-            cmd.push_str(" --resume ");
-            cmd.push_str(session_id);
-        }
-        _ => p
-            .args
-            .extend(["--resume".to_string(), session_id.to_string()]),
-    }
     p
 }
 
@@ -706,6 +713,18 @@ mod tests {
         let p = resume_profile(Some(&profile(&[], Some("claude --verbose"))), "abc");
         assert_eq!(p.command.as_deref(), Some("claude --verbose --resume abc"));
         assert!(p.args.is_empty());
+    }
+
+    #[test]
+    fn new_session_profile_keeps_args_without_resume() {
+        let p = new_session_profile(Some(&profile(&["--model", "opus"], None)));
+        assert_eq!(p.args, ["--model", "opus"]);
+        assert_eq!(p.launch_mode, AgentLaunchMode::Terminal);
+        let t = new_session_profile(Some(&profile(&[], Some("claude --verbose"))));
+        assert_eq!(t.command.as_deref(), Some("claude --verbose"));
+        let d = new_session_profile(None);
+        assert_eq!(d.program, "claude");
+        assert!(d.args.is_empty());
     }
 
     #[test]

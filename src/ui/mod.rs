@@ -1,6 +1,7 @@
 pub mod claude_anim;
 pub mod claude_sessions;
 pub mod merge_requests;
+pub mod new_claude_session;
 pub mod repo_list;
 pub mod settings;
 pub mod theme;

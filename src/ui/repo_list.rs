@@ -187,6 +187,8 @@ pub struct RepoListActions {
     /// „Neuer Worktree“: `Some(None)` aus der Werkzeugleiste (Repo im Dialog
     /// wählen), `Some(Some(base))` von der Karte des Repos `base`.
     pub new_worktree: Option<Option<PathBuf>>,
+    /// „Neue Claude Session“ aus der Werkzeugleiste
+    pub new_claude_session: bool,
 }
 
 /// Suche der Repo-Liste: jedes Wort (durch Leerzeichen getrennt) muss in
@@ -395,6 +397,17 @@ fn show_list_toolbar(
                 .clicked()
             {
                 actions.new_worktree = Some(None);
+            }
+            let claude = egui::Button::image_and_text(
+                egui::Image::new(ICON_CLAUDE).fit_to_exact_size(Vec2::splat(14.0)),
+                tr(lang, "claude_new_button"),
+            );
+            if ui
+                .add(claude)
+                .on_hover_text(tr(lang, "claude_new_tooltip"))
+                .clicked()
+            {
+                actions.new_claude_session = true;
             }
         });
     });
@@ -1416,6 +1429,7 @@ mod tests {
             shell_open: None,
             custom_select: None,
             new_worktree: None,
+            new_claude_session: false,
         };
         assert!(actions.branch_switch.is_none());
         assert!(actions.solution_select.is_none());
@@ -1441,6 +1455,7 @@ mod tests {
             shell_open: None,
             custom_select: None,
             new_worktree: None,
+            new_claude_session: false,
         };
         actions.branch_switch = Some((PathBuf::from("/tmp/repo"), "main".to_string()));
         assert_eq!(
@@ -1686,6 +1701,7 @@ mod tests {
             shell_open: None,
             custom_select: None,
             new_worktree: None,
+            new_claude_session: false,
         };
         a.custom_select = Some((PathBuf::from("/tmp/repo"), "db".into(), "prod".into()));
         assert_eq!(
@@ -1807,6 +1823,83 @@ mod tests {
         assert!(detached_behind.contains('1'));
     }
 
+    /// „Neue Claude Session“ in der Werkzeugleiste setzt die Aktion.
+    #[test]
+    fn toolbar_new_claude_session_button_sets_action() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut config = AppConfig::default();
+        config.roots.clear();
+        config.language = crate::i18n::Language::De;
+        let mut repos = vec![RepoInfo::new(
+            PathBuf::from("/tmp/gm-claude-btn/repo"),
+            "main".into(),
+            false,
+            false,
+        )];
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 600.0));
+        let mut center = None;
+        let mut clicked = false;
+        for frame in 0..3 {
+            let mut events = Vec::new();
+            if let (Some(pos), 1) = (center, frame) {
+                events.push(egui::Event::PointerMoved(pos));
+                for pressed in [true, false] {
+                    events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+            }
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            };
+            let output = ctx.run_ui(raw, |ui| {
+                let mut actions = RepoListActions {
+                    branch_switch: None,
+                    solution_select: None,
+                    ide_open: None,
+                    agent_open: None,
+                    profile_override: None,
+                    fetch_branches: None,
+                    explorer_open: None,
+                    shell_open: None,
+                    custom_select: None,
+                    new_worktree: None,
+                    new_claude_session: false,
+                };
+                show_repo_list(
+                    ui,
+                    &mut repos,
+                    &config,
+                    &mut actions,
+                    false,
+                    None,
+                    &mut String::new(),
+                );
+                clicked |= actions.new_claude_session;
+            });
+            let update = output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("AccessKit");
+            center = update
+                .nodes
+                .iter()
+                .find(|(_, n)| n.label().is_some_and(|l| l.contains("Neue Claude Session")))
+                .and_then(|(_, n)| n.bounds())
+                .map(|b| egui::pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32));
+            output.drop_without_applying_deltas();
+        }
+        assert!(center.is_some(), "Button sichtbar");
+        assert!(clicked, "Klick setzt new_claude_session");
+    }
+
     /// „In Repo-Liste zeigen“ (K1): die hervorgehobene Karte wird einmal in
     /// den sichtbaren Bereich gescrollt und bleibt dort.
     #[test]
@@ -1855,6 +1948,7 @@ mod tests {
                     shell_open: None,
                     custom_select: None,
                     new_worktree: None,
+                    new_claude_session: false,
                 };
                 show_repo_list(
                     ui,

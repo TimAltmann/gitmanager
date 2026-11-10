@@ -2674,6 +2674,7 @@ impl eframe::App for MyApp {
         self.show_status_bar(ui);
         self.show_branch_dialog(&ctx);
         self.show_new_worktree_dialog(&ctx);
+        self.show_new_claude_dialog(&ctx);
         self.show_update_dialog(&ctx);
 
         egui::CentralPanel::default()
@@ -2729,6 +2730,7 @@ impl eframe::App for MyApp {
                     shell_open: None,
                     custom_select: None,
                     new_worktree: None,
+                    new_claude_session: false,
                 };
 
                 // Wir brauchen &mut für repo_list, um selektierte Werte zu zeigen, aber hier clonen wir mut
@@ -2755,6 +2757,9 @@ impl eframe::App for MyApp {
                 );
                 if let Some(base) = actions.new_worktree.take() {
                     self.open_new_worktree_dialog(base);
+                }
+                if actions.new_claude_session {
+                    self.open_new_claude_dialog();
                 }
 
                 // Handle Actions

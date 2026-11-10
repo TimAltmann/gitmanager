@@ -177,6 +177,30 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "repo_section_repos") => "Repositories".to_string(),
         (Language::En, "repo_section_worktrees") => "Worktrees".to_string(),
         (Language::De, "repo_section_worktrees") => "Worktrees".to_string(),
+        (Language::En, "claude_new_button") => "New Claude session".to_string(),
+        (Language::De, "claude_new_button") => "Neue Claude Session".to_string(),
+        (Language::En, "claude_new_tooltip") => "Start a new Claude Code session in a repository".to_string(),
+        (Language::De, "claude_new_tooltip") => "Neue Claude-Code-Session in einem Repository starten".to_string(),
+        (Language::En, "claude_new_title") => "New Claude session".to_string(),
+        (Language::De, "claude_new_title") => "Neue Claude Session".to_string(),
+        (Language::En, "claude_new_hint") => "Choose the folder the session starts in.".to_string(),
+        (Language::De, "claude_new_hint") => "Wähle den Ordner, in dem die Session startet.".to_string(),
+        (Language::En, "claude_new_search_hint") => "Search repositories and worktrees…".to_string(),
+        (Language::De, "claude_new_search_hint") => "Repositories und Worktrees durchsuchen…".to_string(),
+        (Language::En, "claude_new_no_matches") => "No folder matches the search.".to_string(),
+        (Language::De, "claude_new_no_matches") => "Kein Ordner passt zur Suche.".to_string(),
+        (Language::En, "claude_new_no_folders") => "No repositories found yet – set the search paths or a default folder in the settings.".to_string(),
+        (Language::De, "claude_new_no_folders") => "Noch keine Repositories gefunden – Suchpfade oder einen Standard-Ordner in den Einstellungen festlegen.".to_string(),
+        (Language::En, "claude_new_start") => "Start".to_string(),
+        (Language::De, "claude_new_start") => "Starten".to_string(),
+        (Language::En, "claude_new_default_badge") => "default folder".to_string(),
+        (Language::De, "claude_new_default_badge") => "Standard-Ordner".to_string(),
+        (Language::En, "claude_dir_label") => "Default folder for new Claude sessions".to_string(),
+        (Language::De, "claude_dir_label") => "Standard-Ordner für neue Claude Sessions".to_string(),
+        (Language::En, "claude_dir_hint") => "Preselected in “New Claude session”. Empty = last used repository.".to_string(),
+        (Language::De, "claude_dir_hint") => "Wird bei „Neue Claude Session“ vorausgewählt. Leer = zuletzt benutztes Repository.".to_string(),
+        (Language::En, "claude_dir_placeholder") => "last used repository".to_string(),
+        (Language::De, "claude_dir_placeholder") => "zuletzt benutztes Repository".to_string(),
         (Language::En, "wt_new_button") => "New worktree".to_string(),
         (Language::De, "wt_new_button") => "Neuer Worktree".to_string(),
         (Language::En, "wt_new_tooltip") => "Create a new worktree for a repository".to_string(),
@@ -1432,6 +1456,27 @@ mod tests {
             sde.contains("Tray-Popup"),
             "DE summary should mention Tray-Popup: {sde}"
         );
+    }
+
+    #[test]
+    fn tr_claude_new_keys_exist() {
+        for key in [
+            "claude_new_button",
+            "claude_new_tooltip",
+            "claude_new_title",
+            "claude_new_hint",
+            "claude_new_search_hint",
+            "claude_new_no_matches",
+            "claude_new_no_folders",
+            "claude_new_start",
+            "claude_new_default_badge",
+            "claude_dir_label",
+            "claude_dir_hint",
+            "claude_dir_placeholder",
+        ] {
+            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+        }
     }
 
     #[test]
