@@ -153,6 +153,9 @@ impl MyApp {
         self.main_view = MainView::MergeRequests;
         // Ein offener MR steht nicht unter „Gemergt“
         self.mr_view.mine_merged = false;
+        // Eine aktive Suche könnte die Zeile ausblenden: Fokus ginge verloren
+        self.mr_view.mine_query.clear();
+        self.mr_view.others_query.clear();
         self.mr_view.focus = Some(MrFocus::new(host_key, id));
     }
 }
@@ -279,6 +282,16 @@ mod tests {
         app.mr_view.mine_merged = true;
         app.focus_mr(HOST, "gid://x/1");
         assert!(!app.mr_view.mine_merged);
+    }
+
+    #[test]
+    fn focus_mr_clears_mr_search() {
+        let mut app = test_app();
+        app.mr_view.mine_query = "shop".into();
+        app.mr_view.others_query = "fix".into();
+        app.focus_mr(HOST, "gid://x/1");
+        assert!(app.mr_view.mine_query.is_empty());
+        assert!(app.mr_view.others_query.is_empty());
     }
 
     #[test]
