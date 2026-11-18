@@ -356,6 +356,73 @@ pub fn list_branches(path: &Path) -> Vec<String> {
     list_branches_in(&repo)
 }
 
+/// Ergebnis von [`fast_forward`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FfOutcome {
+    UpToDate,
+    FastForwarded { commits: usize },
+    Dirty { files: usize },
+    Diverged { ahead: usize, behind: usize },
+    NoUpstream,
+    Detached,
+}
+
+/// Zieht den aktuellen Branch per Fast-Forward auf seinen Upstream. Setzt nie
+/// einen Branch zurück: bei lokalen Commits (`Diverged`) oder uncommitteten
+/// Änderungen (`Dirty`) passiert nichts. Fetch-Fehler werden als `Err`
+/// durchgereicht.
+pub fn fast_forward(path: &Path) -> anyhow::Result<FfOutcome> {
+    let repo =
+        Repository::open(path).map_err(|e| anyhow::anyhow!("Failed to open repository: {e}"))?;
+    let (branch, detached) = get_branch(&repo);
+    if detached {
+        return Ok(FfOutcome::Detached);
+    }
+    let cfg = repo.config()?;
+    let remote = cfg.get_string(&format!("branch.{branch}.remote")).ok();
+    let merge = cfg.get_string(&format!("branch.{branch}.merge")).ok();
+    let (Some(remote), Some(merge)) = (remote, merge) else {
+        return Ok(FfOutcome::NoUpstream);
+    };
+    let Some(merge_branch) = merge.strip_prefix("refs/heads/") else {
+        return Ok(FfOutcome::NoUpstream);
+    };
+    // Lokaler Remote ("."): kein Tracking-Ref zum Fetchen.
+    if remote == "." {
+        return Ok(FfOutcome::NoUpstream);
+    }
+    let spec = format!("+refs/heads/{merge_branch}:refs/remotes/{remote}/{merge_branch}");
+    fetch_refspecs(path, &remote, &[&spec])?;
+
+    // Nach dem Fetch neu öffnen, damit der Handle die neuen Refs sicher sieht.
+    let repo = Repository::open(path)?;
+    let mut local = repo.find_branch(&branch, BranchType::Local)?;
+    let Some(up_oid) = local.upstream().ok().and_then(|u| u.get().target()) else {
+        return Ok(FfOutcome::NoUpstream);
+    };
+    let (ahead, behind) = ahead_behind_in(&repo);
+    if behind == 0 {
+        return Ok(FfOutcome::UpToDate);
+    }
+    if ahead > 0 {
+        return Ok(FfOutcome::Diverged { ahead, behind });
+    }
+    let files = dirty_count(&repo);
+    if files > 0 {
+        return Ok(FfOutcome::Dirty { files });
+    }
+    let target = repo.find_commit(up_oid)?;
+    // Erst Arbeitsverzeichnis (safe: überschreibt nichts Lokales), dann Ref.
+    repo.checkout_tree(
+        target.as_object(),
+        Some(git2::build::CheckoutBuilder::new().safe()),
+    )?;
+    local
+        .get_mut()
+        .set_target(up_oid, "gitmanager: fast-forward")?;
+    Ok(FfOutcome::FastForwarded { commits: behind })
+}
+
 /// Finding C: Variante mit bereits geöffnetem Handle — kein zweites
 /// `Repository::open` pro Scan (siehe `get_repo_info`).
 pub fn list_branches_in(repo: &Repository) -> Vec<String> {
@@ -6307,5 +6374,82 @@ mod tests {
         let repo = Path::new("/tmp/repo");
         let sub = substitute_placeholders("{file} {dir} {repo}", file, repo);
         assert_eq!(sub, "/tmp/repo/sub/app.sln /tmp/repo/sub /tmp/repo");
+    }
+
+    // --- fast_forward: Bare-Origin, c1 ist behind, c2 pusht zwei Commits ---
+
+    /// c1 (auf `main`, Upstream origin/main); c2 pusht danach zwei Commits.
+    fn ff_setup(base: &Path) -> PathBuf {
+        let c1 = origin_and_clone_with_feature(base);
+        git_cmd(base, &["clone", "-b", "main", "origin.git", "c2"]);
+        let c2 = base.join("c2");
+        git_identity(&c2);
+        commit_file(&c2, "n1.txt", "1\n", "remote 1");
+        commit_file(&c2, "n2.txt", "2\n", "remote 2");
+        git_cmd(&c2, &["push", "origin", "main"]);
+        c1
+    }
+
+    #[test]
+    fn ff_fast_forwards_clean_branch() {
+        let base = tempdir().unwrap();
+        let c1 = ff_setup(base.path());
+        let out = fast_forward(&c1).unwrap();
+        assert_eq!(out, FfOutcome::FastForwarded { commits: 2 });
+        assert_eq!(
+            ref_oid(&c1, "refs/heads/main"),
+            ref_oid(&base.path().join("c2"), "refs/heads/main")
+        );
+        assert!(c1.join("n2.txt").exists());
+        assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::UpToDate);
+    }
+
+    #[test]
+    fn ff_up_to_date() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::UpToDate);
+    }
+
+    #[test]
+    fn ff_refuses_dirty() {
+        let base = tempdir().unwrap();
+        let c1 = ff_setup(base.path());
+        let before = ref_oid(&c1, "refs/heads/main");
+        fs::write(c1.join("a.txt"), "geaendert\n").unwrap();
+        assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::Dirty { files: 1 });
+        assert_eq!(ref_oid(&c1, "refs/heads/main"), before);
+    }
+
+    #[test]
+    fn ff_refuses_diverged() {
+        let base = tempdir().unwrap();
+        let c1 = ff_setup(base.path());
+        commit_file(&c1, "own.txt", "own\n", "own");
+        let before = ref_oid(&c1, "refs/heads/main");
+        assert_eq!(
+            fast_forward(&c1).unwrap(),
+            FfOutcome::Diverged {
+                ahead: 1,
+                behind: 2
+            }
+        );
+        assert_eq!(ref_oid(&c1, "refs/heads/main"), before);
+    }
+
+    #[test]
+    fn ff_no_upstream() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["checkout", "-b", "lokal"]);
+        assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::NoUpstream);
+    }
+
+    #[test]
+    fn ff_detached() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["checkout", "--detach"]);
+        assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::Detached);
     }
 }
