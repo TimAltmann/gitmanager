@@ -305,6 +305,18 @@ impl GitBusy {
     fn scans_repos(&self) -> bool {
         matches!(self, GitBusy::Scan | GitBusy::Fetch { .. })
     }
+
+    /// Pull oder Entfernen arbeitet gerade an diesem Pfad: ein Branch-Wechsel
+    /// dort muss warten (sonst setzt der Fast-Forward den falschen Branch um).
+    fn works_on(&self, path: &std::path::Path) -> bool {
+        let key = crate::config::AppConfig::repo_state_key(path);
+        match self {
+            GitBusy::Pull { repo: p } | GitBusy::Remove { path: p } => {
+                crate::config::AppConfig::repo_state_key(p) == key
+            }
+            _ => false,
+        }
+    }
 }
 
 pub struct MyApp {
@@ -909,7 +921,13 @@ impl MyApp {
         // Tray-Switches laufen headless: Main öffnet sich nie von selbst
         // (Dialog/Fehler bei Dirty/Konflikten warten in main, Popup bleibt offen).
         // Dedup: pro Repo nur der letzte Klick (keine verschwendeten Zwischen-Switches).
-        let pending = std::mem::take(&mut self.pending_branch_switches);
+        // Wechsel auf einem Pfad, an dem Pull/Entfernen gerade arbeitet,
+        // bleiben in der Queue und laufen nach dessen Ende.
+        let (deferred, pending): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.pending_branch_switches)
+                .into_iter()
+                .partition(|(path, _)| self.git_busy.works_on(path));
+        self.pending_branch_switches = deferred;
         if !pending.is_empty() {
             for (path, branch) in dedup_branch_switches(pending) {
                 if tray_branch_switch_opens_main_window() {
@@ -3304,6 +3322,35 @@ mod tests {
         app.poll_scan(&ctx);
         assert!(app.tray_dirty, "pending switch must mark tray dirty");
         assert!(app.pending_branch_switches.is_empty());
+    }
+
+    #[test]
+    fn pending_switch_waits_while_pull_or_remove_runs_on_that_path() {
+        let busy = std::path::PathBuf::from("/tmp/no-repo-busy");
+        let other = std::path::PathBuf::from("/tmp/no-repo-other");
+        let ctx = egui::Context::default();
+        for state in [
+            GitBusy::Pull { repo: busy.clone() },
+            GitBusy::Remove { path: busy.clone() },
+        ] {
+            let mut app = test_app();
+            app.set_git_busy(state.clone());
+            app.pending_branch_switches
+                .push((busy.clone(), "main".to_string()));
+            app.pending_branch_switches
+                .push((other.clone(), "main".to_string()));
+            app.poll_scan(&ctx);
+            // Switch auf dem belegten Pfad bleibt in der Queue, der andere läuft
+            assert_eq!(
+                app.pending_branch_switches,
+                vec![(busy.clone(), "main".to_string())],
+                "{state:?}"
+            );
+            // Nach dem Lauf wird er abgearbeitet
+            app.set_git_busy(GitBusy::Idle);
+            app.poll_scan(&ctx);
+            assert!(app.pending_branch_switches.is_empty(), "{state:?}");
+        }
     }
 
     #[test]

@@ -360,11 +360,20 @@ pub fn list_branches(path: &Path) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FfOutcome {
     UpToDate,
-    FastForwarded { commits: usize },
-    Dirty { files: usize },
-    Diverged { ahead: usize, behind: usize },
+    FastForwarded {
+        commits: usize,
+    },
+    Dirty {
+        files: usize,
+    },
+    Diverged {
+        ahead: usize,
+        behind: usize,
+    },
     NoUpstream,
     Detached,
+    /// HEAD oder Branch hat sich während des Abrufs geändert – nichts getan
+    Changed,
 }
 
 /// Zieht den aktuellen Branch per Fast-Forward auf seinen Upstream. Setzt nie
@@ -372,6 +381,12 @@ pub enum FfOutcome {
 /// Änderungen (`Dirty`) passiert nichts. Fetch-Fehler werden als `Err`
 /// durchgereicht.
 pub fn fast_forward(path: &Path) -> anyhow::Result<FfOutcome> {
+    fast_forward_inner(path, || {})
+}
+
+/// Wie [`fast_forward`]; `after_fetch` läuft direkt nach dem Fetch (Tests
+/// simulieren damit Änderungen während des Abrufs).
+fn fast_forward_inner(path: &Path, after_fetch: impl FnOnce()) -> anyhow::Result<FfOutcome> {
     let repo =
         Repository::open(path).map_err(|e| anyhow::anyhow!("Failed to open repository: {e}"))?;
     let (branch, detached) = get_branch(&repo);
@@ -391,16 +406,32 @@ pub fn fast_forward(path: &Path) -> anyhow::Result<FfOutcome> {
     if remote == "." {
         return Ok(FfOutcome::NoUpstream);
     }
+    let refname = format!("refs/heads/{branch}");
+    // Stand vor dem Fetch merken: danach wird nur umgesetzt, wenn HEAD und
+    // Branch noch genau so stehen (Compare-and-Swap).
+    let Ok(local_oid) = repo.refname_to_id(&refname) else {
+        return Ok(FfOutcome::NoUpstream);
+    };
+    drop(repo);
     let spec = format!("+refs/heads/{merge_branch}:refs/remotes/{remote}/{merge_branch}");
     fetch_refspecs(path, &remote, &[&spec])?;
+    after_fetch();
 
     // Nach dem Fetch neu öffnen, damit der Handle die neuen Refs sicher sieht.
     let repo = Repository::open(path)?;
-    let mut local = repo.find_branch(&branch, BranchType::Local)?;
+    // HEAD muss noch auf denselben Branch zeigen, der Branch auf denselben Commit
+    let head_same = repo
+        .find_reference("HEAD")
+        .ok()
+        .is_some_and(|h| h.symbolic_target().ok().flatten() == Some(refname.as_str()));
+    if !head_same || repo.refname_to_id(&refname).ok() != Some(local_oid) {
+        return Ok(FfOutcome::Changed);
+    }
+    let local = repo.find_branch(&branch, BranchType::Local)?;
     let Some(up_oid) = local.upstream().ok().and_then(|u| u.get().target()) else {
         return Ok(FfOutcome::NoUpstream);
     };
-    let (ahead, behind) = ahead_behind_in(&repo);
+    let (ahead, behind) = repo.graph_ahead_behind(local_oid, up_oid)?;
     if behind == 0 {
         return Ok(FfOutcome::UpToDate);
     }
@@ -417,9 +448,23 @@ pub fn fast_forward(path: &Path) -> anyhow::Result<FfOutcome> {
         target.as_object(),
         Some(git2::build::CheckoutBuilder::new().safe()),
     )?;
-    local
-        .get_mut()
-        .set_target(up_oid, "gitmanager: fast-forward")?;
+    // Ref nur umsetzen, wenn er noch auf `local_oid` steht.
+    if let Err(e) = repo.reference_matching(
+        &refname,
+        up_oid,
+        true,
+        local_oid,
+        "gitmanager: fast-forward",
+    ) {
+        // Arbeitsverzeichnis bestmöglich auf den alten Stand zurückholen
+        if let Ok(old) = repo.find_commit(local_oid) {
+            let _ = repo.checkout_tree(
+                old.as_object(),
+                Some(git2::build::CheckoutBuilder::new().safe()),
+            );
+        }
+        return Err(anyhow::anyhow!("Branch-Ref nicht aktualisiert: {e}"));
+    }
     Ok(FfOutcome::FastForwarded { commits: behind })
 }
 
@@ -6722,6 +6767,43 @@ mod tests {
         let c1 = origin_and_clone_with_feature(base.path());
         git_cmd(&c1, &["checkout", "--detach"]);
         assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::Detached);
+    }
+
+    #[test]
+    fn ff_head_switched_during_fetch_changes_nothing() {
+        let base = tempdir().unwrap();
+        let c1 = ff_setup(base.path());
+        let main_before = ref_oid(&c1, "refs/heads/main");
+        let feat_before = ref_oid(&c1, "refs/heads/feature/x");
+        // Zwischen Fetch und Umsetzen wechselt jemand den Branch.
+        let out = fast_forward_inner(&c1, || {
+            git_cmd(&c1, &["checkout", "feature/x"]);
+        })
+        .unwrap();
+        assert_eq!(out, FfOutcome::Changed);
+        assert_eq!(ref_oid(&c1, "refs/heads/main"), main_before);
+        assert_eq!(ref_oid(&c1, "refs/heads/feature/x"), feat_before);
+        assert_eq!(head_target(&c1), "refs/heads/feature/x");
+        assert!(c1.join("x.txt").exists());
+        assert!(!c1.join("n1.txt").exists());
+    }
+
+    #[test]
+    fn ff_branch_moved_during_fetch_changes_nothing() {
+        let base = tempdir().unwrap();
+        let c1 = ff_setup(base.path());
+        // Zwischen Fetch und Umsetzen entsteht ein neuer lokaler Commit.
+        let out = fast_forward_inner(&c1, || {
+            commit_file(&c1, "own.txt", "own\n", "own");
+        })
+        .unwrap();
+        assert_eq!(out, FfOutcome::Changed);
+        let repo = Repository::open(&c1).unwrap();
+        let main = repo.refname_to_id("refs/heads/main").unwrap();
+        let commit = repo.find_commit(main).unwrap();
+        assert_eq!(commit.summary().ok().flatten(), Some("own"));
+        assert!(c1.join("own.txt").exists());
+        assert!(!c1.join("n1.txt").exists());
     }
 
     /// Hauptrepo `c1` (origin + main) und ein CLI-Worktree `wt` auf neuem

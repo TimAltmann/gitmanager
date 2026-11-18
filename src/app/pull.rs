@@ -43,6 +43,7 @@ pub(super) fn pull_message(lang: Language, repo: &str, r: &anyhow::Result<FfOutc
         ),
         Ok(FfOutcome::NoUpstream) => tr_fmt(lang, "pull_no_upstream", &[repo]),
         Ok(FfOutcome::Detached) => tr_fmt(lang, "pull_detached", &[repo]),
+        Ok(FfOutcome::Changed) => tr_fmt(lang, "pull_changed", &[repo]),
         Err(e) => {
             let (raw, partial, is_fetch) = fetch_error_parts(e);
             // Auth-Hinweis nur bei echten Remote-Fehlern

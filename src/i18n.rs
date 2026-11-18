@@ -373,6 +373,8 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "pull_no_upstream") => "{}: kein Upstream-Branch eingerichtet".to_string(),
         (Language::En, "pull_detached") => "{}: detached HEAD – nothing to pull".to_string(),
         (Language::De, "pull_detached") => "{}: losgelöster HEAD – nichts zu pullen".to_string(),
+        (Language::En, "pull_changed") => "{}: branch changed while fetching – nothing changed".to_string(),
+        (Language::De, "pull_changed") => "{}: Branch hat sich während des Abrufs geändert – nichts geändert".to_string(),
         (Language::En, "wt_wait_busy") => "Waiting for the running scan/fetch…".to_string(),
         (Language::De, "wt_wait_busy") => "Warte auf laufenden Scan/Fetch…".to_string(),
         (Language::En, "wt_target_not_absolute") => "Please enter an absolute folder path.".to_string(),
