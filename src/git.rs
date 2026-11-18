@@ -991,6 +991,182 @@ fn git_cli_command(args: &[&str]) -> std::process::Command {
     cmd
 }
 
+/// Warum ein lokaler Branch gefahrlos gelöscht werden darf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub enum BranchSafety {
+    /// Upstream existiert und enthält alle lokalen Commits
+    Pushed,
+    /// Branch-Spitze ist schon im Default-Branch des Remotes enthalten
+    MergedIntoDefault,
+    /// Der Merge Request ist laut Hoster gemergt
+    MrMerged,
+}
+
+/// Prüft, ob ein lokaler Branch ohne Datenverlust gelöscht werden darf.
+/// `None` = nicht sicher (Aufrufer muss ausdrücklich bestätigen lassen).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn branch_safety(repo_path: &Path, branch: &str, mr_merged: bool) -> Option<BranchSafety> {
+    let repo = Repository::open(repo_path).ok()?;
+    let local = repo.find_branch(branch, BranchType::Local).ok()?;
+    let oid = local.get().target()?;
+    if let Some(up_oid) = local.upstream().ok().and_then(|u| u.get().target()) {
+        if let Ok((ahead, _)) = repo.graph_ahead_behind(oid, up_oid) {
+            if ahead == 0 {
+                return Some(BranchSafety::Pushed);
+            }
+        }
+    }
+    // Default-Branch des Remotes: origin/HEAD, sonst origin/main, origin/master
+    let mut defaults = Vec::new();
+    if let Ok(head) = repo.find_reference("refs/remotes/origin/HEAD") {
+        if let Ok(resolved) = head.resolve() {
+            defaults.extend(resolved.target());
+        }
+    }
+    for name in ["refs/remotes/origin/main", "refs/remotes/origin/master"] {
+        defaults.extend(repo.refname_to_id(name).ok());
+    }
+    let merged = defaults
+        .into_iter()
+        .any(|d| d == oid || repo.graph_descendant_of(d, oid).unwrap_or(false));
+    if merged {
+        return Some(BranchSafety::MergedIntoDefault);
+    }
+    mr_merged.then_some(BranchSafety::MrMerged)
+}
+
+/// Hat der Branch einen konfigurierten Upstream, dessen Remote-Branch aber
+/// nicht mehr existiert (nach `fetch --prune` gelöscht)?
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn upstream_gone(repo: &Repository, branch: &str) -> bool {
+    let Ok(cfg) = repo.config() else {
+        return false;
+    };
+    let remote = cfg.get_string(&format!("branch.{branch}.remote")).ok();
+    let merge = cfg.get_string(&format!("branch.{branch}.merge")).ok();
+    let (Some(remote), Some(merge)) = (remote, merge) else {
+        return false;
+    };
+    // Lokaler Upstream ("."): kein Remote-Tracking-Ref, nie „gone“.
+    if remote == "." {
+        return false;
+    }
+    let Some(name) = merge.strip_prefix("refs/heads/") else {
+        return false;
+    };
+    repo.find_reference(&format!("refs/remotes/{remote}/{name}"))
+        .is_err()
+}
+
+/// Lokale Branches mit verwaistem Upstream, ohne den aktuell ausgecheckten
+/// und ohne die in anderen Worktrees ausgecheckten.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn gone_local_branches(repo_path: &Path) -> Vec<String> {
+    let Ok(repo) = Repository::open(repo_path) else {
+        return Vec::new();
+    };
+    let mut checked_out: Vec<String> = Vec::new();
+    let mut note_head = |r: &Repository| {
+        if let Ok(head) = r.find_reference("HEAD") {
+            if let Some(name) = head
+                .symbolic_target()
+                .ok()
+                .flatten()
+                .and_then(|t| t.strip_prefix("refs/heads/"))
+            {
+                checked_out.push(name.to_string());
+            }
+        }
+    };
+    note_head(&repo);
+    // Aus einem Worktree heraus: auch das Hauptrepo und alle Geschwister
+    let main = Repository::open(repo.commondir()).ok();
+    let base = main.as_ref().unwrap_or(&repo);
+    if !base.is_bare() {
+        note_head(base);
+    }
+    if let Ok(names) = base.worktrees() {
+        for name in names.iter().flatten().flatten() {
+            if let Ok(wt) = base.find_worktree(name) {
+                if let Ok(wt_repo) = Repository::open_from_worktree(&wt) {
+                    note_head(&wt_repo);
+                }
+            }
+        }
+    }
+    let Ok(branches) = repo.branches(Some(BranchType::Local)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = branches
+        .flatten()
+        .filter_map(|(b, _)| b.name().ok().flatten().map(str::to_string))
+        .filter(|n| !checked_out.contains(n) && upstream_gone(&repo, n))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Hauptrepo eines Worktrees: Elternordner von `common_dir` (heißt er
+/// `.git`), sonst `common_dir` selbst (Bare-Repo).
+#[cfg_attr(not(test), allow(dead_code))]
+fn main_repo_of(common_dir: &Path) -> PathBuf {
+    if common_dir.file_name().is_some_and(|n| n == ".git") {
+        if let Some(parent) = common_dir.parent() {
+            return parent.to_path_buf();
+        }
+    }
+    common_dir.to_path_buf()
+}
+
+/// Entfernt einen Worktree über System-`git`. Ohne `force` verweigert git
+/// bei uncommitteten Änderungen (und gesperrten Worktrees). Existiert der
+/// Ordner schon nicht mehr, wird nur der verwaiste Eintrag geprunt. Der
+/// Branch wird nur gelöscht, wenn `delete_branch` gesetzt ist; sein
+/// `force_delete` entscheidet zwischen `-d` und `-D`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn remove_worktree(
+    worktree_path: &Path,
+    main_repo: &Path,
+    force: bool,
+    delete_branch: Option<(&str, bool)>,
+) -> anyhow::Result<()> {
+    let main_str = main_repo.display().to_string();
+    let path_str = worktree_path.display().to_string();
+    if worktree_path.exists() {
+        let mut args = vec!["-C", &main_str, "worktree", "remove"];
+        if force {
+            args.push("--force");
+        }
+        args.push("--");
+        args.push(&path_str);
+        run_git_cli(&args, "worktree remove", GIT_CLI_WORKTREE_TIMEOUT)?;
+    }
+    // Immer: räumt auch Einträge, deren Ordner von Hand gelöscht wurde
+    run_git_cli(
+        &["-C", &main_str, "worktree", "prune"],
+        "worktree prune",
+        GIT_CLI_WORKTREE_TIMEOUT,
+    )?;
+    if let Some((branch, force_delete)) = delete_branch {
+        delete_local_branch(main_repo, branch, force_delete)?;
+    }
+    Ok(())
+}
+
+/// Löscht einen lokalen Branch (`git branch -d`, mit `force` `-D`). Ohne
+/// `force` verweigert git bei ungemergten Commits.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn delete_local_branch(repo_path: &Path, branch: &str, force: bool) -> anyhow::Result<()> {
+    let repo_str = repo_path.display().to_string();
+    let flag = if force { "-D" } else { "-d" };
+    run_git_cli(
+        &["-C", &repo_str, "branch", flag, "--", branch],
+        &format!("branch {flag} '{branch}'"),
+        GIT_CLI_WORKTREE_TIMEOUT,
+    )
+}
+
 /// Strukturierter Fetch-Fehler (alle Remotes failed UND partielle Fehlschläge).
 /// Als anyhow-Error transportiert, damit die UI per [`is_partial_fetch_error`]
 /// ohne String-Parsing `fetch_partial` statt `fetch_failed` wählen kann und das
@@ -6451,5 +6627,158 @@ mod tests {
         let c1 = origin_and_clone_with_feature(base.path());
         git_cmd(&c1, &["checkout", "--detach"]);
         assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::Detached);
+    }
+
+    /// Hauptrepo `c1` (origin + main) und ein CLI-Worktree `wt` auf neuem
+    /// Branch `feat` (ein eigener Commit, ungepusht).
+    fn repo_with_feat_worktree(base: &Path) -> (PathBuf, PathBuf) {
+        let c1 = origin_and_clone_with_feature(base);
+        let wt = base.join("wt");
+        git_cmd(
+            &c1,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat",
+                wt.to_str().unwrap(),
+                "main",
+            ],
+        );
+        git_identity(&wt);
+        commit_file(&wt, "f.txt", "f\n", "own commit");
+        (c1, wt)
+    }
+
+    fn worktree_listing(repo: &Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[test]
+    fn remove_clean_worktree() {
+        let base = tempdir().unwrap();
+        let (c1, wt) = repo_with_feat_worktree(base.path());
+        remove_worktree(&wt, &c1, false, None).unwrap();
+        assert!(!wt.exists());
+        assert!(!worktree_listing(&c1).contains("wt"));
+        assert!(ref_exists(&c1, "refs/heads/feat"), "Branch bleibt");
+    }
+
+    #[test]
+    fn remove_dirty_worktree_needs_force() {
+        let base = tempdir().unwrap();
+        let (c1, wt) = repo_with_feat_worktree(base.path());
+        fs::write(wt.join("f.txt"), "geändert\n").unwrap();
+        assert!(remove_worktree(&wt, &c1, false, None).is_err());
+        assert!(wt.exists(), "dirty Worktree bleibt ohne force");
+        remove_worktree(&wt, &c1, true, None).unwrap();
+        assert!(!wt.exists());
+    }
+
+    #[test]
+    fn remove_worktree_already_deleted_folder() {
+        let base = tempdir().unwrap();
+        let (c1, wt) = repo_with_feat_worktree(base.path());
+        fs::remove_dir_all(&wt).unwrap();
+        remove_worktree(&wt, &c1, false, None).unwrap();
+        assert!(!worktree_listing(&c1).contains("wt"));
+        assert!(!c1.join(".git").join("worktrees").join("wt").exists());
+    }
+
+    #[test]
+    fn remove_worktree_deletes_branch() {
+        let base = tempdir().unwrap();
+        let (c1, wt) = repo_with_feat_worktree(base.path());
+        // Ungemergter Branch: ohne force Fehler (Worktree ist dann schon weg)
+        let err = remove_worktree(&wt, &c1, false, Some(("feat", false))).unwrap_err();
+        assert!(err.to_string().contains("feat"), "{err}");
+        assert!(!wt.exists());
+        assert!(ref_exists(&c1, "refs/heads/feat"));
+        delete_local_branch(&c1, "feat", true).unwrap();
+        assert!(!ref_exists(&c1, "refs/heads/feat"));
+        // Direkt mit force_delete
+        git_cmd(
+            &c1,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat2",
+                wt.to_str().unwrap(),
+                "main",
+            ],
+        );
+        git_identity(&wt);
+        commit_file(&wt, "g.txt", "g\n", "own");
+        remove_worktree(&wt, &c1, false, Some(("feat2", true))).unwrap();
+        assert!(!ref_exists(&c1, "refs/heads/feat2"));
+        // Gemergter Branch: -d genügt
+        git_cmd(&c1, &["branch", "merged", "main"]);
+        delete_local_branch(&c1, "merged", false).unwrap();
+        assert!(!ref_exists(&c1, "refs/heads/merged"));
+    }
+
+    #[test]
+    fn branch_safety_cases() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        // gepusht (Upstream vorhanden, ahead == 0)
+        assert_eq!(
+            branch_safety(&c1, "feature/x", false),
+            Some(BranchSafety::Pushed)
+        );
+        // in origin/main gemergt, Upstream weg
+        git_cmd(&c1, &["branch", "old", "main"]);
+        assert_eq!(
+            branch_safety(&c1, "old", false),
+            Some(BranchSafety::MergedIntoDefault)
+        );
+        // eigener Commit ohne Upstream
+        git_cmd(&c1, &["checkout", "-b", "own", "main"]);
+        commit_file(&c1, "o.txt", "o\n", "own");
+        git_cmd(&c1, &["checkout", "main"]);
+        assert_eq!(
+            branch_safety(&c1, "own", true),
+            Some(BranchSafety::MrMerged)
+        );
+        assert_eq!(branch_safety(&c1, "own", false), None);
+        // eigener Commit zusätzlich zum Upstream: nicht „Pushed“
+        git_cmd(&c1, &["checkout", "feature/x"]);
+        commit_file(&c1, "x2.txt", "x2\n", "unpushed");
+        git_cmd(&c1, &["checkout", "main"]);
+        assert_eq!(branch_safety(&c1, "feature/x", false), None);
+    }
+
+    #[test]
+    fn gone_upstream_detected() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let repo = Repository::open(&c1).unwrap();
+        assert!(!upstream_gone(&repo, "feature/x"));
+        assert!(!upstream_gone(&repo, "nonexistent"));
+        // Remote-Branch löschen (über zweiten Klon) und prunen
+        git_cmd(base.path(), &["clone", "origin.git", "c2"]);
+        git_cmd(
+            &base.path().join("c2"),
+            &["push", "origin", "--delete", "feature/x"],
+        );
+        git_cmd(&c1, &["fetch", "--prune", "origin"]);
+        let repo = Repository::open(&c1).unwrap();
+        assert!(upstream_gone(&repo, "feature/x"));
+        assert!(!upstream_gone(&repo, "main"));
+        assert_eq!(gone_local_branches(&c1), vec!["feature/x".to_string()]);
+        // Aktueller Branch wird nie vorgeschlagen
+        git_cmd(&c1, &["checkout", "feature/x"]);
+        assert!(gone_local_branches(&c1).is_empty());
+        // … und ebenso keiner, der in einem Worktree ausgecheckt ist
+        git_cmd(&c1, &["checkout", "main"]);
+        let wt = base.path().join("wt");
+        git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "feature/x"]);
+        assert!(gone_local_branches(&c1).is_empty());
     }
 }
