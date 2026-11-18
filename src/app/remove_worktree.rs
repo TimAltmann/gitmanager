@@ -286,15 +286,19 @@ impl MyApp {
                 self.remove_ui.dialog = None;
             }
             let shown = done.path.display().to_string();
+            // Auch nach Fehler: ein halb entfernter Worktree soll sichtbar
+            // werden. Scan zuerst — er leert `self.error` beim Start.
+            self.start_scan();
             match &done.result {
                 Ok(()) => self.set_status(tr_fmt(lang, "rm_wt_done", &[&shown])),
                 Err(e) => {
                     eprintln!("Worktree entfernen fehlgeschlagen für {shown}: {e:#}");
-                    self.error = Some(tr_fmt(lang, "rm_wt_failed", &[&shown, &format!("{e:#}")]));
+                    let text = tr_fmt(lang, "rm_wt_failed", &[&shown, &format!("{e:#}")]);
+                    // Banner bleibt über den Rescan hinweg stehen
+                    self.error = Some(text.clone());
+                    self.error_after_scan = Some(text);
                 }
             }
-            // Auch nach Fehler: ein halb entfernter Worktree soll sichtbar werden
-            self.start_scan();
             ctx.request_repaint();
         }
         if matches!(self.git_busy, GitBusy::Remove { .. }) {
@@ -395,6 +399,47 @@ mod tests {
         assert!(app.error.is_none(), "{:?}", app.error);
         assert!(app.remove_ui.dialog.is_none());
         assert_eq!(app.git_busy, GitBusy::Scan, "Rescan angestoßen");
+    }
+
+    #[test]
+    fn remove_error_survives_the_rescan() {
+        let mut app = test_app();
+        let lang = app.config.language;
+        let path = PathBuf::from("/x/wt");
+        app.set_git_busy(GitBusy::Remove { path: path.clone() });
+        app.remove_ui
+            .tx
+            .send(RemoveDone {
+                path: path.clone(),
+                result: Err(anyhow::anyhow!("kaputt")),
+            })
+            .unwrap();
+        app.poll_remove_worktree(&egui::Context::default());
+        let text = tr_fmt(
+            lang,
+            "rm_wt_failed",
+            &[&path.display().to_string(), "kaputt"],
+        );
+        assert_eq!(app.error.as_deref(), Some(text.as_str()));
+        assert_eq!(app.git_busy, GitBusy::Scan, "Rescan angestoßen");
+
+        let ctx = egui::Context::default();
+        let wait_scan = |app: &mut MyApp| {
+            for _ in 0..400 {
+                app.poll_scan(&ctx);
+                if app.git_busy != GitBusy::Scan {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            panic!("Scan nicht fertig");
+        };
+        wait_scan(&mut app);
+        assert_eq!(app.error.as_deref(), Some(text.as_str()), "nach Scan");
+        // Ein späterer Scan löscht ihn (Fehler gilt für dieses Entfernen)
+        app.start_scan();
+        wait_scan(&mut app);
+        assert_eq!(app.error, None);
     }
 
     fn setup(tmp: &Path) -> (MyApp, PathBuf, PathBuf) {
