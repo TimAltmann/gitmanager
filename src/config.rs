@@ -185,6 +185,9 @@ pub struct MrConfig {
     /// Gilt ebenso für `after_checkout_default = Fixed(Agent(id))`.
     #[serde(deserialize_with = "de_after_checkout_last")]
     pub after_checkout_last: AfterAction,
+    /// Windows-Benachrichtigung bei neuer Review-Anfrage, Erwähnung und
+    /// neuen Kommentaren anderer
+    pub notify: bool,
 }
 
 impl Default for MrConfig {
@@ -202,6 +205,7 @@ impl Default for MrConfig {
             review_root: None,
             after_checkout_default: AfterCheckoutPref::LastUsed,
             after_checkout_last: default_after_checkout_last(),
+            notify: true,
         }
     }
 }
@@ -3486,6 +3490,7 @@ mod tests {
             review_root: Some(r"C:\Dev\Reviews".to_string()),
             after_checkout_default: AfterCheckoutPref::Fixed(AfterAction::Shell),
             after_checkout_last: AfterAction::Agent("codex".to_string()),
+            notify: false,
         };
         let json = serde_json::to_string(&mr).unwrap();
         let de: MrConfig = serde_json::from_str(&json).unwrap();

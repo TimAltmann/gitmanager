@@ -77,6 +77,11 @@ pub(super) enum MrResult {
     },
     /// Abruf-Worker vor `send` abgestürzt: alter Stand bleibt
     Aborted { reason_key: &'static str },
+    /// Letzte Kommentare zu MRs mit neuen Kommentaren (Benachrichtigung)
+    Notes {
+        me: Option<String>,
+        jobs: Vec<super::mr_activity::NotesJob>,
+    },
 }
 
 impl MyApp {
@@ -460,6 +465,7 @@ impl MyApp {
     /// Übernimmt Ergebnisse der MR-Worker (aus `logic()`, auch bei
     /// verstecktem Fenster).
     pub(super) fn poll_mr(&mut self, ctx: &egui::Context) {
+        self.poll_mr_toasts(ctx);
         while let Ok(result) = self.mr_rx.try_recv() {
             match result {
                 MrResult::Loaded { epoch, data } => self.on_mr_loaded(epoch, *data),
@@ -480,6 +486,7 @@ impl MyApp {
                     self.on_mr_discovered(hosts, glab_error)
                 }
                 MrResult::Aborted { reason_key } => self.on_mr_aborted(reason_key),
+                MrResult::Notes { me, jobs } => self.on_mr_notes(me, jobs),
             }
             ctx.request_repaint();
         }
@@ -506,6 +513,7 @@ impl MyApp {
             Some(kind) => self.set_glab_missing(kind),
             None => {
                 self.mr_snapshot = Some(Box::new(data.snapshot));
+                self.on_mr_activity(&data.me_per_host);
                 // E21: Badge im Tray beim nächsten Sync aktualisieren
                 self.mark_tray_dirty();
                 // „Gemergt“ mit auffrischen, sonst beim nächsten Umschalten
@@ -531,6 +539,7 @@ impl MyApp {
                 match page {
                     Ok(page) => {
                         merge_more_page(snap, page);
+                        self.mr_activity.store.annotate(snap);
                         // Review-Anfragen der Seite ändern das Badge (E21)
                         self.mark_tray_dirty();
                     }
@@ -599,8 +608,10 @@ impl MyApp {
     /// Intervall-Abruf, nur bei sichtbarem Fenster (aus `logic()`).
     pub(super) fn maybe_refresh_mr(&mut self, ctx: &egui::Context) {
         let interval = self.config.merge_requests.refresh_interval_min;
+        // Mit Benachrichtigungen auch bei verstecktem Fenster (Tray)
+        let hidden_ok = self.config.merge_requests.notify;
         if interval == 0
-            || !self.window_visible
+            || (!self.window_visible && !hidden_ok)
             || self.mr_glab_missing
             || self.mr_hosts.gitlab_hosts.is_empty()
         {
@@ -815,6 +826,9 @@ impl MyApp {
     /// Klicks der MR-Ansicht; Auschecken und „Bereits ausgecheckt“ siehe
     /// `mr_checkout.rs`, den Einstellungs-Tab `mr_settings.rs`.
     fn handle_mr_actions(&mut self, ctx: &egui::Context, actions: MrViewActions) {
+        if let Some((host_key, id)) = &actions.seen {
+            self.mark_mr_seen(host_key, id);
+        }
         if let Some(url) = actions.open_url {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
@@ -1421,6 +1435,8 @@ pub(super) mod tests {
         let (mut app, glab) = fake_app();
         with_extra_host(&mut app);
         let ctx = egui::Context::default();
+        // Ohne Benachrichtigungen kein Abruf im Hintergrund
+        app.config.merge_requests.notify = false;
         app.window_visible = false;
         app.maybe_refresh_mr(&ctx);
         assert!(!app.mr_loading);
@@ -1429,6 +1445,19 @@ pub(super) mod tests {
         glab.inner().push(not_installed());
         app.maybe_refresh_mr(&ctx);
         assert!(app.mr_loading, "sichtbar und fällig → Abruf");
+        settle(&mut app);
+    }
+
+    #[test]
+    fn auto_refresh_while_hidden_with_notifications() {
+        let (mut app, glab) = fake_app();
+        with_extra_host(&mut app);
+        let ctx = egui::Context::default();
+        app.config.merge_requests.notify = true;
+        app.window_visible = false;
+        glab.inner().push(not_installed());
+        app.maybe_refresh_mr(&ctx);
+        assert!(app.mr_loading, "Benachrichtigungen → Abruf auch im Tray");
         settle(&mut app);
     }
 

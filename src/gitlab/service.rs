@@ -4,6 +4,7 @@
 //! sowie Token prüfen und in glab speichern (E3). Alle Aufrufe gehen über
 //! `GlabRunner`; das Token nur als `SecretString` in Kind-Env bzw. Kind-stdin.
 
+use super::activity::NoteInfo;
 use super::glab::{
     classify, glab_version, EnvValue, GlabErrorKind, GlabOutput, GlabRequest, GlabRunner,
     StdinBody, CI_ENV, DEFAULT_TIMEOUT, SECRET_ENV, TOKEN_ENV,
@@ -750,6 +751,29 @@ pub fn fetch_merged(
             })
             .collect()
     })
+}
+
+/// Letzte Kommentare je MR `(projektpfad, iid)` eines Hosts, in der
+/// Reihenfolge von `mrs`; bei Fehlern leer (die Benachrichtigung fällt dann
+/// allgemeiner aus).
+pub fn fetch_recent_notes(
+    runner: &dyn GlabRunner,
+    host: &str,
+    mrs: &[(String, u64)],
+) -> Vec<Vec<NoteInfo>> {
+    let mut schema = schema_for(host);
+    let mut out = Vec::with_capacity(mrs.len());
+    for (query, chunk) in graphql::recent_notes(mrs)
+        .into_iter()
+        .zip(mrs.chunks(graphql::NOTES_CHUNK))
+    {
+        match run_query(runner, host, &mut schema, query) {
+            Ok(got) => out.extend(graphql::parse_recent_notes(&got.data, chunk.len())),
+            Err(_) => out.extend(chunk.iter().map(|_| Vec::new())),
+        }
+    }
+    store_schema(host, schema);
+    out
 }
 
 /// Seite aus der Antwort; fehlt die Liste, zählen die Meldungen als Fehler

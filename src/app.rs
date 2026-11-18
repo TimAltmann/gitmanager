@@ -1,5 +1,6 @@
 mod claude_sessions;
 mod merge_requests;
+mod mr_activity;
 mod mr_checkout;
 mod mr_settings;
 mod new_worktree;
@@ -398,6 +399,8 @@ pub struct MyApp {
     /// Zählt neue Abrufe „Gemergt“; Ergebnisse älterer werden verworfen
     mr_merged_gen: u64,
     mr_tx: Sender<MrResult>,
+    /// Neue Kommentare/Commits je MR und Benachrichtigungen
+    mr_activity: mr_activity::MrActivityState,
     mr_rx: Receiver<MrResult>,
     mr_view: MrViewState,
     /// glab fehlt oder ist zu alt: keine weiteren glab-Aufrufe in der Sitzung
@@ -521,6 +524,7 @@ impl MyApp {
             mr_merged_loading: None,
             mr_merged_gen: 0,
             mr_tx,
+            mr_activity: mr_activity::MrActivityState::load_default(),
             mr_rx,
             mr_view,
             mr_glab_missing: false,
@@ -3124,6 +3128,7 @@ mod tests {
             mr_merged_loading: None,
             mr_merged_gen: 0,
             mr_tx,
+            mr_activity: mr_activity::MrActivityState::default(),
             mr_rx,
             mr_view,
             mr_glab_missing: false,

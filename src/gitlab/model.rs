@@ -210,6 +210,12 @@ pub struct MergeRequest {
     pub my_review: Option<MyReview>,
     /// Projekt hat einen gescannten Klon (auch wenn abgewählt)
     pub local: bool,
+    /// Kommentare von Nutzern; `None` = nicht abfragbar
+    pub user_notes_count: Option<u32>,
+    /// Commits im MR; `None` = nicht abfragbar
+    pub commit_count: Option<u32>,
+    /// Neues seit dem letzten Öffnen (`MrActivityStore::annotate`)
+    pub activity: super::activity::Activity,
 }
 
 impl MergeRequest {
@@ -240,6 +246,8 @@ impl MergeRequest {
             detailed_merge_status,
             reviewers,
             state: _,
+            user_notes_count,
+            commit_count,
         } = node;
         let iid = iid?;
         let project_path = project_path
@@ -300,6 +308,9 @@ impl MergeRequest {
             reasons: Vec::new(),
             my_review,
             local: false,
+            user_notes_count,
+            commit_count,
+            activity: Default::default(),
         })
     }
 
@@ -1301,6 +1312,7 @@ mod tests {
                 detailed_merge_status: None,
                 reviewers: Some(Vec::new()),
                 state: None,
+                ..Default::default()
             })
         }
 

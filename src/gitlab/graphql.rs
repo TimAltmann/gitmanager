@@ -3,6 +3,7 @@
 //! Schema-Fallback und Parser in Rohmodelle mit `Option` überall. Die
 //! Domänenlogik (Klassifizierung, Sortierung) folgt in `model.rs`.
 
+use super::activity::NoteInfo;
 use super::glab::{
     classify, graphql_messages, GlabErrorKind, GlabOutput, GlabRequest, GlabRunner, StdinBody,
 };
@@ -438,7 +439,8 @@ fn mr_fragment() -> Fragment {
     // Pflichtfeld ist, und dann fällt die ganze `headPipeline` weg.
     items.push(Field::object("headPipeline", &["Pipeline"], scalars("status path")).into());
     items.extend(scalars(
-        "resolvableDiscussionsCount resolvedDiscussionsCount detailedMergeStatus",
+        "resolvableDiscussionsCount resolvedDiscussionsCount detailedMergeStatus \
+         userNotesCount commitCount",
     ));
     let mut reviewer = scalars("username name");
     let interaction = Field::object(
@@ -629,6 +631,70 @@ pub fn uninvolved_page(pages: &[(String, String)], me: &str) -> Vec<Query> {
             query
                 .var("me", "String", Some(Value::from(me)))
                 .fragment(mr_fragment())
+        })
+        .collect()
+}
+
+/// MRs je Abfrage für `recent_notes` (Komplexität)
+pub const NOTES_CHUNK: usize = 5;
+/// Letzte Kommentare je MR für Benachrichtigungen
+const NOTES_LAST: u32 = 20;
+
+/// `RECENT_NOTES`: die letzten Kommentare je MR `(projektpfad, iid)`, bis
+/// zu `NOTES_CHUNK` MRs per Alias (`m0`, `m1`, …) je Abfrage.
+pub fn recent_notes(mrs: &[(String, u64)]) -> Vec<Query> {
+    mrs.chunks(NOTES_CHUNK)
+        .map(|chunk| {
+            let mut query = Query::new("GmRecentNotes", Vec::new());
+            for (i, (path, iid)) in chunk.iter().enumerate() {
+                let (p, n) = (format!("p{i}"), format!("i{i}"));
+                let mut note = scalars("system body");
+                note.push(Field::object("author", AUTHOR, scalars("username name")).into());
+                let notes = Field::object(
+                    "notes",
+                    &["NoteConnection"],
+                    vec![Field::object("nodes", &["Note"], note).into()],
+                )
+                .arg("last", NOTES_LAST);
+                let mr = Field::object("mergeRequest", &["MergeRequest"], vec![notes.into()])
+                    .arg("iid", format!("${n}"));
+                let project = Field::object("project", &["Project"], vec![mr.into()])
+                    .alias(format!("m{i}"))
+                    .arg("fullPath", format!("${p}"));
+                query.root.items.push(project.into());
+                query = query.var(p, "ID!", Some(Value::from(path.as_str()))).var(
+                    n,
+                    "String!",
+                    Some(Value::from(iid.to_string())),
+                );
+            }
+            query
+        })
+        .collect()
+}
+
+/// Kommentare aus der Antwort von `recent_notes`, je Alias-Index (älteste
+/// zuerst); fehlende MRs (keine Rechte) sind leer.
+pub fn parse_recent_notes(data: &Value, count: usize) -> Vec<Vec<NoteInfo>> {
+    (0..count)
+        .map(|i| {
+            let mr = data
+                .get(format!("m{i}"))
+                .and_then(|p| p.get("mergeRequest"))
+                .unwrap_or(&Value::Null);
+            nodes(mr, "notes")
+                .unwrap_or_default()
+                .into_iter()
+                .map(|n| {
+                    let author = n.get("author").unwrap_or(&Value::Null);
+                    NoteInfo {
+                        author_username: text(author, "username").unwrap_or_default(),
+                        author_name: text(author, "name").unwrap_or_default(),
+                        body: text(n, "body").unwrap_or_default(),
+                        system: flag(n, "system").unwrap_or(false),
+                    }
+                })
+                .collect()
         })
         .collect()
 }
@@ -976,6 +1042,10 @@ pub struct MrNode {
     pub reviewers: Option<Vec<ReviewerNode>>,
     /// Nur bei Erwähnungen (`opened`, `closed`, `merged`, …)
     pub state: Option<String>,
+    /// Kommentare von Nutzern (ohne Systemnotizen), für „neue Kommentare“
+    pub user_notes_count: Option<u32>,
+    /// Commits im MR, für „neue Commits“
+    pub commit_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1171,6 +1241,8 @@ fn parse_mr(v: &Value) -> Option<MrNode> {
                 .collect()
         }),
         state: text(v, "state"),
+        user_notes_count: number(v, "userNotesCount"),
+        commit_count: number(v, "commitCount"),
     })
 }
 
@@ -1520,6 +1592,7 @@ mod tests {
                 },
             ]),
             state: None,
+            ..Default::default()
         };
         assert_eq!(mr, &want);
 
@@ -2207,10 +2280,34 @@ mod tests {
     }
 
     #[test]
+    fn recent_notes_query_and_parse() {
+        let mrs: Vec<(String, u64)> = (1..=7).map(|i| (format!("g/p{i}"), i)).collect();
+        let queries = recent_notes(&mrs);
+        assert_eq!(queries.len(), 2);
+        let text = queries[0].text();
+        assert!(
+            text.contains("m0: project(fullPath: $p0) { mergeRequest(iid: $i0) { notes(last: 20) { nodes { system body author { username name } } } } }"),
+            "{text}"
+        );
+        assert_eq!(queries[1].variables["i1"], "7");
+        let data = serde_json::json!({
+            "m0": {"mergeRequest": {"notes": {"nodes": [
+                {"system": false, "body": "hallo", "author": {"username": "anna", "name": "Anna"}},
+                null
+            ]}}},
+            "m1": null
+        });
+        let parsed = parse_recent_notes(&data, 2);
+        assert_eq!(parsed[0].len(), 1);
+        assert_eq!(parsed[0][0].author_username, "anna");
+        assert!(parsed[1].is_empty());
+    }
+
+    #[test]
     fn dashboard_text_contains_mr_fragment() {
         let text = dashboard().text();
         assert!(text.starts_with("query GmDashboard { metadata { version enterprise } currentUser { username name authored: authoredMergeRequests(state: opened, first: 50, sort: UPDATED_DESC) { pageInfo { hasNextPage endCursor } nodes { ...Mr } } reviewing: reviewRequestedMergeRequests("), "{text}");
-        let fragment = "fragment Mr on MergeRequest { id iid title draft webUrl webPath updatedAt sourceBranch targetBranch sourceBranchExists diffHeadSha project { fullPath } sourceProject { fullPath } author { username name } approvedBy { nodes { username name bot } } approvalsRequired approvalsLeft headPipeline { status path } resolvableDiscussionsCount resolvedDiscussionsCount detailedMergeStatus reviewers { nodes { username name mergeRequestInteraction { reviewState } } } }";
+        let fragment = "fragment Mr on MergeRequest { id iid title draft webUrl webPath updatedAt sourceBranch targetBranch sourceBranchExists diffHeadSha project { fullPath } sourceProject { fullPath } author { username name } approvedBy { nodes { username name bot } } approvalsRequired approvalsLeft headPipeline { status path } resolvableDiscussionsCount resolvedDiscussionsCount detailedMergeStatus userNotesCount commitCount reviewers { nodes { username name mergeRequestInteraction { reviewState } } } }";
         assert!(text.ends_with(fragment), "{text}");
         assert_eq!(text.matches("...Mr").count(), 2);
         assert_eq!(text.matches("fragment Mr").count(), 1);

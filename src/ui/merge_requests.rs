@@ -8,6 +8,7 @@
 
 use crate::config::{AfterAction, AfterCheckoutPref, AgentProfile, IdeConfig, MrConfig, Theme};
 use crate::git::RepoInfo;
+use crate::gitlab::activity::Activity;
 use crate::gitlab::checkout::{
     build_checkout_menu, mr_folder_name, review_root_dir, safe_folder_name, BlockReason,
     CheckoutBrief, CheckoutMenu, CloneIndex, CloneOption, CloneState, MenuLookup, MrRefInfo,
@@ -212,6 +213,8 @@ pub struct MrViewActions {
     pub load_more_merged: bool,
     /// Einstellungen direkt im Tab „Merge Requests“ öffnen (Deep-Link)
     pub open_settings_mr_tab: bool,
+    /// MR in dieser Zeile geöffnet (`host_key`, `id`): Neues gilt als gesehen
+    pub seen: Option<(String, String)>,
 }
 
 /// Was die Ansicht je Frame braucht; baut `app.rs` (Task 10).
@@ -1498,6 +1501,11 @@ fn draw_row(
     button: &ButtonKind,
     actions: &mut MrViewActions,
 ) {
+    let before = (
+        actions.open_url.is_some(),
+        actions.checkout.is_some(),
+        actions.open_existing.is_some(),
+    );
     ui.push_id((&mr.host_key, &mr.id), |ui| {
         divider(ui, v);
         let margin = if kind == RowKind::Uninvolved {
@@ -1577,6 +1585,41 @@ fn draw_row(
             }
         });
     });
+    // Browser, Auschecken oder Öffnen im Klon (Agent, IDE …): MR gesehen
+    let after = (
+        actions.open_url.is_some(),
+        actions.checkout.is_some(),
+        actions.open_existing.is_some(),
+    );
+    if after != before && merged.is_none() {
+        actions.seen = Some((mr.host_key.clone(), mr.id.clone()));
+    }
+}
+
+/// Pills „{n} neue Kommentare“, „{n} neue Commits“ bzw. „neu gepusht“.
+fn activity_labels(lang: Language, a: &Activity) -> Vec<(String, ImageSource<'static>)> {
+    let mut out = Vec::new();
+    if a.new_notes > 0 {
+        let text = count_text(
+            lang,
+            a.new_notes as usize,
+            "mr_new_comment_one",
+            "mr_new_comments",
+        );
+        out.push((text, ICON_CHAT_DOTS));
+    }
+    if a.new_commits > 0 {
+        let text = count_text(
+            lang,
+            a.new_commits as usize,
+            "mr_new_commit_one",
+            "mr_new_commits",
+        );
+        out.push((text, ICON_BRANCH));
+    } else if a.rewritten {
+        out.push((tr(lang, "mr_new_push"), ICON_BRANCH));
+    }
+    out
 }
 
 /// Eine MR-Zeile beim Zeichnen.
@@ -1609,6 +1652,7 @@ impl Row<'_> {
         let draft = mr.draft.then(|| tr(lang, "mr_draft"));
         let ready_label = (self.kind == RowKind::Mine && ready(mr)).then(|| tr(lang, "mr_ready"));
         let merged_label = (self.kind == RowKind::Merged).then(|| tr(lang, "mr_seg_merged"));
+        let news = activity_labels(lang, &mr.activity);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             // Rest der Zeile zuerst messen: der Titel kürzt, iid und Chips bleiben
@@ -1621,6 +1665,9 @@ impl Row<'_> {
             }
             if let Some(m) = &merged_label {
                 suffix += pill_width(ui, m, true) + 8.0;
+            }
+            for (label, _) in &news {
+                suffix += pill_width(ui, label, true) + 8.0;
             }
             if self.kind == RowKind::Uninvolved {
                 suffix += 26.0 + text_width(ui, &mr.author.name, FontId::proportional(11.0)) + 8.0;
@@ -1668,6 +1715,15 @@ impl Row<'_> {
                     PillStyle::filled(p.pill_bg, p.pill_text),
                     Some((ICON_PULL_REQUEST, p.pill_text)),
                 );
+            }
+            for (label, icon) in &news {
+                pill(
+                    ui,
+                    label,
+                    PillStyle::filled(p.badge, p.badge_text),
+                    Some((icon.clone(), p.badge_text)),
+                )
+                .on_hover_text(tr(lang, "mr_new_tt"));
             }
             if self.kind == RowKind::Uninvolved {
                 author(ui, self.v, &mr.author.name, p.text2);
