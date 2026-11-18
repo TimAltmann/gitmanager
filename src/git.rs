@@ -101,6 +101,41 @@ pub struct RepoInfo {
     /// Verknüpfter Worktree (`git worktree add`), kein eigener Klon: nie
     /// Basis-Klon für neue Worktrees (K1). Scan-only, Default `false`.
     pub is_linked_worktree: bool,
+    /// Letzter Commit auf HEAD (Betreff, Autor, Zeit). Scan-only, Default `None`.
+    pub last_commit: Option<LastCommit>,
+    /// Zustand des Repos für den Status-Chip. Scan-only, Default `Dirty`
+    /// bei `dirty`, sonst `Clean`.
+    pub state: RepoState,
+}
+
+/// Letzter Commit auf HEAD (`RepoInfo.last_commit`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastCommit {
+    pub summary: String,
+    pub author: String,
+    /// Unix-Sekunden
+    pub time: i64,
+}
+
+/// Art einer laufenden Git-Operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InProgressKind {
+    #[default]
+    Other,
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+/// Zustand eines Repos: Konflikte vor laufender Operation vor Dirty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RepoState {
+    #[default]
+    Clean,
+    Dirty,
+    Conflict,
+    InProgress(InProgressKind),
 }
 
 /// Anderer Worktree eines Repos (`RepoInfo.worktrees`).
@@ -136,6 +171,12 @@ impl RepoInfo {
             dirty_files: usize::from(dirty),
             worktrees: Vec::new(),
             is_linked_worktree: false,
+            last_commit: None,
+            state: if dirty {
+                RepoState::Dirty
+            } else {
+                RepoState::Clean
+            },
         }
     }
 
@@ -216,6 +257,44 @@ fn dirty_count(repo: &Repository) -> usize {
 /// Detaillierter Status: staged, unstaged, untracked, Konflikte
 pub fn has_merge_conflicts(repo: &Repository) -> bool {
     repo.index().map(|idx| idx.has_conflicts()).unwrap_or(false)
+}
+
+/// Zustand des Repos: Konflikte zuerst, dann laufende Operation, dann Dirty.
+pub fn repo_state_of(repo: &Repository, dirty_files: usize) -> RepoState {
+    use git2::RepositoryState as S;
+    if has_merge_conflicts(repo) {
+        return RepoState::Conflict;
+    }
+    match repo.state() {
+        S::Clean => {
+            if dirty_files > 0 {
+                RepoState::Dirty
+            } else {
+                RepoState::Clean
+            }
+        }
+        S::Merge => RepoState::InProgress(InProgressKind::Merge),
+        S::Rebase
+        | S::RebaseInteractive
+        | S::RebaseMerge
+        | S::ApplyMailbox
+        | S::ApplyMailboxOrRebase => RepoState::InProgress(InProgressKind::Rebase),
+        S::CherryPick | S::CherryPickSequence => RepoState::InProgress(InProgressKind::CherryPick),
+        S::Revert | S::RevertSequence => RepoState::InProgress(InProgressKind::Revert),
+        _ => RepoState::InProgress(InProgressKind::Other),
+    }
+}
+
+/// Letzter Commit auf HEAD; `None` bei leerem Repo oder Lesefehler.
+pub fn last_commit_of(repo: &Repository) -> Option<LastCommit> {
+    let commit = repo.head().ok()?.peel_to_commit().ok()?;
+    let summary = commit.summary().ok().flatten()?.to_string();
+    let author = commit.author().name().ok()?.to_string();
+    Some(LastCommit {
+        summary,
+        author,
+        time: commit.time().seconds(),
+    })
 }
 
 pub fn is_merge_in_progress(repo: &Repository) -> bool {
@@ -2252,6 +2331,8 @@ pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
     info.dirty_files = dirty_files;
     info.worktrees = read_worktree_heads(&repo);
     info.is_linked_worktree = repo.is_worktree();
+    info.state = repo_state_of(&repo, dirty_files);
+    info.last_commit = last_commit_of(&repo);
     Some(info)
 }
 
@@ -5546,6 +5627,68 @@ mod tests {
         clone_with_git_cli(origin.to_str().unwrap(), &target, "feature/x").unwrap();
         assert_eq!(head_target(&target), "refs/heads/feature/x");
         assert!(target.join("x.txt").exists());
+    }
+
+    #[test]
+    fn repo_state_clean_dirty() {
+        let dir = tempdir().unwrap();
+        let repo = init_repo_with_commit(dir.path(), "main");
+        assert_eq!(repo_state_of(&repo, 0), RepoState::Clean);
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        assert_eq!(repo_state_of(&repo, dirty_count(&repo)), RepoState::Dirty);
+    }
+
+    #[test]
+    fn repo_state_conflict_and_merge() {
+        let dir = tempdir().unwrap();
+        let p = dir.path();
+        init_repo_with_commit(p, "main");
+        commit_file(p, "a.txt", "base\n", "base");
+        git_cmd(p, &["checkout", "-b", "other"]);
+        commit_file(p, "a.txt", "other\n", "other");
+        git_cmd(p, &["checkout", "main"]);
+        commit_file(p, "a.txt", "main\n", "main");
+        // Merge scheitert mit Konflikt: Fehler bewusst ignorieren
+        let _ = std::process::Command::new("git")
+            .args(["merge", "other"])
+            .current_dir(p)
+            .output();
+        let repo = Repository::open(p).unwrap();
+        assert_eq!(repo_state_of(&repo, 1), RepoState::Conflict);
+        fs::write(p.join("a.txt"), "resolved\n").unwrap();
+        git_cmd(p, &["add", "a.txt"]);
+        let repo = Repository::open(p).unwrap();
+        assert_eq!(
+            repo_state_of(&repo, 1),
+            RepoState::InProgress(InProgressKind::Merge)
+        );
+    }
+
+    #[test]
+    fn last_commit_reads_head() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        commit_file(dir.path(), "a.txt", "x", "Fix rounding\n\nbody");
+        let repo = Repository::open(dir.path()).unwrap();
+        let lc = last_commit_of(&repo).unwrap();
+        assert_eq!(lc.summary, "Fix rounding");
+        assert_eq!(lc.author, "Test");
+        assert!(lc.time > 0);
+        let empty = tempdir().unwrap();
+        let repo = Repository::init(empty.path()).unwrap();
+        assert!(last_commit_of(&repo).is_none());
+    }
+
+    #[test]
+    fn get_repo_info_fills_state_and_last_commit() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        let info = get_repo_info(dir.path().to_path_buf()).unwrap();
+        assert_eq!(info.state, RepoState::Clean);
+        assert_eq!(info.last_commit.unwrap().summary, "initial");
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        let info = get_repo_info(dir.path().to_path_buf()).unwrap();
+        assert_eq!(info.state, RepoState::Dirty);
     }
 
     #[test]
