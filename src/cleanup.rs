@@ -45,6 +45,11 @@ pub struct CleanupCandidate {
     /// Worktree: darf sein Branch gelöscht werden? Branch-Eintrag: `None` =
     /// nicht gemergt, Löschen verliert lokale Commits (`-D`)
     pub branch_safety: Option<BranchSafety>,
+    /// Spitze des Branches bei der Suche; ändert sie sich bis zur
+    /// Ausführung, wird der Branch nicht gelöscht
+    pub tip: Option<git2::Oid>,
+    /// Kopf-Commits der gemergten MRs dieses Branches (Worktrees)
+    pub merged_heads: Vec<git2::Oid>,
 }
 
 impl CleanupCandidate {
@@ -59,7 +64,9 @@ impl CleanupCandidate {
         }
     }
 
-    /// Ist der MR des Worktree-Branches gemergt?
+    /// Ist der MR des Worktree-Branches gemergt? (Prüfhilfe der Tests; die
+    /// Branch-Sicherheit hängt an `merged_heads`, nicht am Grund.)
+    #[cfg(test)]
     pub fn mr_merged(&self) -> bool {
         self.reasons
             .iter()
@@ -128,6 +135,8 @@ pub fn collect_candidates(
             selected: repo.dirty_files == 0 && repo.ahead == 0,
             delete_branch: false,
             branch_safety: None,
+            tip: None,
+            merged_heads: Vec::new(),
         });
     }
     for repo in repos.iter().filter(|r| !r.is_linked_worktree) {
@@ -156,6 +165,8 @@ pub fn collect_candidates(
                 selected: true,
                 delete_branch: false,
                 branch_safety: None,
+                tip: None,
+                merged_heads: Vec::new(),
             });
         }
     }

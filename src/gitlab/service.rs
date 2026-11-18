@@ -776,14 +776,19 @@ pub fn fetch_recent_notes(
     out
 }
 
+/// Quell-Branch → gemergte MRs `(iid, kopf-sha)` eines Projekts.
+pub type MergedByBranch = HashMap<String, Vec<(u64, String)>>;
+
 /// Je Eingabeprojekt `(pfad, quell-branches)` eines Hosts: gemergter
-/// Quell-Branch → MR-iid, in der Reihenfolge von `projects`. Der erste
-/// Fehler bricht ab.
+/// Quell-Branch → alle gemergten MRs `(iid, kopf-sha)`, höchste iid zuerst,
+/// in der Reihenfolge von `projects`. MRs ohne Kopf-SHA fallen weg (ohne
+/// ihn lässt sich nicht prüfen, ob der lokale Branch darin enthalten ist).
+/// Der erste Fehler bricht ab.
 pub fn fetch_merged_branches(
     runner: &dyn GlabRunner,
     host: &str,
     projects: &[(String, Vec<String>)],
-) -> Result<Vec<HashMap<String, u64>>, GlabErrorKind> {
+) -> Result<Vec<MergedByBranch>, GlabErrorKind> {
     // Projekte ohne Branches werden nicht abgefragt (leere Map an ihrer Stelle).
     let asked: Vec<(String, Vec<String>)> = projects
         .iter()
@@ -791,7 +796,7 @@ pub fn fetch_merged_branches(
         .cloned()
         .collect();
     let mut schema = schema_for(host);
-    let mut found: Vec<HashMap<String, u64>> = Vec::with_capacity(asked.len());
+    let mut found: Vec<MergedByBranch> = Vec::with_capacity(asked.len());
     let mut failure = None;
     for (query, chunk) in graphql::merged_by_branches(&asked)
         .into_iter()
@@ -817,11 +822,15 @@ pub fn fetch_merged_branches(
             break;
         }
         for mrs in graphql::parse_merged_by_branches(&got.data, chunk.len()) {
-            let mut map: HashMap<String, u64> = HashMap::new();
-            for (iid, branch) in mrs {
-                // mehrere gemergte MRs je Branch: höchste iid, deterministisch
-                let slot = map.entry(branch).or_insert(iid);
-                *slot = (*slot).max(iid);
+            let mut map = MergedByBranch::new();
+            for (iid, branch, sha) in mrs {
+                if let Some(sha) = sha {
+                    map.entry(branch).or_default().push((iid, sha));
+                }
+            }
+            // mehrere gemergte MRs je Branch: höchste iid zuerst, deterministisch
+            for list in map.values_mut() {
+                list.sort_by(|a, b| b.cmp(a));
             }
             found.push(map);
         }
@@ -2928,7 +2937,7 @@ mod tests {
         let runner = gated();
         let fake = runner.inner();
         fake.push(gql(
-            r#"{"data":{"p0":{"mergeRequests":{"nodes":[{"iid":"134","sourceBranch":"feature/a"}]}},"p1":null}}"#,
+            r#"{"data":{"p0":{"mergeRequests":{"nodes":[{"iid":"134","sourceBranch":"feature/a","diffHeadSha":"aaa"}]}},"p1":null}}"#,
         ));
         let projects = vec![
             ("acme/shop".to_string(), vec!["feature/a".to_string()]),
@@ -2939,7 +2948,10 @@ mod tests {
         assert_eq!(ops(&calls), vec!["GmMergedBranches"]);
         assert_eq!(variables(&calls[0])["b0"], json!(["feature/a"]));
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].get("feature/a"), Some(&134));
+        assert_eq!(
+            got[0].get("feature/a"),
+            Some(&vec![(134, "aaa".to_string())])
+        );
         assert!(got[1].is_empty());
 
         // Fehler der Abfrage wird durchgereicht
@@ -2975,14 +2987,22 @@ mod tests {
     }
 
     #[test]
-    fn fetch_merged_branches_keeps_highest_iid() {
+    fn fetch_merged_branches_keeps_all_mrs_with_head_sha() {
         let runner = gated();
         runner.inner().push(gql(
-            r#"{"data":{"p0":{"mergeRequests":{"nodes":[{"iid":"9","sourceBranch":"b"},{"iid":"12","sourceBranch":"b"},{"iid":"10","sourceBranch":"b"}]}}}}"#,
+            r#"{"data":{"p0":{"mergeRequests":{"nodes":[{"iid":"9","sourceBranch":"b","diffHeadSha":"s9"},{"iid":"12","sourceBranch":"b","diffHeadSha":"s12"},{"iid":"10","sourceBranch":"b"},{"iid":"3","sourceBranch":"c"}]}}}}"#,
         ));
-        let projects = vec![("acme/shop".to_string(), vec!["b".to_string()])];
+        let projects = vec![(
+            "acme/shop".to_string(),
+            vec!["b".to_string(), "c".to_string()],
+        )];
         let got = fetch_merged_branches(&runner, HOST, &projects).expect("ok");
-        assert_eq!(got[0].get("b"), Some(&12));
+        // höchste iid zuerst; ohne Kopf-SHA nicht verwertbar
+        assert_eq!(
+            got[0].get("b"),
+            Some(&vec![(12, "s12".to_string()), (9, "s9".to_string())])
+        );
+        assert_eq!(got[0].get("c"), None);
     }
 
     #[test]
@@ -2990,7 +3010,7 @@ mod tests {
         let runner = gated();
         let fake = runner.inner();
         fake.push(gql(
-            r#"{"data":{"p0":{"mergeRequests":{"nodes":[{"iid":"3","sourceBranch":"b"}]}}}}"#,
+            r#"{"data":{"p0":{"mergeRequests":{"nodes":[{"iid":"3","sourceBranch":"b","diffHeadSha":"s3"}]}}}}"#,
         ));
         let projects = vec![
             ("acme/leer".to_string(), Vec::new()),
@@ -2999,7 +3019,7 @@ mod tests {
         let got = fetch_merged_branches(&runner, HOST, &projects).expect("ok");
         assert_eq!(got.len(), 2);
         assert!(got[0].is_empty());
-        assert_eq!(got[1].get("b"), Some(&3));
+        assert_eq!(got[1].get("b"), Some(&vec![(3, "s3".to_string())]));
         let calls = fake.take_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(variables(&calls[0])["p0"], json!("acme/shop"));

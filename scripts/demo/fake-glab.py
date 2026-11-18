@@ -193,7 +193,8 @@ def graphql(request):
             } for p in paths]},
         }}
     if op == "GmMergedBranches":
-        merged = {"acme/shop-backend": [("134", "feature/region-prices")]}
+        merged = {"acme/shop-backend": [
+            ("134", "feature/region-prices", "3f2a9c1d7e5b4a8f9c0d1e2f3a4b5c6d7e8f9a0b")]}
         data = {}
         for i in range(len(variables) // 2 + 1):
             path = variables.get(f"p{i}")
@@ -201,8 +202,8 @@ def graphql(request):
                 continue
             wanted = variables.get(f"b{i}") or []
             data[f"p{i}"] = {"mergeRequests": {"nodes": [
-                {"iid": iid, "sourceBranch": branch}
-                for iid, branch in merged.get(path.lower(), []) if branch in wanted]}}
+                {"iid": iid, "sourceBranch": branch, "diffHeadSha": sha}
+                for iid, branch, sha in merged.get(path.lower(), []) if branch in wanted]}}
         return {"data": data}
     return {"errors": [{"message": f"fake-glab: unknown query {op or '?'}"}]}
 

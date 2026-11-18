@@ -1017,7 +1017,16 @@ impl BranchSafety {
 
 /// Prüft, ob ein lokaler Branch ohne Datenverlust gelöscht werden darf.
 /// `None` = nicht sicher (Aufrufer muss ausdrücklich bestätigen lassen).
-pub fn branch_safety(repo_path: &Path, branch: &str, mr_merged: bool) -> Option<BranchSafety> {
+///
+/// `merged_heads`: Kopf-Commits gemergter MRs dieses Branches. `MrMerged`
+/// gilt nur, wenn die lokale Spitze einer davon ist oder darin enthalten
+/// ist; spätere lokale Commits (Branch weiterbenutzt, Name wiederverwendet)
+/// machen den Branch unsicher. Ein lokal unbekannter Kopf zählt nicht.
+pub fn branch_safety(
+    repo_path: &Path,
+    branch: &str,
+    merged_heads: &[git2::Oid],
+) -> Option<BranchSafety> {
     let repo = Repository::open(repo_path).ok()?;
     let local = repo.find_branch(branch, BranchType::Local).ok()?;
     let oid = local.get().target()?;
@@ -1044,7 +1053,12 @@ pub fn branch_safety(repo_path: &Path, branch: &str, mr_merged: bool) -> Option<
     if merged {
         return Some(BranchSafety::MergedIntoDefault);
     }
-    mr_merged.then_some(BranchSafety::MrMerged)
+    let in_mr = merged_heads.iter().any(|&head| {
+        head == oid
+            || (repo.find_commit(head).is_ok()
+                && repo.graph_descendant_of(head, oid).unwrap_or(false))
+    });
+    in_mr.then_some(BranchSafety::MrMerged)
 }
 
 /// Hat der Branch einen konfigurierten Upstream, dessen Remote-Branch aber
@@ -6810,29 +6824,60 @@ mod tests {
         let c1 = origin_and_clone_with_feature(base.path());
         // gepusht (Upstream vorhanden, ahead == 0)
         assert_eq!(
-            branch_safety(&c1, "feature/x", false),
+            branch_safety(&c1, "feature/x", &[]),
             Some(BranchSafety::Pushed)
         );
         // in origin/main gemergt, Upstream weg
         git_cmd(&c1, &["branch", "old", "main"]);
         assert_eq!(
-            branch_safety(&c1, "old", false),
+            branch_safety(&c1, "old", &[]),
             Some(BranchSafety::MergedIntoDefault)
         );
         // eigener Commit ohne Upstream
         git_cmd(&c1, &["checkout", "-b", "own", "main"]);
         commit_file(&c1, "o.txt", "o\n", "own");
         git_cmd(&c1, &["checkout", "main"]);
-        assert_eq!(
-            branch_safety(&c1, "own", true),
-            Some(BranchSafety::MrMerged)
-        );
-        assert_eq!(branch_safety(&c1, "own", false), None);
+        assert_eq!(branch_safety(&c1, "own", &[]), None);
         // eigener Commit zusätzlich zum Upstream: nicht „Pushed“
         git_cmd(&c1, &["checkout", "feature/x"]);
         commit_file(&c1, "x2.txt", "x2\n", "unpushed");
         git_cmd(&c1, &["checkout", "main"]);
-        assert_eq!(branch_safety(&c1, "feature/x", false), None);
+        assert_eq!(branch_safety(&c1, "feature/x", &[]), None);
+    }
+
+    #[test]
+    fn branch_safety_mr_merged_needs_matching_head() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["checkout", "-b", "own", "main"]);
+        commit_file(&c1, "o.txt", "o\n", "own");
+        let repo = Repository::open(&c1).unwrap();
+        let tip = repo.refname_to_id("refs/heads/own").unwrap();
+        // MR-Kopf == Spitze
+        assert_eq!(
+            branch_safety(&c1, "own", &[tip]),
+            Some(BranchSafety::MrMerged)
+        );
+        // Spitze ist Vorfahre des MR-Kopfs (MR hatte später mehr Commits)
+        commit_file(&c1, "o2.txt", "o2\n", "later in mr");
+        let later = repo.refname_to_id("refs/heads/own").unwrap();
+        git_cmd(&c1, &["reset", "-q", "--hard", &tip.to_string()]);
+        assert_eq!(
+            branch_safety(&c1, "own", &[later]),
+            Some(BranchSafety::MrMerged)
+        );
+        // Lokaler Commit über den MR-Kopf hinaus: nicht sicher
+        commit_file(&c1, "o3.txt", "o3\n", "after merge");
+        assert_eq!(branch_safety(&c1, "own", &[tip]), None);
+        // MR-Kopf lokal unbekannt: nicht sicher
+        let missing = git2::Oid::from_str("1234567890abcdef1234567890abcdef12345678").unwrap();
+        git_cmd(&c1, &["reset", "-q", "--hard", &tip.to_string()]);
+        assert_eq!(branch_safety(&c1, "own", &[missing]), None);
+        assert_eq!(
+            branch_safety(&c1, "own", &[missing, tip]),
+            Some(BranchSafety::MrMerged)
+        );
+        git_cmd(&c1, &["checkout", "main"]);
     }
 
     #[test]
@@ -6881,7 +6926,7 @@ mod tests {
         git_cmd(&c1, &["push", "origin", "merged:main"]);
         git_cmd(&c1, &["fetch", "origin"]);
         git_cmd(&c1, &["checkout", "-b", "other", "main"]);
-        let safety = branch_safety(&c1, "merged", false).unwrap();
+        let safety = branch_safety(&c1, "merged", &[]).unwrap();
         assert_eq!(safety, BranchSafety::MergedIntoDefault);
         // `-d` würde hier am HEAD des Hauptrepos scheitern
         assert!(delete_local_branch(&c1, "merged", false).is_err());

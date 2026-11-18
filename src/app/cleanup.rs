@@ -172,22 +172,28 @@ fn source_names(path: &Path, branch: &str) -> Vec<String> {
 }
 
 /// Gemergte MRs der Worktree-Branches je GitLab-Host (Quellprojekt =
-/// Projekt des `origin`-Remotes). Liefert Worktree-Pfad → iid und ob die
-/// Prüfung (ganz oder teilweise) nicht möglich war.
+/// Projekt des `origin`-Remotes).
+struct MergedInfo {
+    /// Worktree-Pfad → höchste gemergte MR-iid (Grund im Dialog)
+    iids: HashMap<PathBuf, u64>,
+    /// Worktree-Pfad → Kopf-Commits aller gemergten MRs (Branch-Sicherheit)
+    heads: HashMap<PathBuf, Vec<git2::Oid>>,
+    /// Prüfung trotz GitLab-Projekt nicht möglich (kein glab, Fehler)
+    unavailable: bool,
+}
+
 fn merged_worktrees(
     repos: &[RepoInfo],
     hosts: &HostMap,
     runner: Option<&dyn GlabRunner>,
-) -> (HashMap<PathBuf, u64>, bool) {
+) -> MergedInfo {
     // Host → Projekt → (Worktree, Namen)
     type Wanted = BTreeMap<String, BTreeMap<String, Vec<(PathBuf, Vec<String>)>>>;
     let mut wanted: Wanted = BTreeMap::new();
-    let mut any_worktree = false;
     for repo in repos.iter().filter(|r| r.is_linked_worktree) {
         if repo.is_detached || repo.branch.is_empty() {
             continue;
         }
-        any_worktree = true;
         let origin = repo
             .remotes
             .iter()
@@ -207,10 +213,16 @@ fn merged_worktrees(
             .or_default()
             .push((repo.path.clone(), source_names(&repo.path, &repo.branch)));
     }
-    let mut merged = HashMap::new();
-    let mut unavailable = any_worktree && (runner.is_none() || hosts.gitlab_hosts.is_empty());
+    // Ohne Worktree auf einem GitLab-Projekt entfällt der Grund still;
+    // der Hinweis gilt nur, wenn GitLab gefragt werden müsste, aber nicht kann
+    let mut info = MergedInfo {
+        iids: HashMap::new(),
+        heads: HashMap::new(),
+        unavailable: false,
+    };
     let Some(runner) = runner else {
-        return (merged, unavailable);
+        info.unavailable = !wanted.is_empty();
+        return info;
     };
     for (host, projects) in wanted {
         let query: Vec<(String, Vec<String>)> = projects
@@ -232,23 +244,40 @@ fn merged_worktrees(
             Ok(Ok(maps)) => {
                 for (worktrees, map) in projects.values().zip(maps) {
                     for (path, names) in worktrees {
-                        if let Some(&iid) = names.iter().find_map(|n| map.get(n)) {
-                            merged.insert(path.clone(), iid);
-                        }
+                        let mrs: Vec<&(u64, String)> =
+                            names.iter().filter_map(|n| map.get(n)).flatten().collect();
+                        let Some(iid) = mrs.iter().map(|(iid, _)| *iid).max() else {
+                            continue;
+                        };
+                        info.iids.insert(path.clone(), iid);
+                        // Unlesbare SHAs zählen nicht (Branch bleibt unsicher)
+                        let heads = mrs
+                            .iter()
+                            .filter_map(|(_, sha)| git2::Oid::from_str(sha).ok())
+                            .collect();
+                        info.heads.insert(path.clone(), heads);
                     }
                 }
             }
             Ok(Err(kind)) => {
                 eprintln!("Aufräumen: gemergte MRs auf {host} nicht abrufbar: {kind:?}");
-                unavailable = true;
+                info.unavailable = true;
             }
             Err(_) => {
                 eprintln!("Aufräumen: Abfrage gemergter MRs auf {host} abgestürzt");
-                unavailable = true;
+                info.unavailable = true;
             }
         }
     }
-    (merged, unavailable)
+    info
+}
+
+/// Spitze eines lokalen Branches.
+fn branch_tip(repo: &Path, branch: &str) -> Option<git2::Oid> {
+    git2::Repository::open(repo)
+        .ok()?
+        .refname_to_id(&format!("refs/heads/{branch}"))
+        .ok()
 }
 
 /// Kandidaten aus frisch gelesenen Repos (ohne Fetch), inklusive der
@@ -259,19 +288,24 @@ pub(super) fn find_candidates(
     runner: Option<&dyn GlabRunner>,
 ) -> CleanupScan {
     let gone = gone_branches(repos);
-    let (merged, gitlab_unavailable) = merged_worktrees(repos, hosts, runner);
-    let mut candidates = collect_candidates(repos, &gone, &merged);
+    let merged = merged_worktrees(repos, hosts, runner);
+    let gitlab_unavailable = merged.unavailable;
+    let mut candidates = collect_candidates(repos, &gone, &merged.iids);
     for c in &mut candidates {
-        let mr_merged = c.mr_merged();
         let (unreachable, safety) = match &c.target {
-            CleanupTarget::Worktree { path, main, branch } => (
-                git::head_unreachable(path),
-                branch
-                    .as_deref()
-                    .and_then(|b| git::branch_safety(main, b, mr_merged)),
-            ),
+            CleanupTarget::Worktree { path, main, branch } => {
+                c.merged_heads = merged.heads.get(path).cloned().unwrap_or_default();
+                c.tip = branch.as_deref().and_then(|b| branch_tip(main, b));
+                (
+                    git::head_unreachable(path),
+                    branch
+                        .as_deref()
+                        .and_then(|b| git::branch_safety(main, b, &c.merged_heads)),
+                )
+            }
             CleanupTarget::Branch { repo, branch } => {
-                (false, git::branch_safety(repo, branch, false))
+                c.tip = branch_tip(repo, branch);
+                (false, git::branch_safety(repo, branch, &[]))
             }
         };
         c.apply_checks(unreachable, safety);
@@ -335,8 +369,12 @@ fn execute_worktree(
     // `--force` nur, wenn der Eintrag eine Warnung zeigte und angehakt wurde
     git::remove_worktree(path, main, c.needs_force(), None)?;
     if let (true, Some(b)) = (c.delete_branch && c.can_delete_branch(), branch) {
-        // Erst löschen, wenn der Branch noch genauso sicher ist wie angezeigt
-        let fresh = git::branch_safety(main, b, c.mr_merged());
+        // Erst löschen, wenn der Branch noch auf demselben Commit steht und
+        // genauso sicher ist wie angezeigt
+        if c.tip.is_none() || branch_tip(main, b) != c.tip {
+            return Ok(CleanupOutcome::BranchKept);
+        }
+        let fresh = git::branch_safety(main, b, &c.merged_heads);
         let Some(safety) = fresh.filter(|s| Some(*s) == c.branch_safety) else {
             return Ok(CleanupOutcome::BranchKept);
         };
@@ -354,7 +392,12 @@ fn execute_branch(
     if !git::gone_local_branches(repo).iter().any(|b| b == branch) {
         return Ok(CleanupOutcome::Changed);
     }
-    let fresh = git::branch_safety(repo, branch, false);
+    // Neuer Commit seit der Anzeige: auch ein angehakter „nicht gemergt“-
+    // Eintrag galt nur für den damals gezeigten Stand
+    if c.tip.is_none() || branch_tip(repo, branch) != c.tip {
+        return Ok(CleanupOutcome::Changed);
+    }
+    let fresh = git::branch_safety(repo, branch, &[]);
     let force = match (c.branch_safety, fresh) {
         // Als sicher gezeigt: muss genauso sicher geblieben sein
         (Some(shown), Some(now)) if shown == now => now.needs_force_delete(),
@@ -824,15 +867,33 @@ mod tests {
             .all(|c| c.reasons == vec![CleanupReason::UpstreamGone]));
         assert_eq!(scan.candidates.len(), 2, "{:?}", scan.candidates);
 
-        // Ohne glab (`None`) ebenso, ohne Aufruf
+        // Ohne glab (`None`) bei bekanntem GitLab-Host ebenso, ohne Aufruf
         let scan = find_candidates(&repos, &hosts, None);
         assert!(scan.gitlab_unavailable);
         assert_eq!(scan.candidates.len(), 2);
 
-        // Mit Antwort: Grund „MR gemergt“, Branch dann sicher per MR
+        // Ohne GitLab-Host (z. B. nur GitHub): Grund entfällt still
+        let scan = find_candidates(&repos, &HostMap::default(), None);
+        assert!(!scan.gitlab_unavailable);
+        let scan = find_candidates(&repos, &HostMap::default(), Some(&runner));
+        assert!(!scan.gitlab_unavailable);
+        assert_eq!(runner.inner().pending(), 0);
+
+        // MR ohne Kopf-SHA ist nicht verwertbar: kein Grund „MR gemergt“
         runner.inner().push(FakeReply::http(
             200,
             r#"{"data":{"p0":{"mergeRequests":{"nodes":[{"iid":"9","sourceBranch":"feat"}]}}}}"#,
+        ));
+        let scan = find_candidates(&repos, &hosts, Some(&runner));
+        assert!(!scan.gitlab_unavailable && !scan.candidates[0].mr_merged());
+
+        // Mit Antwort samt Kopf: Grund „MR gemergt“
+        let head = rev(&main, "feat");
+        runner.inner().push(FakeReply::http(
+            200,
+            &format!(
+                r#"{{"data":{{"p0":{{"mergeRequests":{{"nodes":[{{"iid":"9","sourceBranch":"feat","diffHeadSha":"{head}"}}]}}}}}}}}"#
+            ),
         ));
         let scan = find_candidates(&repos, &hosts, Some(&runner));
         assert!(!scan.gitlab_unavailable);
@@ -874,7 +935,7 @@ mod tests {
         wait(&mut app, CleanupPhase::Ready);
         {
             let d = app.cleanup_ui.dialog.as_ref().unwrap();
-            assert!(d.gitlab_unavailable, "kein GitLab-Host bekannt");
+            assert!(!d.gitlab_unavailable, "ohne GitLab-Host still");
             let targets: Vec<&CleanupTarget> = d.candidates.iter().map(|c| &c.target).collect();
             assert_eq!(targets.len(), 2, "{:?}", d.candidates);
             assert!(d.candidates.iter().all(|c| c.selected));
@@ -937,8 +998,110 @@ mod tests {
             .clone();
         assert_eq!(old.branch_safety, None);
         assert!(old.needs_force() && !old.selected, "vorab abgewählt");
-        // Ausdrücklich angehakt: `-D`
+        // Nach der Anzeige ein weiterer Commit: übersprungen, nichts verloren
+        git(&main, &["checkout", "-q", "old"]);
+        git(
+            &main,
+            &["commit", "-q", "--allow-empty", "-m", "noch einer"],
+        );
+        git(&main, &["checkout", "-q", "main"]);
+        assert_eq!(execute(&old), CleanupOutcome::Changed);
+        assert!(branch_exists(&main, "old"));
+        // Neu angezeigt und ausdrücklich angehakt: `-D`
+        let scan = find_candidates(&repos(&main, &wt), &HostMap::default(), None);
+        let old = scan
+            .candidates
+            .iter()
+            .find(|c| matches!(&c.target, CleanupTarget::Branch { branch, .. } if branch == "old"))
+            .unwrap()
+            .clone();
         assert_eq!(execute(&old), CleanupOutcome::Ok);
         assert!(!branch_exists(&main, "old"));
+    }
+
+    fn rev(dir: &Path, r: &str) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", r])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn gitlab_hosts() -> HostMap {
+        let mut hosts = HostMap::default();
+        hosts.remotes.insert(
+            "gitlab.example.com".into(),
+            HostTarget::GitLab("gitlab.example.com".into()),
+        );
+        hosts.gitlab_hosts = vec!["gitlab.example.com".into()];
+        hosts
+    }
+
+    /// Review-Befund: MR mit Kopf = alte Spitze gemergt, danach lokal
+    /// weitergearbeitet. Der Branch darf nicht als sicher gelten.
+    #[test]
+    fn merged_mr_with_later_local_commit_keeps_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, wt) = setup(tmp.path());
+        let merged_head = rev(&wt, "HEAD");
+        git(
+            &wt,
+            &["commit", "-q", "--allow-empty", "-m", "nach dem merge"],
+        );
+        git(&main, &["fetch", "-q", "--prune", "origin"]);
+        let mut repos = repos(&main, &wt);
+        repos[1].remotes = vec![RemoteInfo::new(
+            "origin",
+            "https://gitlab.example.com/acme/shop.git",
+        )];
+        let runner = GatedRunner::new(FakeGlab::new());
+        runner.inner().push(FakeReply::http(
+            200,
+            &format!(
+                r#"{{"data":{{"p0":{{"mergeRequests":{{"nodes":[{{"iid":"9","sourceBranch":"feat","diffHeadSha":"{merged_head}"}}]}}}}}}}}"#
+            ),
+        ));
+        let scan = find_candidates(&repos, &gitlab_hosts(), Some(&runner));
+        assert!(!scan.gitlab_unavailable);
+        let c = scan
+            .candidates
+            .iter()
+            .find(|c| matches!(c.target, CleanupTarget::Worktree { .. }))
+            .expect("Worktree angeboten")
+            .clone();
+        assert!(c.mr_merged());
+        assert_eq!(c.branch_safety, None);
+        assert!(!c.can_delete_branch() && !c.delete_branch);
+        assert_eq!(execute(&c), CleanupOutcome::Ok);
+        assert!(!wt.exists(), "Worktree selbst ist sauber");
+        assert!(branch_exists(&main, "feat"), "Commit nach dem Merge bleibt");
+
+        // Gegenprobe: Kopf == Spitze → per MR sicher
+        let mut c2 = c.clone();
+        c2.merged_heads = vec![git2::Oid::from_str(&rev(&main, "feat")).unwrap()];
+        assert_eq!(
+            git::branch_safety(&main, "feat", &c2.merged_heads),
+            Some(git::BranchSafety::MrMerged)
+        );
+    }
+
+    #[test]
+    fn worktree_branch_with_new_commit_after_scan_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, wt) = setup(tmp.path());
+        git(&main, &["fetch", "-q", "--prune", "origin"]);
+        let scan = find_candidates(&repos(&main, &wt), &HostMap::default(), None);
+        let mut c = scan.candidates[0].clone();
+        assert!(c.delete_branch);
+        // Gleich sicher, aber andere Spitze (z. B. Commit, der auch im
+        // Default-Branch liegt): Branch bleibt trotzdem
+        git(&wt, &["commit", "-q", "--allow-empty", "-m", "neu"]);
+        git(&main, &["update-ref", "refs/remotes/origin/main", "feat"]);
+        c.ahead = 0;
+        assert_eq!(execute(&c), CleanupOutcome::BranchKept);
+        assert!(!wt.exists());
+        assert!(branch_exists(&main, "feat"));
     }
 }

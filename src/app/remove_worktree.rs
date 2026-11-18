@@ -55,10 +55,10 @@ impl RemoveDialog {
     pub fn new(repo: &RepoInfo, claude_running: bool) -> Self {
         let main = git::main_repo_of(&repo.common_dir);
         let branch = (!repo.is_detached && !repo.branch.is_empty()).then(|| repo.branch.clone());
-        // Der MR-Status kommt erst über „Aufräumen“: hier `mr_merged = false`
+        // Der MR-Status kommt erst über „Aufräumen“: hier ohne gemergte MR-Köpfe
         let safety = branch
             .as_deref()
-            .and_then(|b| git::branch_safety(&main, b, false));
+            .and_then(|b| git::branch_safety(&main, b, &[]));
         Self {
             path: repo.path.clone(),
             main,
@@ -252,7 +252,7 @@ impl MyApp {
                 git::remove_worktree(&path, &main, force, None)?;
                 // Branch erst löschen, wenn er noch genauso sicher ist wie angezeigt
                 if let Some((b, force_delete)) = &branch {
-                    if git::branch_safety(&main, b, false) != expected {
+                    if git::branch_safety(&main, b, &[]) != expected {
                         anyhow::bail!(
                             "branch '{b}' changed meanwhile and was not deleted; \
                              the worktree itself was removed"

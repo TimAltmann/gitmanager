@@ -719,10 +719,12 @@ pub fn merged_by_branches(projects: &[(String, Vec<String>)]) -> Vec<Query> {
                 let mrs = Field::object(
                     "mergeRequests",
                     &["MergeRequestConnection"],
-                    vec![
-                        Field::object("nodes", &["MergeRequest"], scalars("iid sourceBranch"))
-                            .into(),
-                    ],
+                    vec![Field::object(
+                        "nodes",
+                        &["MergeRequest"],
+                        scalars("iid sourceBranch diffHeadSha"),
+                    )
+                    .into()],
                 )
                 .arg("state", "merged")
                 .arg("sourceBranches", format!("${b}"))
@@ -742,9 +744,12 @@ pub fn merged_by_branches(projects: &[(String, Vec<String>)]) -> Vec<Query> {
         .collect()
 }
 
-/// `(iid, quell-branch)` der gemergten MRs je Alias-Index; fehlende
-/// Projekte (keine Rechte) sind leer.
-pub fn parse_merged_by_branches(data: &Value, count: usize) -> Vec<Vec<(u64, String)>> {
+/// `(iid, quell-branch, kopf-sha)` der gemergten MRs je Alias-Index;
+/// fehlende Projekte (keine Rechte) sind leer.
+pub fn parse_merged_by_branches(
+    data: &Value,
+    count: usize,
+) -> Vec<Vec<(u64, String, Option<String>)>> {
     (0..count)
         .map(|i| {
             let project = data.get(format!("p{i}")).unwrap_or(&Value::Null);
@@ -753,7 +758,7 @@ pub fn parse_merged_by_branches(data: &Value, count: usize) -> Vec<Vec<(u64, Str
                 .into_iter()
                 .filter_map(|n| {
                     let iid = text(n, "iid")?.parse().ok()?;
-                    Some((iid, text(n, "sourceBranch")?))
+                    Some((iid, text(n, "sourceBranch")?, text(n, "diffHeadSha")))
                 })
                 .collect()
         })
@@ -2350,7 +2355,7 @@ mod tests {
         assert_eq!(queries.len(), 1);
         let text = queries[0].text();
         assert!(
-            text.contains("p0: project(fullPath: $p0) { mergeRequests(state: merged, sourceBranches: $b0, first: 100) { nodes { iid sourceBranch } } }"),
+            text.contains("p0: project(fullPath: $p0) { mergeRequests(state: merged, sourceBranches: $b0, first: 100) { nodes { iid sourceBranch diffHeadSha } } }"),
             "{text}"
         );
         assert!(text.contains("$p0: ID!"), "{text}");
@@ -2373,13 +2378,20 @@ mod tests {
     fn parse_merged_by_branches_reads_nodes_and_missing_project() {
         let data = serde_json::json!({
             "p0": {"mergeRequests": {"nodes": [
-                {"iid": "134", "sourceBranch": "feature/a"},
+                {"iid": "134", "sourceBranch": "feature/a", "diffHeadSha": "abc"},
+                {"iid": "135", "sourceBranch": "feature/b"},
                 null
             ]}},
             "p1": null
         });
         let parsed = parse_merged_by_branches(&data, 3);
-        assert_eq!(parsed[0], vec![(134, "feature/a".to_string())]);
+        assert_eq!(
+            parsed[0],
+            vec![
+                (134, "feature/a".to_string(), Some("abc".to_string())),
+                (135, "feature/b".to_string(), None)
+            ]
+        );
         assert!(parsed[1].is_empty());
         assert!(parsed[2].is_empty());
     }
