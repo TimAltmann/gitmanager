@@ -641,13 +641,14 @@ fn show_candidate(ui: &mut egui::Ui, lang: crate::i18n::Language, c: &mut Cleanu
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string());
             let title = match branch {
-                Some(b) => format!("{name}  ⎇ {b}"),
+                // Kein „⎇“: die egui-Standardschrift zeichnet es als Quadrat
+                Some(b) => format!("{name} · {b}"),
                 None => name,
             };
             (title, path.display().to_string())
         }
         CleanupTarget::Branch { repo, branch } => (
-            format!("⎇ {branch}"),
+            branch.clone(),
             tr_fmt(lang, "cleanup_branch_in", &[&repo.display().to_string()]),
         ),
     };

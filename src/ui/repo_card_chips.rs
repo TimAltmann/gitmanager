@@ -18,7 +18,7 @@ use crate::gitlab::time::relative_time;
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::ui::merge_requests::pipeline_icon;
 use crate::ui::repo_list::{agent_image, ide_image, RepoListActions, RepoListContext};
-use crate::ui::theme::{mr_palette, MrPalette, COLOR_CLEAN, COLOR_CONFLICT, COLOR_DIRTY};
+use crate::ui::theme::{mr_palette, MrPalette};
 
 const ICON_STAR: ImageSource = egui::include_image!("../../assets/icons/star.svg");
 const ICON_STAR_FILL: ImageSource = egui::include_image!("../../assets/icons/star-fill.svg");
@@ -75,15 +75,25 @@ const CARD_KEYS: &[&str] = &[
 
 // --- Reine Text-/Farb-Funktionen ------------------------------------------
 
-/// Text und Farbe des Status-Chips (immer sichtbar).
-pub fn state_chip(lang: Language, state: RepoState, dirty_files: usize) -> (String, Color32) {
+/// Punkt im „geändert“-Chip; muss in Ubuntu-Light liegen (egui-Standard).
+pub const DIRTY_DOT: &str = "•";
+
+/// Text und Farbe des Status-Chips (immer sichtbar). Farben aus der
+/// Theme-Palette (≥ 3:1 je Theme): sauber grün, geändert Bernstein,
+/// Konflikt/laufende Operation rot – auch auf Dunkel klar unterscheidbar.
+pub fn state_chip(
+    lang: Language,
+    state: RepoState,
+    dirty_files: usize,
+    p: &MrPalette,
+) -> (String, Color32) {
     match state {
-        RepoState::Clean => (tr(lang, "repo_state_clean"), COLOR_CLEAN),
+        RepoState::Clean => (tr(lang, "repo_state_clean"), p.ok_icon),
         RepoState::Dirty => (
             tr_fmt(lang, "repo_state_dirty", &[&dirty_files.max(1).to_string()]),
-            COLOR_DIRTY,
+            p.warn_icon,
         ),
-        RepoState::Conflict => (tr(lang, "repo_state_conflict"), COLOR_CONFLICT),
+        RepoState::Conflict => (tr(lang, "repo_state_conflict"), p.fail_icon),
         RepoState::InProgress(kind) => {
             let key = match kind {
                 InProgressKind::Merge => "repo_state_merge",
@@ -92,7 +102,7 @@ pub fn state_chip(lang: Language, state: RepoState, dirty_files: usize) -> (Stri
                 InProgressKind::Revert => "repo_state_revert",
                 InProgressKind::Other => "repo_state_other",
             };
-            (tr(lang, key), COLOR_CONFLICT)
+            (tr(lang, key), p.fail_icon)
         }
     }
 }
@@ -258,11 +268,12 @@ pub(crate) fn show_chip_row(
         ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
 
         // Status (immer sichtbar)
-        let (label, color) = state_chip(lang, repo.state, repo.dirty_files);
+        let (label, color) = state_chip(lang, repo.state, repo.dirty_files, &p);
         let mut atoms = Atoms::new(());
         match repo.state {
             RepoState::Clean => atoms.push_right(icon(ICON_CHECK, 12.0, color)),
-            RepoState::Dirty => atoms.push_right(RichText::new("●").size(10.0).color(color)),
+            // „•“ statt „●“: ● zeichnet die egui-Standardschrift als Quadrat
+            RepoState::Dirty => atoms.push_right(RichText::new(DIRTY_DOT).size(13.0).color(color)),
             RepoState::Conflict | RepoState::InProgress(_) => {
                 atoms.push_right(icon(ICON_WARNING, 12.0, color))
             }
@@ -655,51 +666,90 @@ mod tests {
     use crate::git::{InProgressKind, RepoInfo, RepoState};
     use crate::gitlab::remote::RemoteInfo;
     use crate::i18n::Language;
-    use crate::ui::theme::{COLOR_CLEAN, COLOR_CONFLICT, COLOR_DIRTY};
     use std::path::PathBuf;
+
+    /// Dark-Palette wie auf der Karte im Dark-Theme.
+    fn dark_palette() -> MrPalette {
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply_theme(&ctx, &crate::config::Theme::Dark);
+        mr_palette(&crate::config::Theme::Dark, &ctx.global_style().visuals)
+    }
 
     #[test]
     fn state_chip_texts_and_colors() {
         let en = Language::En;
         let de = Language::De;
+        let p = dark_palette();
         assert_eq!(
-            state_chip(en, RepoState::Clean, 0),
-            ("clean".to_string(), COLOR_CLEAN)
+            state_chip(en, RepoState::Clean, 0, &p),
+            ("clean".to_string(), p.ok_icon)
         );
         assert_eq!(
-            state_chip(de, RepoState::Clean, 0),
-            ("sauber".to_string(), COLOR_CLEAN)
+            state_chip(de, RepoState::Clean, 0, &p),
+            ("sauber".to_string(), p.ok_icon)
         );
         assert_eq!(
-            state_chip(en, RepoState::Dirty, 3),
-            ("3 changed".to_string(), COLOR_DIRTY)
+            state_chip(en, RepoState::Dirty, 3, &p),
+            ("3 changed".to_string(), p.warn_icon)
         );
         assert_eq!(
-            state_chip(de, RepoState::Dirty, 3),
-            ("3 geändert".to_string(), COLOR_DIRTY)
+            state_chip(de, RepoState::Dirty, 3, &p),
+            ("3 geändert".to_string(), p.warn_icon)
         );
         assert_eq!(
-            state_chip(en, RepoState::Conflict, 2),
-            ("Conflict".to_string(), COLOR_CONFLICT)
+            state_chip(en, RepoState::Conflict, 2, &p),
+            ("Conflict".to_string(), p.fail_icon)
         );
         assert_eq!(
-            state_chip(de, RepoState::Conflict, 2),
-            ("Konflikt".to_string(), COLOR_CONFLICT)
+            state_chip(de, RepoState::Conflict, 2, &p),
+            ("Konflikt".to_string(), p.fail_icon)
         );
         let rebase = RepoState::InProgress(InProgressKind::Rebase);
         assert_eq!(
-            state_chip(en, rebase, 0),
-            ("Rebase in progress".to_string(), COLOR_CONFLICT)
+            state_chip(en, rebase, 0, &p),
+            ("Rebase in progress".to_string(), p.fail_icon)
         );
         assert_eq!(
-            state_chip(de, rebase, 0),
-            ("Rebase läuft".to_string(), COLOR_CONFLICT)
+            state_chip(de, rebase, 0, &p),
+            ("Rebase läuft".to_string(), p.fail_icon)
         );
         let merge = RepoState::InProgress(InProgressKind::Merge);
-        assert_eq!(state_chip(de, merge, 0).0, "Merge läuft");
-        // Rot ist erkennbar rot, nicht das Orange von „geändert“
-        assert!(COLOR_CONFLICT.r() > 150 && COLOR_CONFLICT.g() < 80);
-        assert_ne!(COLOR_CONFLICT, COLOR_DIRTY);
+        assert_eq!(state_chip(de, merge, 0, &p).0, "Merge läuft");
+    }
+
+    /// Farbton in Grad (0…360) für den Abstand zwischen Chip-Farben.
+    fn hue(c: Color32) -> f32 {
+        let (r, g, b) = (c.r() as f32, c.g() as f32, c.b() as f32);
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        if max == min {
+            return 0.0;
+        }
+        let h = if max == r {
+            (g - b) / (max - min)
+        } else if max == g {
+            2.0 + (b - r) / (max - min)
+        } else {
+            4.0 + (r - g) / (max - min)
+        };
+        (h * 60.0).rem_euclid(360.0)
+    }
+
+    #[test]
+    fn state_chip_conflict_and_changed_distinct_in_every_theme() {
+        // „Geändert“ und „Konflikt“ lagen auf Dunkel fast im selben Rot
+        // (220,70,40 vs. 210,45,45); Kontrast deckt `mr_palette_contrast` ab
+        for theme in crate::config::Theme::all() {
+            let ctx = egui::Context::default();
+            crate::ui::theme::apply_theme(&ctx, &theme);
+            let p = mr_palette(&theme, &ctx.global_style().visuals);
+            let color = |s| state_chip(Language::En, s, 1, &p).1;
+            let dirty = hue(color(RepoState::Dirty));
+            let conflict = hue(color(RepoState::Conflict));
+            let d = (dirty - conflict).abs();
+            let d = d.min(360.0 - d);
+            assert!(d >= 25.0, "{theme:?}: hue distance {d:.0}°");
+            assert_ne!(color(RepoState::Clean), color(RepoState::Dirty));
+        }
     }
 
     fn ide(id: &str) -> IdeConfig {

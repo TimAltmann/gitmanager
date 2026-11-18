@@ -92,8 +92,6 @@ pub fn apply_theme(ctx: &egui::Context, theme: &Theme) {
 
 pub const COLOR_DIRTY: Color32 = Color32::from_rgb(220, 70, 40);
 pub const COLOR_CLEAN: Color32 = Color32::from_rgb(60, 160, 80);
-/// Konflikt bzw. laufender Merge/Rebase auf der Repo-Karte
-pub const COLOR_CONFLICT: Color32 = Color32::from_rgb(210, 45, 45);
 
 /// Farben der Merge-Request-Ansicht (E14), je Theme eigene Werte. Text-
 /// varianten halten ≥ 4.5:1, Icon-Varianten ≥ 3:1 gegen

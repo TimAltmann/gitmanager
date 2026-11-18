@@ -1247,24 +1247,17 @@ mod tests {
         use crate::git::RepoState;
         use crate::i18n::Language;
         use crate::ui::repo_card_chips::state_chip;
-        assert_eq!(
-            crate::ui::theme::COLOR_DIRTY,
-            Color32::from_rgb(220, 70, 40)
-        );
-        assert_eq!(
-            crate::ui::theme::COLOR_CLEAN,
-            Color32::from_rgb(60, 160, 80)
-        );
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply_theme(&ctx, &crate::config::Theme::Dark);
+        let p =
+            crate::ui::theme::mr_palette(&crate::config::Theme::Dark, &ctx.global_style().visuals);
         let mut repo = RepoInfo::new(PathBuf::from("/tmp/r"), "main".into(), true, false);
         assert_eq!(repo.state, RepoState::Dirty);
-        let (text, color) = state_chip(Language::En, repo.state, repo.dirty_files);
-        assert_eq!(
-            (text.as_str(), color),
-            ("1 changed", crate::ui::theme::COLOR_DIRTY)
-        );
+        let (text, color) = state_chip(Language::En, repo.state, repo.dirty_files, &p);
+        assert_eq!((text.as_str(), color), ("1 changed", p.warn_icon));
         repo = RepoInfo::new(PathBuf::from("/tmp/r"), "main".into(), false, false);
-        let (_, color) = state_chip(Language::En, repo.state, repo.dirty_files);
-        assert_eq!(color, crate::ui::theme::COLOR_CLEAN);
+        let (_, color) = state_chip(Language::En, repo.state, repo.dirty_files, &p);
+        assert_eq!(color, p.ok_icon);
     }
 
     #[test]
