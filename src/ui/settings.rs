@@ -4,7 +4,7 @@ use crate::config::{
 };
 use crate::i18n::{tr, tr_fmt, Language};
 use egui::{Color32, RichText, Vec2};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod merge_requests;
 
@@ -851,6 +851,11 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
     ui.separator();
     ui.add_space(8.0);
     show_claude_dir_setting(ui, &mut state.draft);
+    // Vorlage dev_config für neue Worktrees und Claude Sessions
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    show_dev_config_setting(ui, &mut state.draft);
     ui.add_space(10.0);
     let lang = state.draft.language;
     ui.checkbox(
@@ -869,7 +874,18 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
 fn show_worktree_root_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
     let lang = draft.language;
     let keys = ["wt_root_label", "wt_root_hint", "wt_root_placeholder"];
-    show_dir_setting(ui, lang, keys, &mut draft.worktree_root);
+    show_dir_setting(ui, lang, keys, &mut draft.worktree_root, false);
+}
+
+/// Vorlage-Datei (`dev_config`), die neue Worktrees/Claude-Ordner bekommen
+fn show_dev_config_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
+    let lang = draft.language;
+    let keys = [
+        "dev_config_label",
+        "dev_config_hint",
+        "dev_config_placeholder",
+    ];
+    show_dir_setting(ui, lang, keys, &mut draft.dev_config_template, true);
 }
 
 /// Standard-Ordner für „Neue Claude Session“ (leer = zuletzt benutztes Repo)
@@ -880,16 +896,18 @@ fn show_claude_dir_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
         "claude_dir_hint",
         "claude_dir_placeholder",
     ];
-    show_dir_setting(ui, lang, keys, &mut draft.claude_default_dir);
+    show_dir_setting(ui, lang, keys, &mut draft.claude_default_dir, false);
 }
 
-/// Ordner-Einstellung: Textfeld, „Durchsuchen …“, „Zurücksetzen“, Hinweis bei
-/// relativem Pfad. `keys` = Überschrift, Erklärung, Platzhalter.
+/// Ordner- bzw. Datei-Einstellung (`pick_file`): Textfeld, „Durchsuchen …“,
+/// „Zurücksetzen“, Hinweis bei relativem Pfad. `keys` = Überschrift,
+/// Erklärung, Platzhalter.
 fn show_dir_setting(
     ui: &mut egui::Ui,
     lang: Language,
     [label, hint, placeholder]: [&str; 3],
     value: &mut Option<String>,
+    pick_file: bool,
 ) {
     let absolute = |v: &Option<String>| crate::config::absolute_dir(v.as_deref());
     ui.label(RichText::new(tr(lang, label)).size(13.0).strong());
@@ -914,10 +932,22 @@ fn show_dir_setting(
         }
         if ui.button(format!("{} …", tr(lang, "browse"))).clicked() {
             let mut dialog = rfd::FileDialog::new();
-            if let Some(dir) = absolute(value).filter(|d| d.is_dir()) {
+            let start = absolute(value).and_then(|p| {
+                if p.is_dir() {
+                    Some(p)
+                } else {
+                    p.parent().filter(|d| d.is_dir()).map(Path::to_path_buf)
+                }
+            });
+            if let Some(dir) = start {
                 dialog = dialog.set_directory(dir);
             }
-            if let Some(path) = dialog.pick_folder() {
+            let picked = if pick_file {
+                dialog.pick_file()
+            } else {
+                dialog.pick_folder()
+            };
+            if let Some(path) = picked {
                 *value = Some(path.display().to_string());
             }
         }

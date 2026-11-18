@@ -881,6 +881,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub claude_default_dir: Option<String>,
 
+    /// Vorlage (z. B. `dev_config.xml`), die beim Anlegen eines Worktrees
+    /// und beim Start einer neuen Claude Session in den Ordner kopiert wird,
+    /// falls sie dort fehlt. Ältere Versionen ignorieren das Feld.
+    #[serde(default)]
+    pub dev_config_template: Option<String>,
+
     /// Windows-Benachrichtigung, wenn eine Claude Session wartet oder fertig
     /// ist. Ältere Versionen ignorieren das Feld.
     #[serde(default = "default_claude_notify")]
@@ -902,6 +908,34 @@ impl AppConfig {
     pub fn claude_default_dir_path(&self) -> Option<PathBuf> {
         absolute_dir(self.claude_default_dir.as_deref())
     }
+}
+
+impl AppConfig {
+    /// Vorlage für `dev_config`: nur absolut (wie `worktree_root_dir`).
+    pub fn dev_config_template_path(&self) -> Option<PathBuf> {
+        absolute_dir(self.dev_config_template.as_deref())
+    }
+}
+
+/// Kopiert die Vorlage `template` unter ihrem Dateinamen nach `dir`, wenn
+/// es dort noch keine Datei dieses Namens gibt (bestehende Einstellungen
+/// bleiben). `Ok(Some(ziel))` = kopiert, `Ok(None)` = schon vorhanden.
+pub fn copy_dev_config(template: &Path, dir: &Path) -> std::io::Result<Option<PathBuf>> {
+    let name = template
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("Vorlage ohne Dateinamen"))?;
+    let target = dir.join(name);
+    if target.exists() {
+        return Ok(None);
+    }
+    if !dir.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "Ordner fehlt: {}",
+            dir.display()
+        )));
+    }
+    std::fs::copy(template, &target)?;
+    Ok(Some(target))
 }
 
 /// Getrimmt, einheitliche Trenner, nur absolut.
@@ -943,6 +977,7 @@ impl Default for AppConfig {
             merge_requests: MrConfig::default(),
             worktree_root: None,
             claude_default_dir: None,
+            dev_config_template: None,
             claude_notify: default_claude_notify(),
         }
     }
@@ -3710,6 +3745,36 @@ mod tests {
         value.as_object_mut().unwrap().remove("claude_default_dir");
         let old: AppConfig = serde_json::from_value(value).unwrap();
         assert_eq!(old.claude_default_dir, None);
+    }
+
+    #[test]
+    fn copy_dev_config_only_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let template = dir.path().join("dev_config.xml");
+        std::fs::write(&template, "<vorlage/>").unwrap();
+        let target_dir = dir.path().join("wt");
+        assert!(
+            copy_dev_config(&template, &target_dir).is_err(),
+            "Ordner fehlt"
+        );
+        std::fs::create_dir(&target_dir).unwrap();
+        let copied = copy_dev_config(&template, &target_dir).unwrap();
+        assert_eq!(copied, Some(target_dir.join("dev_config.xml")));
+        std::fs::write(target_dir.join("dev_config.xml"), "<eigen/>").unwrap();
+        assert_eq!(copy_dev_config(&template, &target_dir).unwrap(), None);
+        assert_eq!(
+            std::fs::read_to_string(target_dir.join("dev_config.xml")).unwrap(),
+            "<eigen/>"
+        );
+    }
+
+    #[test]
+    fn dev_config_template_serde_default() {
+        let cfg = AppConfig::default();
+        let mut value = serde_json::to_value(&cfg).unwrap();
+        value.as_object_mut().unwrap().remove("dev_config_template");
+        let old: AppConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(old.dev_config_template, None);
     }
 
     #[test]

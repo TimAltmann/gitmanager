@@ -599,7 +599,28 @@ impl MyApp {
     fn start_new_claude_session(&mut self, path: &std::path::Path) {
         let profile = new_session_profile(self.claude_profile());
         self.record_usage(path, super::UsageType::Open);
+        let extra = self.apply_dev_config(path);
         self.launch_claude(profile, &path.display().to_string());
+        if let Some(extra) = extra {
+            if let Some(msg) = self.status_message.as_mut() {
+                msg.push_str(&format!(" · {extra}"));
+            }
+        }
+    }
+
+    /// Vorlage `dev_config` nach `dir` kopieren, falls eingestellt und dort
+    /// noch nicht vorhanden; Rückgabe = Zusatz für die Statusmeldung.
+    pub(super) fn apply_dev_config(&mut self, dir: &std::path::Path) -> Option<String> {
+        let template = self.config.dev_config_template_path()?;
+        let lang = self.config.language;
+        match crate::config::copy_dev_config(&template, dir) {
+            Ok(Some(target)) => {
+                let name = target.file_name()?.to_string_lossy().into_owned();
+                Some(tr_fmt(lang, "dev_config_copied", &[&name]))
+            }
+            Ok(None) => None,
+            Err(e) => Some(tr_fmt(lang, "dev_config_failed", &[&e.to_string()])),
+        }
     }
 
     fn launch_claude(&mut self, profile: AgentProfile, cwd: &str) {
@@ -656,6 +677,24 @@ mod tests {
             "Standard-Ordner außerhalb als eigener Eintrag"
         );
         assert_eq!(d.selected, Some(0));
+    }
+
+    #[test]
+    fn new_claude_session_copies_dev_config_if_missing() {
+        let mut app = test_app();
+        let dir = tempfile::tempdir().unwrap();
+        let template = dir.path().join("dev_config.xml");
+        std::fs::write(&template, "<vorlage/>").unwrap();
+        let work = dir.path().join("repo");
+        std::fs::create_dir(&work).unwrap();
+        assert_eq!(app.apply_dev_config(&work), None, "ohne Einstellung nichts");
+        app.config.dev_config_template = Some(template.display().to_string());
+        assert!(app.apply_dev_config(&work).is_some());
+        assert_eq!(
+            std::fs::read_to_string(work.join("dev_config.xml")).unwrap(),
+            "<vorlage/>"
+        );
+        assert_eq!(app.apply_dev_config(&work), None, "schon vorhanden");
     }
 
     #[test]

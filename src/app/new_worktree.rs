@@ -465,11 +465,15 @@ impl MyApp {
             match done.result {
                 Ok(branch) => {
                     self.worktree_ui.dialog = None;
-                    self.set_status(tr_fmt(
+                    let mut message = tr_fmt(
                         lang,
                         "wt_created",
                         &[&branch, &done.target.display().to_string()],
-                    ));
+                    );
+                    if let Some(extra) = self.apply_dev_config(&done.target) {
+                        message = format!("{message} · {extra}");
+                    }
+                    self.set_status(message);
                     self.start_scan();
                 }
                 Err(e) => {

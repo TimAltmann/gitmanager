@@ -269,11 +269,14 @@ impl MyApp {
                 {
                     self.mr_notice = Some(diverged_text(lang, local_branch, *ahead, *behind));
                 }
-                let message = tr_fmt(
+                let mut message = tr_fmt(
                     lang,
                     "mr_worktree_created",
                     &[&path.display().to_string(), &iid.to_string()],
                 );
+                if let Some(extra) = self.apply_dev_config(&path) {
+                    message = format!("{message} · {extra}");
+                }
                 // Basis-Klon kennt den neuen Worktree erst nach dem Rescan
                 self.finish_mr_checkout(&path, Some(&base), &choice.after, message);
             }
