@@ -995,12 +995,26 @@ fn git_cli_command(args: &[&str]) -> std::process::Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub enum BranchSafety {
-    /// Upstream existiert und enthält alle lokalen Commits
+    /// Upstream existiert und enthält alle lokalen Commits. Vertraut dem
+    /// zuletzt gefetchten Tracking-Ref: ohne frischen Fetch kann der Remote
+    /// inzwischen anders aussehen.
     Pushed,
     /// Branch-Spitze ist schon im Default-Branch des Remotes enthalten
     MergedIntoDefault,
     /// Der Merge Request ist laut Hoster gemergt
     MrMerged,
+}
+
+impl BranchSafety {
+    /// `git branch -d` prüft die Merge-Eigenschaft gegen den Upstream bzw.
+    /// den HEAD des Hauptrepos, nicht gegen den Default-Branch des Remotes.
+    /// Bei `MergedIntoDefault` und `MrMerged` würde `-d` daher trotz sicherer
+    /// Lage scheitern; dort muss `-D` genommen werden. Nur `Pushed` kommt
+    /// mit `-d` aus.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn needs_force_delete(self) -> bool {
+        !matches!(self, BranchSafety::Pushed)
+    }
 }
 
 /// Prüft, ob ein lokaler Branch ohne Datenverlust gelöscht werden darf.
@@ -1119,10 +1133,58 @@ fn main_repo_of(common_dir: &Path) -> PathBuf {
     common_dir.to_path_buf()
 }
 
+/// Ist HEAD des Worktrees detached und sein Commit von keinem lokalen oder
+/// Remote-Tracking-Branch erreichbar? Dann gingen beim Entfernen Commits
+/// verloren. Im Zweifel (Fehler beim Öffnen/Lesen) `true`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn head_unreachable(worktree_path: &Path) -> bool {
+    let Ok(repo) = Repository::open(worktree_path) else {
+        return true;
+    };
+    match repo.head_detached() {
+        Ok(false) => return false,
+        Ok(true) => {}
+        Err(_) => return true,
+    }
+    let Some(head) = repo.head().ok().and_then(|h| h.target()) else {
+        return true;
+    };
+    let Ok(refs) = repo.references() else {
+        return true;
+    };
+    for r in refs {
+        let Ok(r) = r else {
+            return true;
+        };
+        let Ok(name) = r.name() else {
+            continue;
+        };
+        if !(name.starts_with("refs/heads/") || name.starts_with("refs/remotes/")) {
+            continue;
+        }
+        let Ok(r) = r.resolve() else {
+            continue;
+        };
+        if let Some(tip) = r.target() {
+            match repo.graph_descendant_of(tip, head) {
+                Ok(true) => return false,
+                Ok(false) if tip == head => return false,
+                Ok(false) => {}
+                Err(_) => return true,
+            }
+        }
+    }
+    true
+}
+
 /// Entfernt einen Worktree über System-`git`. Ohne `force` verweigert git
-/// bei uncommitteten Änderungen (und gesperrten Worktrees). Existiert der
-/// Ordner schon nicht mehr, wird nur der verwaiste Eintrag geprunt. Der
-/// Branch wird nur gelöscht, wenn `delete_branch` gesetzt ist; sein
+/// bei uncommitteten Änderungen (und gesperrten Worktrees); zusätzlich
+/// verweigern wir bei detached HEAD mit sonst nirgends erreichbaren Commits
+/// ([`head_unreachable`]), bevor etwas angefasst wird. Existiert der Ordner
+/// schon nicht mehr, wird nur der verwaiste Eintrag geprunt; `worktree
+/// prune` wirkt dabei auf das ganze Repo, nicht nur auf diesen Worktree. Am
+/// Ende muss der Pfad aus der Worktree-Liste verschwunden sein, sonst `Err`.
+/// Der Branch wird nur gelöscht, wenn `delete_branch` gesetzt ist; sein
 /// `force_delete` entscheidet zwischen `-d` und `-D`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn remove_worktree(
@@ -1131,9 +1193,18 @@ pub fn remove_worktree(
     force: bool,
     delete_branch: Option<(&str, bool)>,
 ) -> anyhow::Result<()> {
+    let worktree_path = strip_verbatim(worktree_path);
+    let main_repo = strip_verbatim(main_repo);
     let main_str = main_repo.display().to_string();
     let path_str = worktree_path.display().to_string();
-    if worktree_path.exists() {
+    let exists = worktree_path.exists();
+    if exists && !force && head_unreachable(&worktree_path) {
+        anyhow::bail!(
+            "worktree '{path_str}' has a detached HEAD with commits not reachable from any \
+             branch; removing it would lose them (force required)"
+        );
+    }
+    if exists {
         let mut args = vec!["-C", &main_str, "worktree", "remove"];
         if force {
             args.push("--force");
@@ -1148,8 +1219,18 @@ pub fn remove_worktree(
         "worktree prune",
         GIT_CLI_WORKTREE_TIMEOUT,
     )?;
+    // Nichts als erledigt melden, was git unter anderem Pfad führt
+    let repo = Repository::open(&main_repo)?;
+    let wanted = canonical_key_path(&worktree_path);
+    for name in repo.worktrees()?.iter().flatten().flatten() {
+        if let Ok(wt) = repo.find_worktree(name) {
+            if canonical_key_path(&strip_verbatim(wt.path())) == wanted {
+                anyhow::bail!("worktree '{path_str}' is still registered after removal");
+            }
+        }
+    }
     if let Some((branch, force_delete)) = delete_branch {
-        delete_local_branch(main_repo, branch, force_delete)?;
+        delete_local_branch(&main_repo, branch, force_delete)?;
     }
     Ok(())
 }
@@ -2635,17 +2716,26 @@ fn canonical_key_path(path: &Path) -> PathBuf {
     };
     #[cfg(windows)]
     {
-        if let Some(rest) = canon.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
-            if let Some(unc) = rest.strip_prefix(r"UNC\") {
-                return PathBuf::from(format!(r"\\{unc}"));
-            }
-            // Nur Laufwerkspfade (`C:\…`), `Volume{…}` bleibt verbatim
-            if rest.as_bytes().get(1) == Some(&b':') {
-                return PathBuf::from(rest);
-            }
+        return strip_verbatim(&canon);
+    }
+    #[cfg(not(windows))]
+    {
+        canon
+    }
+}
+
+/// Entfernt ein `\\?\`- bzw. `\\?\UNC\`-Präfix (nur Laufwerks- und UNC-Pfade;
+/// `Volume{…}` bleibt verbatim). Reine Textlogik, daher plattformunabhängig.
+fn strip_verbatim(path: &Path) -> PathBuf {
+    if let Some(rest) = path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        if let Some(unc) = rest.strip_prefix(r"UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        if rest.as_bytes().get(1) == Some(&b':') {
+            return PathBuf::from(rest);
         }
     }
-    canon
+    path.to_path_buf()
 }
 
 /// Remotes für die Merge-Request-Zuordnung: origin zuerst, dann
@@ -6780,5 +6870,94 @@ mod tests {
         let wt = base.path().join("wt");
         git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "feature/x"]);
         assert!(gone_local_branches(&c1).is_empty());
+    }
+
+    #[test]
+    fn needs_force_delete_per_safety() {
+        assert!(!BranchSafety::Pushed.needs_force_delete());
+        assert!(BranchSafety::MergedIntoDefault.needs_force_delete());
+        assert!(BranchSafety::MrMerged.needs_force_delete());
+    }
+
+    #[test]
+    fn merged_into_origin_default_is_deletable_via_safety() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        // origin/main enthält `merged`; das Hauptrepo steht auf einem anderen
+        // Branch ohne diesen Commit
+        git_cmd(&c1, &["checkout", "-b", "merged", "main"]);
+        commit_file(&c1, "m.txt", "m\n", "merged work");
+        git_cmd(&c1, &["push", "origin", "merged:main"]);
+        git_cmd(&c1, &["fetch", "origin"]);
+        git_cmd(&c1, &["checkout", "-b", "other", "main"]);
+        let safety = branch_safety(&c1, "merged", false).unwrap();
+        assert_eq!(safety, BranchSafety::MergedIntoDefault);
+        // `-d` würde hier am HEAD des Hauptrepos scheitern
+        assert!(delete_local_branch(&c1, "merged", false).is_err());
+        let wt = base.path().join("wt");
+        git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "main"]);
+        remove_worktree(
+            &wt,
+            &c1,
+            false,
+            Some(("merged", safety.needs_force_delete())),
+        )
+        .unwrap();
+        assert!(!ref_exists(&c1, "refs/heads/merged"));
+    }
+
+    #[test]
+    fn head_unreachable_detached_cases() {
+        let base = tempdir().unwrap();
+        let (c1, wt) = repo_with_feat_worktree(base.path());
+        // Branch ausgecheckt: nicht detached → false
+        assert!(!head_unreachable(&wt));
+        // Detached auf einem Branch-Commit
+        git_cmd(&wt, &["checkout", "--detach", "main"]);
+        assert!(!head_unreachable(&wt));
+        remove_worktree(&wt, &c1, false, None).unwrap();
+        assert!(!wt.exists());
+        // Detached mit eigenem, nirgends erreichbarem Commit
+        git_cmd(
+            &c1,
+            &["worktree", "add", "--detach", wt.to_str().unwrap(), "main"],
+        );
+        git_identity(&wt);
+        commit_file(&wt, "d.txt", "d\n", "lost");
+        assert!(head_unreachable(&wt));
+        let err = remove_worktree(&wt, &c1, false, None).unwrap_err();
+        assert!(err.to_string().contains("detached"), "{err}");
+        assert!(wt.exists());
+        remove_worktree(&wt, &c1, true, None).unwrap();
+        assert!(!wt.exists());
+        // Kein Repo → im Zweifel „unerreichbar“
+        assert!(head_unreachable(&base.path().join("nirgends")));
+    }
+
+    #[test]
+    fn remove_worktree_rejects_unregistered_path() {
+        let base = tempdir().unwrap();
+        let (c1, _wt) = repo_with_feat_worktree(base.path());
+        let other = base.path().join("other");
+        fs::create_dir(&other).unwrap();
+        assert!(remove_worktree(&other, &c1, false, None).is_err());
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_cases() {
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\C:\Dev\x")),
+            PathBuf::from(r"C:\Dev\x")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\UNC\srv\share\x")),
+            PathBuf::from(r"\\srv\share\x")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\Volume{1}\x")),
+            PathBuf::from(r"\\?\Volume{1}\x")
+        );
+        assert_eq!(strip_verbatim(Path::new("/a/b")), PathBuf::from("/a/b"));
     }
 }
