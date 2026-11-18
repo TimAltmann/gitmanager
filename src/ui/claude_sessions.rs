@@ -44,22 +44,26 @@ pub struct ClaudeSessionActions {
 }
 
 /// Sichtbare offene Sessions und übrige Sessions (ohne die offenen), jeweils
-/// nach Suche gefiltert; Reihenfolge bleibt.
+/// nach Suche gefiltert; Reihenfolge bleibt, nur Favoriten (Session-IDs in
+/// `favorites`) stehen zuerst.
 pub fn visible_lists<'a>(
     open: &'a [OpenSession],
     entries: &'a [SessionEntry],
     query: &str,
+    favorites: &[String],
 ) -> (Vec<&'a OpenSession>, Vec<&'a SessionEntry>) {
     let open_ids: HashSet<&str> = open.iter().map(|o| o.live.session_id.as_str()).collect();
     let open_hits = open
         .iter()
         .filter(|o| open_matches_search(o, query))
         .collect();
-    let rest = entries
+    let mut rest: Vec<&SessionEntry> = entries
         .iter()
         .filter(|e| !open_ids.contains(e.session.id.as_str()))
         .filter(|e| session_matches_search(e, query))
         .collect();
+    // Stabil: Favoriten nach vorn, Reihenfolge sonst unverändert
+    rest.sort_by_key(|e| !favorites.contains(&e.session.id));
     (open_hits, rest)
 }
 
@@ -102,7 +106,7 @@ pub fn show_claude_sessions(
     show_toolbar(ui, lang, search);
     ui.add_space(6.0);
 
-    let (open_hits, rest) = visible_lists(open, entries, search);
+    let (open_hits, rest) = visible_lists(open, entries, search, &config.favorite_sessions);
     if open_hits.iter().any(|o| o.live.status.animated()) {
         // Flüssig nur im Vordergrund; sonst reicht ein grober Takt, statt
         // stundenlang 20 Bilder pro Sekunde für ein Fenster im Hintergrund
@@ -661,15 +665,38 @@ mod tests {
             entry("c1", "Refactoring"),
         ];
 
-        let (o, rest) = visible_lists(&open_list, &entries, "");
+        let (o, rest) = visible_lists(&open_list, &entries, "", &[]);
         assert_eq!(o.len(), 2);
         let ids: Vec<&str> = rest.iter().map(|e| e.session.id.as_str()).collect();
         assert_eq!(ids, ["b1", "c1"], "offene Session nicht doppelt");
 
-        let (o, rest) = visible_lists(&open_list, &entries, "login");
+        let (o, rest) = visible_lists(&open_list, &entries, "login", &[]);
         assert_eq!(o.len(), 1);
         let ids: Vec<&str> = rest.iter().map(|e| e.session.id.as_str()).collect();
         assert_eq!(ids, ["b1"]);
+    }
+
+    #[test]
+    fn visible_lists_favorites_first() {
+        let open_list = [open(1, "f-open", "Offen", LiveStatus::Busy)];
+        let mut old = entry("f-old", "Alt");
+        old.session.last_activity = 1;
+        let mut new1 = entry("n1", "Neu1");
+        new1.session.last_activity = 50;
+        let mut new2 = entry("n2", "Neu2");
+        new2.session.last_activity = 40;
+        let mut fopen = entry("f-open", "Offen");
+        fopen.session.last_activity = 60;
+        let entries = [new1, new2, old, fopen];
+        let favs = ["f-old".to_string(), "f-open".to_string()];
+        let (o, rest) = visible_lists(&open_list, &entries, "", &favs);
+        assert_eq!(o.len(), 1);
+        let ids: Vec<&str> = rest.iter().map(|e| e.session.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["f-old", "n1", "n2"],
+            "offener Favorit nur in Open-Liste"
+        );
     }
 
     /// Rendert `draw` mehrmals; `pointer` = Mauszeiger relativ zur Karte `id`.

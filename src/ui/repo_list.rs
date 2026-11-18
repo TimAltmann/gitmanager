@@ -162,6 +162,8 @@ pub fn sort_main_repos(repos: &mut [RepoInfo], config: &AppConfig) {
             });
         }
     }
+    // Favoriten zuerst; stabiler Sort behält die Reihenfolge des Modus bei
+    repos.sort_by_cached_key(|r| !config.is_favorite_repo(&r.path));
 }
 
 /// Geklonte, sortierte Kopie (Test-/Reuse-freundlich). Render-Pfad nutzt
@@ -1993,6 +1995,75 @@ mod tests {
         let wt = linked_worktree("/wt/review-42", "/code/shop", "fix/cart");
         assert!(repo_matches_search(&wt, "shop"));
         assert!(repo_matches_search(&wt, "shop cart"));
+    }
+
+    fn fav_repos(names: &[&str]) -> Vec<RepoInfo> {
+        names
+            .iter()
+            .map(|n| {
+                RepoInfo::new(
+                    PathBuf::from(format!("/tmp/{n}")),
+                    "main".into(),
+                    false,
+                    false,
+                )
+            })
+            .collect()
+    }
+
+    fn names(repos: &[RepoInfo]) -> Vec<&str> {
+        repos.iter().map(|r| r.name.as_str()).collect()
+    }
+
+    #[test]
+    fn favorites_first_in_last_used_mode() {
+        use crate::config::RepoSortMode;
+        let mut cfg = AppConfig {
+            main_sort_mode: RepoSortMode::LastUsed,
+            ..Default::default()
+        };
+        for (n, t) in [("a", 10), ("b", 20), ("c", 30), ("d", 40)] {
+            let key = AppConfig::repo_state_key(&PathBuf::from(format!("/tmp/{n}")));
+            cfg.repo_usage.entry(key).or_default().last_opened = Some(t);
+        }
+        cfg.toggle_favorite_repo(Path::new("/tmp/a"));
+        cfg.toggle_favorite_repo(Path::new("/tmp/c"));
+        let sorted = sorted_main_repos(&fav_repos(&["a", "b", "c", "d"]), &cfg);
+        assert_eq!(names(&sorted), ["c", "a", "d", "b"]);
+    }
+
+    #[test]
+    fn favorites_first_in_name_mode() {
+        use crate::config::RepoSortMode;
+        let mut cfg = AppConfig {
+            main_sort_mode: RepoSortMode::Name,
+            ..Default::default()
+        };
+        cfg.toggle_favorite_repo(Path::new("/tmp/d"));
+        cfg.toggle_favorite_repo(Path::new("/tmp/b"));
+        let sorted = sorted_main_repos(&fav_repos(&["d", "c", "b", "a"]), &cfg);
+        assert_eq!(names(&sorted), ["b", "d", "a", "c"]);
+    }
+
+    #[test]
+    fn split_visible_keeps_favorites_first_per_section() {
+        use crate::config::RepoSortMode;
+        let mut cfg = AppConfig {
+            main_sort_mode: RepoSortMode::Name,
+            ..Default::default()
+        };
+        cfg.toggle_favorite_repo(Path::new("/wt/web-fix"));
+        let repos = vec![
+            RepoInfo::new(PathBuf::from("/code/app"), "main".into(), false, false),
+            linked_worktree("/code/app-feature-a", "/code/app", "feature/a"),
+            linked_worktree("/wt/web-fix", "/code/web", "fix/b"),
+        ];
+        let sorted = sorted_main_repos(&repos, &cfg);
+        let (mains, wts) = split_visible(&sorted, "");
+        assert_eq!(mains.len(), 1);
+        assert_eq!(sorted[mains[0]].name, "app");
+        assert_eq!(sorted[wts[0]].name, "web-fix");
+        assert_eq!(sorted[wts[1]].name, "app-feature-a");
     }
 
     #[test]
