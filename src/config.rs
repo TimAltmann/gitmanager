@@ -881,11 +881,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub claude_default_dir: Option<String>,
 
-    /// Vorlage (z. B. `dev_config.xml`), die beim Anlegen eines Worktrees
-    /// und beim Start einer neuen Claude Session in den Ordner kopiert wird,
-    /// falls sie dort fehlt. Ältere Versionen ignorieren das Feld.
+    /// Dateien, die beim Anlegen eines Worktrees und beim Start einer neuen
+    /// Claude Session im Ordner angelegt werden, falls sie dort fehlen
+    /// (z. B. eine lokale `dev_config.xml`). Ältere Versionen ignorieren das
+    /// Feld.
     #[serde(default)]
-    pub dev_config_template: Option<String>,
+    pub folder_files: Vec<FolderFile>,
 
     /// Windows-Benachrichtigung, wenn eine Claude Session wartet oder fertig
     /// ist. Ältere Versionen ignorieren das Feld.
@@ -910,32 +911,76 @@ impl AppConfig {
     }
 }
 
-impl AppConfig {
-    /// Vorlage für `dev_config`: nur absolut (wie `worktree_root_dir`).
-    pub fn dev_config_template_path(&self) -> Option<PathBuf> {
-        absolute_dir(self.dev_config_template.as_deref())
+/// Datei für neue Worktrees/Claude-Ordner: Pfad relativ zum Ordner und
+/// Inhalt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FolderFile {
+    /// Relativ zum Ordner, z. B. `dev_config.xml` oder `config/local.json`
+    pub path: String,
+    pub content: String,
+}
+
+impl FolderFile {
+    /// Ziel unter `dir`; `None` bei leerem, absolutem Pfad oder `..`
+    /// (die Datei darf nicht außerhalb des Ordners landen).
+    pub fn target(&self, dir: &Path) -> Option<PathBuf> {
+        let rel = Path::new(self.path.trim());
+        let mut out = dir.to_path_buf();
+        let mut any = false;
+        for c in rel.components() {
+            match c {
+                std::path::Component::Normal(part) => {
+                    out.push(part);
+                    any = true;
+                }
+                std::path::Component::CurDir => {}
+                _ => return None,
+            }
+        }
+        any.then_some(out)
     }
 }
 
-/// Kopiert die Vorlage `template` unter ihrem Dateinamen nach `dir`, wenn
-/// es dort noch keine Datei dieses Namens gibt (bestehende Einstellungen
-/// bleiben). `Ok(Some(ziel))` = kopiert, `Ok(None)` = schon vorhanden.
-pub fn copy_dev_config(template: &Path, dir: &Path) -> std::io::Result<Option<PathBuf>> {
-    let name = template
-        .file_name()
-        .ok_or_else(|| std::io::Error::other("Vorlage ohne Dateinamen"))?;
-    let target = dir.join(name);
-    if target.exists() {
-        return Ok(None);
+/// Ergebnis von [`write_folder_files`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FolderFilesResult {
+    /// Angelegt (relative Pfade wie eingestellt)
+    pub written: Vec<String>,
+    /// `(pfad, fehler)`
+    pub failed: Vec<(String, String)>,
+}
+
+/// Legt jede Datei aus `files` unter `dir` an, die dort noch fehlt
+/// (Unterordner werden erzeugt); bestehende Dateien bleiben unverändert.
+pub fn write_folder_files(files: &[FolderFile], dir: &Path) -> FolderFilesResult {
+    let mut result = FolderFilesResult::default();
+    for file in files.iter().filter(|f| !f.path.trim().is_empty()) {
+        let name = file.path.trim().to_string();
+        let Some(target) = file.target(dir) else {
+            result.failed.push((name, "ungültiger Pfad".to_string()));
+            continue;
+        };
+        if target.exists() {
+            continue;
+        }
+        let written = if dir.is_dir() {
+            target
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&target, &file.content))
+        } else {
+            Err(std::io::Error::other(format!(
+                "Ordner fehlt: {}",
+                dir.display()
+            )))
+        };
+        match written {
+            Ok(()) => result.written.push(name),
+            Err(e) => result.failed.push((name, e.to_string())),
+        }
     }
-    if !dir.is_dir() {
-        return Err(std::io::Error::other(format!(
-            "Ordner fehlt: {}",
-            dir.display()
-        )));
-    }
-    std::fs::copy(template, &target)?;
-    Ok(Some(target))
+    result
 }
 
 /// Getrimmt, einheitliche Trenner, nur absolut.
@@ -977,7 +1022,7 @@ impl Default for AppConfig {
             merge_requests: MrConfig::default(),
             worktree_root: None,
             claude_default_dir: None,
-            dev_config_template: None,
+            folder_files: Vec::new(),
             claude_notify: default_claude_notify(),
         }
     }
@@ -3747,34 +3792,63 @@ mod tests {
         assert_eq!(old.claude_default_dir, None);
     }
 
+    fn folder_file(path: &str, content: &str) -> FolderFile {
+        FolderFile {
+            path: path.to_string(),
+            content: content.to_string(),
+        }
+    }
+
     #[test]
-    fn copy_dev_config_only_when_missing() {
+    fn folder_files_written_only_when_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let template = dir.path().join("dev_config.xml");
-        std::fs::write(&template, "<vorlage/>").unwrap();
-        let target_dir = dir.path().join("wt");
-        assert!(
-            copy_dev_config(&template, &target_dir).is_err(),
-            "Ordner fehlt"
-        );
-        std::fs::create_dir(&target_dir).unwrap();
-        let copied = copy_dev_config(&template, &target_dir).unwrap();
-        assert_eq!(copied, Some(target_dir.join("dev_config.xml")));
-        std::fs::write(target_dir.join("dev_config.xml"), "<eigen/>").unwrap();
-        assert_eq!(copy_dev_config(&template, &target_dir).unwrap(), None);
+        let files = [
+            folder_file("dev_config.xml", "<vorlage/>"),
+            folder_file("config/local.json", "{}"),
+            folder_file("  ", "leer: übersprungen"),
+        ];
+        let missing = dir.path().join("fehlt");
+        let res = write_folder_files(&files, &missing);
+        assert_eq!(res.failed.len(), 2, "Ordner fehlt");
+        let res = write_folder_files(&files, dir.path());
+        assert_eq!(res.written, ["dev_config.xml", "config/local.json"]);
+        assert!(res.failed.is_empty());
         assert_eq!(
-            std::fs::read_to_string(target_dir.join("dev_config.xml")).unwrap(),
+            std::fs::read_to_string(dir.path().join("config/local.json")).unwrap(),
+            "{}"
+        );
+        std::fs::write(dir.path().join("dev_config.xml"), "<eigen/>").unwrap();
+        let res = write_folder_files(&files, dir.path());
+        assert!(res.written.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dev_config.xml")).unwrap(),
             "<eigen/>"
         );
     }
 
     #[test]
-    fn dev_config_template_serde_default() {
-        let cfg = AppConfig::default();
+    fn folder_file_rejects_paths_outside() {
+        let dir = Path::new("/work/repo");
+        assert_eq!(folder_file("../x", "").target(dir), None);
+        assert_eq!(folder_file("/etc/x", "").target(dir), None);
+        assert_eq!(folder_file("", "").target(dir), None);
+        assert_eq!(
+            folder_file("./a/b.txt", "").target(dir),
+            Some(dir.join("a").join("b.txt"))
+        );
+    }
+
+    #[test]
+    fn folder_files_serde_default() {
+        let mut cfg = AppConfig::default();
+        cfg.folder_files.push(folder_file("a.txt", "x"));
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.folder_files, cfg.folder_files);
         let mut value = serde_json::to_value(&cfg).unwrap();
-        value.as_object_mut().unwrap().remove("dev_config_template");
+        value.as_object_mut().unwrap().remove("folder_files");
         let old: AppConfig = serde_json::from_value(value).unwrap();
-        assert_eq!(old.dev_config_template, None);
+        assert!(old.folder_files.is_empty());
     }
 
     #[test]

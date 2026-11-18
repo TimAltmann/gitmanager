@@ -470,7 +470,7 @@ impl MyApp {
                         "wt_created",
                         &[&branch, &done.target.display().to_string()],
                     );
-                    if let Some(extra) = self.apply_dev_config(&done.target) {
+                    if let Some(extra) = self.apply_folder_files(&done.target) {
                         message = format!("{message} · {extra}");
                     }
                     self.set_status(message);

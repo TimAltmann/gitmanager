@@ -851,11 +851,11 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
     ui.separator();
     ui.add_space(8.0);
     show_claude_dir_setting(ui, &mut state.draft);
-    // Vorlage dev_config für neue Worktrees und Claude Sessions
+    // Vorlagedateien für neue Worktrees und Claude Sessions
     ui.add_space(8.0);
     ui.separator();
     ui.add_space(8.0);
-    show_dev_config_setting(ui, &mut state.draft);
+    show_folder_files_setting(ui, &mut state.draft);
     ui.add_space(10.0);
     let lang = state.draft.language;
     ui.checkbox(
@@ -874,18 +874,67 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
 fn show_worktree_root_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
     let lang = draft.language;
     let keys = ["wt_root_label", "wt_root_hint", "wt_root_placeholder"];
-    show_dir_setting(ui, lang, keys, &mut draft.worktree_root, false);
+    show_dir_setting(ui, lang, keys, &mut draft.worktree_root);
 }
 
-/// Vorlage-Datei (`dev_config`), die neue Worktrees/Claude-Ordner bekommen
-fn show_dev_config_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
+/// Vorlagedateien (Pfad + Inhalt), die neue Worktrees und Ordner neuer
+/// Claude Sessions bekommen, falls sie dort fehlen.
+fn show_folder_files_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
     let lang = draft.language;
-    let keys = [
-        "dev_config_label",
-        "dev_config_hint",
-        "dev_config_placeholder",
-    ];
-    show_dir_setting(ui, lang, keys, &mut draft.dev_config_template, true);
+    let hint_color = Color32::from_rgb(100, 100, 100);
+    ui.label(
+        RichText::new(tr(lang, "folder_files_label"))
+            .size(13.0)
+            .strong(),
+    );
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(tr(lang, "folder_files_hint"))
+            .size(11.0)
+            .color(hint_color),
+    );
+    ui.add_space(6.0);
+    let mut remove = None;
+    for (i, file) in draft.folder_files.iter_mut().enumerate() {
+        ui.push_id(("folder_file", i), |ui| {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(tr(lang, "folder_files_path"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut file.path)
+                            .hint_text(tr(lang, "folder_files_path_hint"))
+                            .desired_width(260.0),
+                    );
+                    if ui.button(tr(lang, "folder_files_remove")).clicked() {
+                        remove = Some(i);
+                    }
+                });
+                if !file.path.trim().is_empty() && file.target(Path::new("x")).is_none() {
+                    ui.label(
+                        RichText::new(tr(lang, "folder_files_invalid"))
+                            .size(11.0)
+                            .color(Color32::from_rgb(200, 120, 40)),
+                    );
+                }
+                ui.label(tr(lang, "folder_files_content"));
+                ui.add(
+                    egui::TextEdit::multiline(&mut file.content)
+                        .code_editor()
+                        .desired_rows(5)
+                        .desired_width(f32::INFINITY),
+                );
+            });
+        });
+        ui.add_space(4.0);
+    }
+    if let Some(i) = remove {
+        draft.folder_files.remove(i);
+    }
+    if ui.button(tr(lang, "folder_files_add")).clicked() {
+        draft
+            .folder_files
+            .push(crate::config::FolderFile::default());
+    }
 }
 
 /// Standard-Ordner für „Neue Claude Session“ (leer = zuletzt benutztes Repo)
@@ -896,18 +945,16 @@ fn show_claude_dir_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
         "claude_dir_hint",
         "claude_dir_placeholder",
     ];
-    show_dir_setting(ui, lang, keys, &mut draft.claude_default_dir, false);
+    show_dir_setting(ui, lang, keys, &mut draft.claude_default_dir);
 }
 
-/// Ordner- bzw. Datei-Einstellung (`pick_file`): Textfeld, „Durchsuchen …“,
-/// „Zurücksetzen“, Hinweis bei relativem Pfad. `keys` = Überschrift,
-/// Erklärung, Platzhalter.
+/// Ordner-Einstellung: Textfeld, „Durchsuchen …“, „Zurücksetzen“, Hinweis bei
+/// relativem Pfad. `keys` = Überschrift, Erklärung, Platzhalter.
 fn show_dir_setting(
     ui: &mut egui::Ui,
     lang: Language,
     [label, hint, placeholder]: [&str; 3],
     value: &mut Option<String>,
-    pick_file: bool,
 ) {
     let absolute = |v: &Option<String>| crate::config::absolute_dir(v.as_deref());
     ui.label(RichText::new(tr(lang, label)).size(13.0).strong());
@@ -932,22 +979,10 @@ fn show_dir_setting(
         }
         if ui.button(format!("{} …", tr(lang, "browse"))).clicked() {
             let mut dialog = rfd::FileDialog::new();
-            let start = absolute(value).and_then(|p| {
-                if p.is_dir() {
-                    Some(p)
-                } else {
-                    p.parent().filter(|d| d.is_dir()).map(Path::to_path_buf)
-                }
-            });
-            if let Some(dir) = start {
+            if let Some(dir) = absolute(value).filter(|d| d.is_dir()) {
                 dialog = dialog.set_directory(dir);
             }
-            let picked = if pick_file {
-                dialog.pick_file()
-            } else {
-                dialog.pick_folder()
-            };
-            if let Some(path) = picked {
+            if let Some(path) = dialog.pick_folder() {
                 *value = Some(path.display().to_string());
             }
         }

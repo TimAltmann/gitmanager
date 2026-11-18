@@ -274,7 +274,7 @@ impl MyApp {
                     "mr_worktree_created",
                     &[&path.display().to_string(), &iid.to_string()],
                 );
-                if let Some(extra) = self.apply_dev_config(&path) {
+                if let Some(extra) = self.apply_folder_files(&path) {
                     message = format!("{message} · {extra}");
                 }
                 // Basis-Klon kennt den neuen Worktree erst nach dem Rescan
