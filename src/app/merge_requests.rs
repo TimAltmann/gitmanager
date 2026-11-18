@@ -103,6 +103,7 @@ impl MyApp {
     /// schlagen die Zeilen nur noch nach.
     pub(super) fn update_mr_clones(&mut self) {
         self.mr_clones = CloneIndex::new(&self.repos, &self.mr_hosts);
+        self.update_repo_mrs();
     }
 
     /// Nach jedem Scan: Hosts neu zuordnen, neue Kandidaten lokal erkennen
@@ -513,6 +514,7 @@ impl MyApp {
             Some(kind) => self.set_glab_missing(kind),
             None => {
                 self.mr_snapshot = Some(Box::new(data.snapshot));
+                self.update_repo_mrs();
                 self.on_mr_activity(&data.me_per_host);
                 // E21: Badge im Tray beim nächsten Sync aktualisieren
                 self.mark_tray_dirty();

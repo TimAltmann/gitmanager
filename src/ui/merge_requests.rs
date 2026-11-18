@@ -133,6 +133,9 @@ pub struct MrViewState {
     /// Suche je Spalte
     pub mine_query: String,
     pub others_query: String,
+    /// MR, den die Ansicht einmal anspringt und hervorhebt (`host_key`, `id`),
+    /// z. B. vom Chip der Repo-Karte
+    pub focus: Option<(String, String)>,
 }
 
 impl MrViewState {
@@ -148,6 +151,7 @@ impl MrViewState {
             merged_days: MERGED_DEFAULT_DAYS,
             mine_query: String::new(),
             others_query: String::new(),
+            focus: None,
         }
     }
 
@@ -215,6 +219,8 @@ pub struct MrViewActions {
     pub open_settings_mr_tab: bool,
     /// MR in dieser Zeile geöffnet (`host_key`, `id`): Neues gilt als gesehen
     pub seen: Option<(String, String)>,
+    /// Die Zeile des Fokus wurde gezeichnet; `MrViewState::focus` ist erledigt
+    pub focus_done: bool,
 }
 
 /// Was die Ansicht je Frame braucht; baut `app.rs` (Task 10).
@@ -565,8 +571,12 @@ pub fn show_merge_requests(
             snap,
             multi_host: snap.per_host.len() > 1,
             has_data: snap.per_host.is_empty() || snap.per_host.iter().any(|h| h.error.is_none()),
+            focus: state.focus.clone(),
         };
         show_dashboard(ui, &view, state, actions);
+        // Auch ohne sichtbare Zeile (gefiltert, nicht geladen) nur einmal
+        // versuchen: der Fokus wird verworfen, Chips und Listen bleiben
+        state.focus = None;
     });
 }
 
@@ -579,6 +589,8 @@ struct View<'v> {
     multi_host: bool,
     /// Mindestens ein Host lieferte Daten; sonst keine Leerzustände
     has_data: bool,
+    /// Zeile, die diesen Frame hervorgehoben und angescrollt wird
+    focus: Option<(String, String)>,
 }
 
 impl View<'_> {
@@ -1518,7 +1530,8 @@ fn draw_row(
                 bottom: 10,
             }
         };
-        Frame::new().inner_margin(margin).show(ui, |ui| {
+        let focused = v.focus.as_ref() == Some(&(mr.host_key.clone(), mr.id.clone()));
+        let frame = Frame::new().inner_margin(margin).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = if kind == RowKind::Uninvolved {
                 4.0
@@ -1584,6 +1597,17 @@ fn draw_row(
                 }
             }
         });
+        if focused {
+            let rect = frame.response.rect;
+            ui.painter().rect_stroke(
+                rect,
+                egui::CornerRadius::same(4),
+                egui::Stroke::new(2.0_f32, ui.visuals().selection.stroke.color),
+                egui::StrokeKind::Inside,
+            );
+            ui.scroll_to_rect(rect, Some(egui::Align::Center));
+            actions.focus_done = true;
+        }
     });
     // Browser, Auschecken oder Öffnen im Klon (Agent, IDE …): MR gesehen
     let after = (
@@ -4135,6 +4159,7 @@ mod tests {
             snap: &snap,
             multi_host: false,
             has_data: true,
+            focus: None,
         };
         let counts = |state: &MrViewState| -> (Option<String>, Option<String>) {
             let [open, merged] = mine_segments(&view, state);
@@ -4219,6 +4244,7 @@ mod tests {
                 snap: &snap,
                 multi_host: false,
                 has_data: true,
+                focus: None,
             };
             let mut state = MrViewState::new(&cfg);
             state.mine_merged = true;
@@ -4330,6 +4356,7 @@ mod tests {
             snap: &snap,
             multi_host: false,
             has_data: true,
+            focus: None,
         };
         let review = &snap.others[0];
         let cache_id = Id::new("menu_test");
@@ -4415,6 +4442,7 @@ mod tests {
             snap: &snap,
             multi_host: false,
             has_data: true,
+            focus: None,
         };
         let buttons = |path: &str| {
             let ctx = egui::Context::default();

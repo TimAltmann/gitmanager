@@ -177,7 +177,7 @@ impl MyApp {
 
     /// Ordner, in dem der MR-Branch (`sourceBranch` oder `mr-<iid>`) laut
     /// Scan schon ausgecheckt ist, auch als Worktree außerhalb der Suchpfade.
-    fn mr_checked_out_at(&self, mr: &MergeRequest) -> Option<PathBuf> {
+    pub(super) fn mr_checked_out_at(&self, mr: &MergeRequest) -> Option<PathBuf> {
         let project = ProjectRef {
             hosts: &self.mr_hosts,
             host_key: &mr.host_key,

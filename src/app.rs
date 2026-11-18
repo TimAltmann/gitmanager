@@ -4,6 +4,7 @@ mod mr_activity;
 mod mr_checkout;
 mod mr_settings;
 mod new_worktree;
+mod repo_badges;
 
 use crate::config::{AfterAction, AppConfig, RepoSortMode};
 use crate::git::{launch_agent, launch_ide, MrPrep, RepoInfo};
@@ -21,6 +22,7 @@ use egui::{Color32, RichText, Vec2};
 use merge_requests::{top_bar_button, MrResult, TOP_BAR_CAPTIONS_WIDTH, TOP_BAR_COMPACT_WIDTH};
 use mr_checkout::{MrCheckoutFailure, MrSwitch};
 use mr_settings::{GlabFactory, MrSettingsCache, MrSettingsResult};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -415,6 +417,8 @@ pub struct MyApp {
     mr_notice: Option<String>,
     /// „In Repo-Liste zeigen“: hervorgehobene Karte und seit wann
     repo_highlight: Option<(RepoHighlight, std::time::Instant)>,
+    /// Offener MR je Repo-Ordner für den Chip der Repo-Karte
+    repo_mrs: HashMap<PathBuf, repo_badges::MrBadge>,
     /// Lokale Erkennung (E16) für diese Hosts erneut, auch wenn bekannt
     mr_rediscover: std::collections::BTreeSet<String>,
     /// Einstellungs-Tab „Merge Requests“: Worker-Ergebnisse kommen auch
@@ -533,6 +537,7 @@ impl MyApp {
             pending_after_checkout: None,
             mr_notice: None,
             repo_highlight: None,
+            repo_mrs: Default::default(),
             mr_rediscover: Default::default(),
             mr_settings_tx,
             mr_settings_rx,
@@ -3137,6 +3142,7 @@ mod tests {
             pending_after_checkout: None,
             mr_notice: None,
             repo_highlight: None,
+            repo_mrs: Default::default(),
             mr_rediscover: Default::default(),
             mr_settings_tx,
             mr_settings_rx,
