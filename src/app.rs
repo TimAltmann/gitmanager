@@ -1,4 +1,5 @@
 mod claude_sessions;
+mod cleanup;
 mod merge_requests;
 mod mr_activity;
 mod mr_checkout;
@@ -168,6 +169,7 @@ fn repo_busy_text(lang: Language, busy: &GitBusy) -> Option<String> {
         GitBusy::Worktree => Some(tr(lang, "wt_creating")),
         GitBusy::Pull { .. } => Some(tr(lang, "pull_running")),
         GitBusy::Remove { .. } => Some(tr(lang, "rm_wt_running")),
+        GitBusy::Cleanup => Some(tr(lang, "cleanup_running")),
     }
 }
 
@@ -288,6 +290,8 @@ enum GitBusy {
     Pull { repo: PathBuf },
     /// Worktree entfernen (Dialog), danach Rescan
     Remove { path: PathBuf },
+    /// „Aufräumen …“: Fetch mit Prune und Suche bzw. Entfernen, danach Rescan
+    Cleanup,
 }
 
 impl GitBusy {
@@ -438,6 +442,7 @@ pub struct MyApp {
     worktree_ui: new_worktree::WorktreeUi,
     pull_ui: pull::PullUi,
     remove_ui: remove_worktree::RemoveUi,
+    cleanup_ui: cleanup::CleanupUi,
 }
 
 impl MyApp {
@@ -555,6 +560,7 @@ impl MyApp {
             worktree_ui: Default::default(),
             pull_ui: Default::default(),
             remove_ui: Default::default(),
+            cleanup_ui: Default::default(),
         };
         #[cfg(target_os = "windows")]
         {
@@ -673,7 +679,8 @@ impl MyApp {
             GitBusy::Checkout { .. }
             | GitBusy::Worktree
             | GitBusy::Pull { .. }
-            | GitBusy::Remove { .. } => {
+            | GitBusy::Remove { .. }
+            | GitBusy::Cleanup => {
                 self.pending_scan = true;
                 return;
             }
@@ -1212,9 +1219,8 @@ impl MyApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 
-    /// Neue Aktionen der Repo-Karte (Stern, Chips, `⋯`-Menü). `pull`,
-    /// `remove_worktree` und `cleanup` werden erst in Task 8–10 verdrahtet
-    /// und hier bis dahin ignoriert.
+    /// Neue Aktionen der Repo-Karte (Stern, Chips, `⋯`-Menü) und der
+    /// Listen-Werkzeugleiste („Aufräumen …“).
     fn apply_card_actions(&mut self, ctx: &egui::Context, actions: &mut RepoListActions) {
         if let Some(path) = actions.toggle_favorite.take() {
             self.config.toggle_favorite_repo(&path);
@@ -1247,8 +1253,9 @@ impl MyApp {
         if let Some(path) = actions.remove_worktree.take() {
             self.open_remove_worktree(&path);
         }
-        // TODO Task 10 (Aufräumen): bis dahin bewusst ignoriert
-        let _ = actions.cleanup;
+        if std::mem::take(&mut actions.cleanup) {
+            self.open_cleanup();
+        }
     }
 
     /// #12: Config-Save-Fehler einheitlich melden statt still zu verwerfen:
@@ -2715,6 +2722,7 @@ impl eframe::App for MyApp {
         self.poll_new_worktree(ctx);
         self.poll_pull(ctx);
         self.poll_remove_worktree(ctx);
+        self.poll_cleanup(ctx);
         self.maybe_refresh_mr(ctx);
         self.handle_close_request(ctx);
         // P5: gebatchte Usage-Saves hier flush (deckt auch ui()-Actions vom
@@ -2747,6 +2755,7 @@ impl eframe::App for MyApp {
         self.show_branch_dialog(&ctx);
         self.show_new_worktree_dialog(&ctx);
         self.show_remove_worktree_dialog(&ctx);
+        self.show_cleanup_dialog(&ctx);
         self.show_new_claude_dialog(&ctx);
         self.show_update_dialog(&ctx);
 
@@ -3210,6 +3219,7 @@ mod tests {
             worktree_ui: Default::default(),
             pull_ui: Default::default(),
             remove_ui: Default::default(),
+            cleanup_ui: Default::default(),
         }
     }
 

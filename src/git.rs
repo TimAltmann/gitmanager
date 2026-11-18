@@ -1049,7 +1049,6 @@ pub fn branch_safety(repo_path: &Path, branch: &str, mr_merged: bool) -> Option<
 
 /// Hat der Branch einen konfigurierten Upstream, dessen Remote-Branch aber
 /// nicht mehr existiert (nach `fetch --prune` gelöscht)?
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn upstream_gone(repo: &Repository, branch: &str) -> bool {
     let Ok(cfg) = repo.config() else {
         return false;
@@ -1072,7 +1071,6 @@ pub fn upstream_gone(repo: &Repository, branch: &str) -> bool {
 
 /// Lokale Branches mit verwaistem Upstream, ohne den aktuell ausgecheckten
 /// und ohne die in anderen Worktrees ausgecheckten.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn gone_local_branches(repo_path: &Path) -> Vec<String> {
     let Ok(repo) = Repository::open(repo_path) else {
         return Vec::new();
@@ -1231,7 +1229,6 @@ pub fn remove_worktree(
 
 /// Löscht einen lokalen Branch (`git branch -d`, mit `force` `-D`). Ohne
 /// `force` verweigert git bei ungemergten Commits.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn delete_local_branch(repo_path: &Path, branch: &str, force: bool) -> anyhow::Result<()> {
     let repo_str = repo_path.display().to_string();
     let flag = if force { "-D" } else { "-d" };

@@ -700,14 +700,11 @@ pub fn parse_recent_notes(data: &Value, count: usize) -> Vec<Vec<NoteInfo>> {
 }
 
 /// Projekte je Abfrage für `merged_by_branches` (Komplexität)
-// Nur vom Aufräumen-Dialog genutzt (spätere Aufgabe).
-#[cfg_attr(not(test), allow(dead_code))]
 pub const MERGED_BRANCHES_CHUNK: usize = 10;
 
 /// `MERGED_BRANCHES`: je Projekt `(projektpfad, quell-branches)` die
 /// gemergten MRs dieser Branches, bis zu `MERGED_BRANCHES_CHUNK` Projekte
 /// per Alias (`p0`, `p1`, …) je Abfrage.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn merged_by_branches(projects: &[(String, Vec<String>)]) -> Vec<Query> {
     // Eine leere Branch-Liste würde GitLab als „kein Filter“ lesen: Projekte
     // ohne Branches fragen wir nicht ab.
@@ -747,7 +744,6 @@ pub fn merged_by_branches(projects: &[(String, Vec<String>)]) -> Vec<Query> {
 
 /// `(iid, quell-branch)` der gemergten MRs je Alias-Index; fehlende
 /// Projekte (keine Rechte) sind leer.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_merged_by_branches(data: &Value, count: usize) -> Vec<Vec<(u64, String)>> {
     (0..count)
         .map(|i| {

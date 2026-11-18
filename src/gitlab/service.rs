@@ -779,7 +779,6 @@ pub fn fetch_recent_notes(
 /// Je Eingabeprojekt `(pfad, quell-branches)` eines Hosts: gemergter
 /// Quell-Branch → MR-iid, in der Reihenfolge von `projects`. Der erste
 /// Fehler bricht ab.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn fetch_merged_branches(
     runner: &dyn GlabRunner,
     host: &str,
