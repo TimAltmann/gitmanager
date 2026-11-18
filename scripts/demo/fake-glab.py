@@ -192,6 +192,18 @@ def graphql(request):
                 "userPermissions": {"readMergeRequest": True},
             } for p in paths]},
         }}
+    if op == "GmMergedBranches":
+        merged = {"acme/shop-backend": [("134", "feature/region-prices")]}
+        data = {}
+        for i in range(len(variables) // 2 + 1):
+            path = variables.get(f"p{i}")
+            if path is None:
+                continue
+            wanted = variables.get(f"b{i}") or []
+            data[f"p{i}"] = {"mergeRequests": {"nodes": [
+                {"iid": iid, "sourceBranch": branch}
+                for iid, branch in merged.get(path.lower(), []) if branch in wanted]}}
+        return {"data": data}
     return {"errors": [{"message": f"fake-glab: unknown query {op or '?'}"}]}
 
 

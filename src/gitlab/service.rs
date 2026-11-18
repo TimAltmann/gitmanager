@@ -776,6 +776,42 @@ pub fn fetch_recent_notes(
     out
 }
 
+/// Je Eingabeprojekt `(pfad, quell-branches)` eines Hosts: gemergter
+/// Quell-Branch → MR-iid, in der Reihenfolge von `projects`. Der erste
+/// Fehler bricht ab.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn fetch_merged_branches(
+    runner: &dyn GlabRunner,
+    host: &str,
+    projects: &[(String, Vec<String>)],
+) -> Result<Vec<HashMap<String, u64>>, GlabErrorKind> {
+    let mut schema = schema_for(host);
+    let mut out = Vec::with_capacity(projects.len());
+    let mut failure = None;
+    for (query, chunk) in graphql::merged_by_branches(projects)
+        .into_iter()
+        .zip(projects.chunks(graphql::MERGED_BRANCHES_CHUNK))
+    {
+        match run_query(runner, host, &mut schema, query) {
+            Ok(got) => out.extend(
+                graphql::parse_merged_by_branches(&got.data, chunk.len())
+                    .into_iter()
+                    .map(|mrs| {
+                        mrs.into_iter()
+                            .map(|(iid, branch)| (branch, iid))
+                            .collect::<HashMap<_, _>>()
+                    }),
+            ),
+            Err(kind) => {
+                failure = Some(kind);
+                break;
+            }
+        }
+    }
+    store_schema(host, schema);
+    failure.map_or(Ok(out), Err)
+}
+
 /// Seite aus der Antwort; fehlt die Liste, zählen die Meldungen als Fehler
 /// (sonst sähe es aus wie „nichts gemergt“).
 fn merged_page(got: GqlData) -> Result<MergedPage, GlabErrorKind> {
@@ -2854,6 +2890,33 @@ mod tests {
             }
         );
         assert!(fake.take_calls().is_empty());
+    }
+
+    #[test]
+    fn fetch_merged_branches_with_fake_runner() {
+        let runner = gated();
+        let fake = runner.inner();
+        fake.push(gql(
+            r#"{"data":{"p0":{"mergeRequests":{"nodes":[{"iid":"134","sourceBranch":"feature/a"}]}},"p1":null}}"#,
+        ));
+        let projects = vec![
+            ("acme/shop".to_string(), vec!["feature/a".to_string()]),
+            ("acme/docs".to_string(), vec!["x".to_string()]),
+        ];
+        let got = fetch_merged_branches(&runner, HOST, &projects).expect("Antwort");
+        let calls = fake.take_calls();
+        assert_eq!(ops(&calls), vec!["GmMergedBranches"]);
+        assert_eq!(variables(&calls[0])["b0"], json!(["feature/a"]));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].get("feature/a"), Some(&134));
+        assert!(got[1].is_empty());
+
+        // Fehler der Abfrage wird durchgereicht
+        fake.push(FakeReply::http(401, INVALID_TOKEN_GQL));
+        assert_eq!(
+            fetch_merged_branches(&runner, HOST, &projects),
+            Err(GlabErrorKind::InvalidToken)
+        );
     }
 
     #[test]
