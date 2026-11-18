@@ -785,31 +785,63 @@ pub fn fetch_merged_branches(
     host: &str,
     projects: &[(String, Vec<String>)],
 ) -> Result<Vec<HashMap<String, u64>>, GlabErrorKind> {
+    // Projekte ohne Branches werden nicht abgefragt (leere Map an ihrer Stelle).
+    let asked: Vec<(String, Vec<String>)> = projects
+        .iter()
+        .filter(|(_, branches)| !branches.is_empty())
+        .cloned()
+        .collect();
     let mut schema = schema_for(host);
-    let mut out = Vec::with_capacity(projects.len());
+    let mut found: Vec<HashMap<String, u64>> = Vec::with_capacity(asked.len());
     let mut failure = None;
-    for (query, chunk) in graphql::merged_by_branches(projects)
+    for (query, chunk) in graphql::merged_by_branches(&asked)
         .into_iter()
-        .zip(projects.chunks(graphql::MERGED_BRANCHES_CHUNK))
+        .zip(asked.chunks(graphql::MERGED_BRANCHES_CHUNK))
     {
-        match run_query(runner, host, &mut schema, query) {
-            Ok(got) => out.extend(
-                graphql::parse_merged_by_branches(&got.data, chunk.len())
-                    .into_iter()
-                    .map(|mrs| {
-                        mrs.into_iter()
-                            .map(|(iid, branch)| (branch, iid))
-                            .collect::<HashMap<_, _>>()
-                    }),
-            ),
+        let got = match run_query(runner, host, &mut schema, query) {
+            Ok(got) => got,
             Err(kind) => {
                 failure = Some(kind);
                 break;
             }
+        };
+        // Teilfehler: fehlt ein Projekt trotz Meldungen, wäre „nichts
+        // gemergt“ falsch (ohne Meldungen heißt es nur: keine Rechte).
+        let lost = (0..chunk.len()).any(|i| {
+            got.data
+                .get(format!("p{i}"))
+                .and_then(|p| p.get("mergeRequests"))
+                .is_none_or(Value::is_null)
+        });
+        if lost && !got.errors.is_empty() {
+            failure = Some(GlabErrorKind::GraphQl(got.errors));
+            break;
+        }
+        for mrs in graphql::parse_merged_by_branches(&got.data, chunk.len()) {
+            let mut map: HashMap<String, u64> = HashMap::new();
+            for (iid, branch) in mrs {
+                // mehrere gemergte MRs je Branch: höchste iid, deterministisch
+                let slot = map.entry(branch).or_insert(iid);
+                *slot = (*slot).max(iid);
+            }
+            found.push(map);
         }
     }
     store_schema(host, schema);
-    failure.map_or(Ok(out), Err)
+    if let Some(kind) = failure {
+        return Err(kind);
+    }
+    let mut found = found.into_iter();
+    Ok(projects
+        .iter()
+        .map(|(_, branches)| {
+            if branches.is_empty() {
+                HashMap::new()
+            } else {
+                found.next().unwrap_or_default()
+            }
+        })
+        .collect())
 }
 
 /// Seite aus der Antwort; fehlt die Liste, zählen die Meldungen als Fehler
@@ -2917,6 +2949,67 @@ mod tests {
             fetch_merged_branches(&runner, HOST, &projects),
             Err(GlabErrorKind::InvalidToken)
         );
+    }
+
+    #[test]
+    fn fetch_merged_branches_partial_errors_are_reported() {
+        let runner = gated();
+        let fake = runner.inner();
+        let projects = vec![
+            ("acme/shop".to_string(), vec!["feature/a".to_string()]),
+            ("acme/docs".to_string(), vec!["x".to_string()]),
+        ];
+        // Daten und Fehler, ein Projekt null: kein „nichts gemergt“
+        fake.push(gql(
+            r#"{"data":{"p0":{"mergeRequests":{"nodes":[]}},"p1":null},"errors":[{"message":"boom"}]}"#,
+        ));
+        assert!(matches!(
+            fetch_merged_branches(&runner, HOST, &projects),
+            Err(GlabErrorKind::GraphQl(_))
+        ));
+        // null ohne Fehler (keine Rechte): leere Map
+        fake.push(gql(
+            r#"{"data":{"p0":{"mergeRequests":{"nodes":[]}},"p1":null}}"#,
+        ));
+        let got = fetch_merged_branches(&runner, HOST, &projects).expect("ok");
+        assert!(got.iter().all(HashMap::is_empty));
+    }
+
+    #[test]
+    fn fetch_merged_branches_keeps_highest_iid() {
+        let runner = gated();
+        runner.inner().push(gql(
+            r#"{"data":{"p0":{"mergeRequests":{"nodes":[{"iid":"9","sourceBranch":"b"},{"iid":"12","sourceBranch":"b"},{"iid":"10","sourceBranch":"b"}]}}}}"#,
+        ));
+        let projects = vec![("acme/shop".to_string(), vec!["b".to_string()])];
+        let got = fetch_merged_branches(&runner, HOST, &projects).expect("ok");
+        assert_eq!(got[0].get("b"), Some(&12));
+    }
+
+    #[test]
+    fn fetch_merged_branches_skips_empty_branch_lists() {
+        let runner = gated();
+        let fake = runner.inner();
+        fake.push(gql(
+            r#"{"data":{"p0":{"mergeRequests":{"nodes":[{"iid":"3","sourceBranch":"b"}]}}}}"#,
+        ));
+        let projects = vec![
+            ("acme/leer".to_string(), Vec::new()),
+            ("acme/shop".to_string(), vec!["b".to_string()]),
+        ];
+        let got = fetch_merged_branches(&runner, HOST, &projects).expect("ok");
+        assert_eq!(got.len(), 2);
+        assert!(got[0].is_empty());
+        assert_eq!(got[1].get("b"), Some(&3));
+        let calls = fake.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(variables(&calls[0])["p0"], json!("acme/shop"));
+
+        // nur leere Listen: gar kein Aufruf
+        let only_empty = vec![("acme/leer".to_string(), Vec::new())];
+        let got = fetch_merged_branches(&runner, HOST, &only_empty).expect("ok");
+        assert_eq!(got.len(), 1);
+        assert!(fake.take_calls().is_empty());
     }
 
     #[test]

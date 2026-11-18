@@ -709,7 +709,11 @@ pub const MERGED_BRANCHES_CHUNK: usize = 10;
 /// per Alias (`p0`, `p1`, …) je Abfrage.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn merged_by_branches(projects: &[(String, Vec<String>)]) -> Vec<Query> {
-    projects
+    // Eine leere Branch-Liste würde GitLab als „kein Filter“ lesen: Projekte
+    // ohne Branches fragen wir nicht ab.
+    let asked: Vec<&(String, Vec<String>)> =
+        projects.iter().filter(|(_, b)| !b.is_empty()).collect();
+    asked
         .chunks(MERGED_BRANCHES_CHUNK)
         .map(|chunk| {
             let mut query = Query::new("GmMergedBranches", Vec::new());
