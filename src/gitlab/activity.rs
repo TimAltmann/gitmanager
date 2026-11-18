@@ -55,8 +55,9 @@ impl Activity {
 pub enum MrEventKind {
     /// Ich wurde als Reviewer eingetragen
     ReviewRequested,
-    /// Ich wurde erwähnt
-    Mentioned,
+    /// Ich wurde erwähnt (`in_comment`: in einem Kommentar, sonst in der
+    /// Beschreibung)
+    Mentioned { in_comment: bool },
     /// Kommentarzahl gestiegen; ob die Kommentare von anderen stammen,
     /// klärt erst [`others_notes`] mit den letzten Kommentaren
     NotesAdded { before: u32, now: u32 },
@@ -231,6 +232,9 @@ impl MrActivityStore {
                 .reasons
                 .iter()
                 .any(|r| matches!(r, Reason::MentionComment | Reason::MentionDescription));
+            let mention = MrEventKind::Mentioned {
+                in_comment: mr.reasons.contains(&Reason::MentionComment),
+            };
             let notes = mr.user_notes_count.unwrap_or(0);
             let mark = match self.marks.get_mut(&key) {
                 Some(mark) => mark,
@@ -241,7 +245,7 @@ impl MrActivityStore {
                         if reviewer {
                             events.push(MrEvent::of(mr, MrEventKind::ReviewRequested));
                         } else if mentioned {
-                            events.push(MrEvent::of(mr, MrEventKind::Mentioned));
+                            events.push(MrEvent::of(mr, mention.clone()));
                         }
                     }
                     let mut mark = MrMark {
@@ -262,7 +266,7 @@ impl MrActivityStore {
                 if reviewer && !mark.reviewer {
                     events.push(MrEvent::of(mr, MrEventKind::ReviewRequested));
                 } else if mentioned && !mark.mentioned {
-                    events.push(MrEvent::of(mr, MrEventKind::Mentioned));
+                    events.push(MrEvent::of(mr, mention.clone()));
                 }
             }
             if notify && mr.user_notes_count.is_some() && notes > mark.known_notes {
@@ -378,7 +382,10 @@ mod tests {
         let kinds: Vec<_> = events.iter().map(|e| e.kind.clone()).collect();
         assert_eq!(
             kinds,
-            [MrEventKind::ReviewRequested, MrEventKind::Mentioned]
+            [
+                MrEventKind::ReviewRequested,
+                MrEventKind::Mentioned { in_comment: true }
+            ]
         );
     }
 
@@ -393,6 +400,26 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, MrEventKind::ReviewRequested);
         assert!(store.observe(&snap(vec![], vec![a2]), 300).is_empty());
+    }
+
+    #[test]
+    fn mention_in_comment_comes_with_notes_event() {
+        let mut store = MrActivityStore::default();
+        store.observe(&snap(vec![], vec![mr("a", 1, 1, "x")]), 100);
+        let mut a = mr("a", 2, 1, "x");
+        a.reasons = vec![Reason::MentionComment];
+        let kinds: Vec<_> = store
+            .observe(&snap(vec![], vec![a]), 200)
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                MrEventKind::Mentioned { in_comment: true },
+                MrEventKind::NotesAdded { before: 1, now: 2 }
+            ]
+        );
     }
 
     #[test]

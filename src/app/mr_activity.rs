@@ -80,6 +80,8 @@ impl MrActivityState {
 /// Neue Kommentare eines MR mit den zuletzt gelesenen Kommentaren.
 pub(super) struct NotesJob {
     event: MrEvent,
+    /// Review-Anfrage/Erwähnung im selben Abruf: Titel der Benachrichtigung
+    trigger: Option<MrEventKind>,
     notes: Vec<NoteInfo>,
 }
 
@@ -93,18 +95,30 @@ impl MyApp {
         let events = self.mr_activity.store.observe(snap, now_unix());
         self.mr_activity.store.annotate(snap);
         self.mr_activity.save();
-        let mut by_host: HashMap<String, Vec<MrEvent>> = HashMap::new();
-        let mut direct = Vec::new();
+        // Review-Anfrage bzw. Erwähnung samt neuen Kommentaren am selben MR:
+        // eine Benachrichtigung mit dem Grund als Titel und dem Kommentar
+        let mut triggers: HashMap<(String, String), MrEvent> = HashMap::new();
+        let mut notes_events = Vec::new();
         for event in events {
             match event.kind {
-                MrEventKind::NotesAdded { .. } => by_host
-                    .entry(event.host_key.clone())
-                    .or_default()
-                    .push(event),
-                _ => direct.push(event),
+                MrEventKind::NotesAdded { .. } => notes_events.push(event),
+                _ => {
+                    triggers.insert((event.host_key.clone(), event.id.clone()), event);
+                }
             }
         }
-        self.notify_mr_events(direct.into_iter().map(|e| (e, None)).collect());
+        let mut by_host: HashMap<String, Vec<(MrEvent, Option<MrEventKind>)>> = HashMap::new();
+        for event in notes_events {
+            let trigger = triggers
+                .remove(&(event.host_key.clone(), event.id.clone()))
+                .map(|t| t.kind);
+            by_host
+                .entry(event.host_key.clone())
+                .or_default()
+                .push((event, trigger));
+        }
+        let direct = triggers.into_values().map(|e| (e, None)).collect();
+        self.notify_mr_events(direct);
         for (host, events) in by_host {
             let runner = Arc::clone(&self.glab);
             let tx = self.mr_tx.clone();
@@ -112,7 +126,7 @@ impl MyApp {
             std::thread::spawn(move || {
                 let mrs: Vec<(String, u64)> = events
                     .iter()
-                    .map(|e| (e.project_path.clone(), e.iid))
+                    .map(|(e, _)| (e.project_path.clone(), e.iid))
                     .collect();
                 let notes = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     fetch_recent_notes(&*runner, &host, &mrs)
@@ -121,7 +135,11 @@ impl MyApp {
                 let jobs = events
                     .into_iter()
                     .zip(notes.into_iter().chain(std::iter::repeat_with(Vec::new)))
-                    .map(|(event, notes)| NotesJob { event, notes })
+                    .map(|((event, trigger), notes)| NotesJob {
+                        event,
+                        trigger,
+                        notes,
+                    })
                     .collect();
                 let _ = tx.send(MrResult::Notes { me, jobs });
             });
@@ -132,14 +150,19 @@ impl MyApp {
     pub(super) fn on_mr_notes(&mut self, me: Option<String>, jobs: Vec<NotesJob>) {
         let mut notify = Vec::new();
         let mut changed = false;
-        for NotesJob { event, notes } in jobs {
+        for NotesJob {
+            mut event,
+            trigger,
+            notes,
+        } in jobs
+        {
             let MrEventKind::NotesAdded { before, now } = event.kind else {
                 continue;
             };
             let added = now.saturating_sub(before);
             let others = others_notes(&notes, added, me.as_deref());
             // Ohne lesbare Kommentare (Fehler, Rechte) trotzdem melden
-            if others.is_empty() && !notes.is_empty() {
+            if others.is_empty() && !notes.is_empty() && trigger.is_none() {
                 changed |= self
                     .mr_activity
                     .store
@@ -163,6 +186,9 @@ impl MyApp {
                     ],
                 )),
             };
+            if let Some(kind) = trigger {
+                event.kind = kind;
+            }
             notify.push((event, line));
         }
         if changed {
@@ -201,8 +227,12 @@ impl MyApp {
                     "mr_notify_review",
                     tr_fmt(lang, "mr_notify_review_line", &[&event.author]),
                 ),
-                MrEventKind::Mentioned => (
-                    "mr_notify_mention",
+                MrEventKind::Mentioned { in_comment } => (
+                    if *in_comment {
+                        "mr_notify_mention_comment"
+                    } else {
+                        "mr_notify_mention_desc"
+                    },
                     tr_fmt(lang, "mr_notify_mention_line", &[&event.author]),
                 ),
                 MrEventKind::NotesAdded { before, now } => (
@@ -348,6 +378,7 @@ mod tests {
             Some("me".to_string()),
             vec![NotesJob {
                 event,
+                trigger: None,
                 notes: vec![mine],
             }],
         );
