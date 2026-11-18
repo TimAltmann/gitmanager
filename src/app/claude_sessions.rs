@@ -1,6 +1,7 @@
 //! Ansicht „Claude Sessions“: Zustand, Hintergrund-Scan, Live-Status der
 //! laufenden Instanzen, Fortsetzen und Terminal-Fokus.
 
+use super::mr_checkout::ide_source;
 use super::{MainView, MyApp};
 use crate::claude_live::{
     build_open, claude_live_dir, focus_session_window, process_alive, read_live_sessions,
@@ -473,7 +474,14 @@ impl MyApp {
     pub(super) fn show_claude_view(&mut self, ui: &mut Ui) {
         self.refresh_previews(Instant::now(), &ui.ctx().clone());
         let mut actions = ClaudeSessionActions::default();
-        let open = build_open(&self.claude.live, &self.claude.scan);
+        let mut open = build_open(&self.claude.live, &self.claude.scan);
+        for o in &mut open {
+            let dir = o
+                .repo_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(&o.live.cwd));
+            o.profile_path = Some(ide_source(&self.config, &self.repos, &dir, None).0);
+        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
@@ -500,8 +508,12 @@ impl MyApp {
         if let Some((cwd, id)) = actions.resume {
             self.resume_claude_session(&cwd, &id);
         }
-        if let Some((repo, ide_id, file)) = actions.ide_open {
-            self.open_ide(&repo, &ide_id, &file);
+        if let Some((dir, ide_id, _)) = actions.ide_open {
+            // Wie „In IDE öffnen“ der MR-Ansicht: Solution des Repos bzw.
+            // bei einem Worktree außerhalb der Suchpfade die des Basis-Klons
+            let (profile, file) = ide_source(&self.config, &self.repos, &dir, None);
+            let file = file.unwrap_or_else(|| dir.clone());
+            self.open_ide_in(&dir, &profile, &ide_id, &file);
         }
         if let Some(path) = actions.shell_open {
             self.open_shell(&path);

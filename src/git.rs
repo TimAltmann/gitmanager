@@ -1058,8 +1058,11 @@ pub fn open_in_explorer(path: &Path) -> anyhow::Result<()> {
     {
         #[cfg(windows)]
         {
+            // explorer.exe versteht nur `\`: mit `/` (Worktree-Pfade aus
+            // libgit2) öffnet er stattdessen „Dokumente“
+            let path = path.to_string_lossy().replace('/', "\\");
             std::process::Command::new("explorer")
-                .arg(path)
+                .arg(&path)
                 .spawn_locked()
                 .map(|_| ())
                 .map_err(|e| anyhow::anyhow!("Explorer konnte nicht geöffnet werden: {e}"))

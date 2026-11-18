@@ -92,6 +92,17 @@ fn display_cwd_with(raw: &str, gitbash: bool) -> String {
     }
 }
 
+/// Pfad mit den Trennern des Systems: libgit2 liefert Worktree-Pfade unter
+/// Windows mit `/` (`C:/Code/wt`), Explorer und IDEs brauchen `\`.
+pub fn native_path(raw: &str) -> String {
+    let raw = display_cwd(raw);
+    if cfg!(windows) {
+        raw.replace('/', "\\")
+    } else {
+        raw
+    }
+}
+
 /// Liest Kopf und Ende einer Session-Datei. `None` ohne `cwd`, ohne
 /// Unterhaltung (kein Titel, keine Frage, kein Prompt) oder bei Lesefehlern.
 pub fn parse_session(path: &Path) -> Option<ClaudeSession> {
@@ -300,8 +311,38 @@ pub fn assign_to_repos(
     entries
 }
 
+/// Zuordnungsziele: die gescannten Repos plus ihre Worktrees, die nicht
+/// selbst in der Liste stehen (z. B. unter einem Worktree-Ordner außerhalb
+/// der Suchpfade). Solche Worktrees bekommen ihren Ordnernamen als Namen;
+/// verknüpft ist ein Worktree, dessen `.git` eine Datei ist.
+pub fn session_targets(repos: &[RepoInfo]) -> Vec<RepoInfo> {
+    session_targets_with(repos, |p| p.join(".git").is_file())
+}
+
+fn session_targets_with(repos: &[RepoInfo], is_linked: impl Fn(&Path) -> bool) -> Vec<RepoInfo> {
+    let mut seen: HashSet<String> = repos
+        .iter()
+        .map(|r| path_key(&r.path.to_string_lossy()))
+        .collect();
+    let mut out = repos.to_vec();
+    for repo in repos {
+        for wt in &repo.worktrees {
+            if !seen.insert(path_key(&wt.path.to_string_lossy())) {
+                continue;
+            }
+            let path: PathBuf = native_path(&wt.path.to_string_lossy()).into();
+            let branch = wt.branch.clone().unwrap_or_default();
+            let mut info = RepoInfo::new(path, branch, false, wt.branch.is_none());
+            info.is_linked_worktree = is_linked(&info.path);
+            info.common_dir = repo.common_dir.clone();
+            out.push(info);
+        }
+    }
+    out
+}
+
 /// Liest alle `projects/*/*.jsonl` (Unterordner der Projektordner werden
-/// ignoriert) und ordnet sie `repos` zu.
+/// ignoriert) und ordnet sie `repos` und deren Worktrees zu.
 pub fn scan_sessions(
     projects_dir: &Path,
     repos: &[RepoInfo],
@@ -348,7 +389,8 @@ pub fn scan_sessions(
     }
     cache.entries.retain(|p, _| seen.contains(p));
     let all = sessions.iter().map(|s| (s.id.clone(), s.clone())).collect();
-    let entries = assign_to_repos(sessions, repos, |p| Path::new(p).exists());
+    let targets = session_targets(repos);
+    let entries = assign_to_repos(sessions, &targets, |p| Path::new(p).exists());
     SessionScan { entries, all }
 }
 
@@ -709,6 +751,46 @@ mod tests {
         assert_eq!(cache.len(), 0);
         assert!(scan.entries.is_empty());
         assert!(scan.all.is_empty());
+    }
+
+    #[test]
+    fn targets_add_worktrees_outside_repo_list() {
+        let mut main = repo("/code/app", "app", false);
+        main.worktrees = vec![
+            crate::git::WorktreeHead {
+                path: PathBuf::from("/code/worktrees/app-feat"),
+                branch: Some("feat".to_string()),
+            },
+            // Steht schon in der Liste: nicht doppelt
+            crate::git::WorktreeHead {
+                path: PathBuf::from("/code/app-wt"),
+                branch: Some("x".to_string()),
+            },
+        ];
+        let listed = repo("/code/app-wt", "app-wt", true);
+        let targets = session_targets_with(&[main, listed], |_| true);
+        let names: Vec<&str> = targets.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["app", "app-wt", "app-feat"]);
+        assert!(targets[2].is_linked_worktree);
+        assert_eq!(targets[2].branch, "feat");
+    }
+
+    #[test]
+    fn scan_finds_sessions_in_worktrees_outside_roots() {
+        let projects = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        write_session(projects.path(), "C--wt/s1.jsonl", wt.path());
+        let mut main = repo(&work.path().to_string_lossy(), "work", false);
+        main.worktrees = vec![crate::git::WorktreeHead {
+            path: wt.path().to_path_buf(),
+            branch: Some("feat".to_string()),
+        }];
+        let mut cache = SessionCache::default();
+
+        let scan = scan_sessions(projects.path(), &[main], &mut cache);
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].repo_path, wt.path());
     }
 
     #[test]

@@ -532,7 +532,7 @@ fn open_buttons(
     let lang = config.language;
     let cwd = PathBuf::from(&o.live.cwd);
     let repo = o.repo_path.clone().unwrap_or_else(|| cwd.clone());
-    let profile = config.get_effective_profile_for_repo(&repo);
+    let profile = config.get_effective_profile_for_repo(o.profile_path.as_ref().unwrap_or(&repo));
     let tint = ui.visuals().text_color();
     let icon = |src: egui::ImageSource<'static>| {
         egui::Image::new(src)
@@ -643,6 +643,7 @@ mod tests {
             title: title.to_string(),
             place: "repo".to_string(),
             repo_path: None,
+            profile_path: None,
             branch: None,
             last_prompt: None,
         }
