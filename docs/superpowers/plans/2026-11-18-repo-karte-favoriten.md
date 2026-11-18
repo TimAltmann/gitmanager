@@ -302,7 +302,7 @@
 
 - [ ] **Step 1: Failing tests:** `dialog_needs_force_when_dirty_or_ahead`; `delete_branch_disabled_without_safety` (`safety == None` → Checkbox deaktiviert, `delete_branch` bleibt false); `remove_runs_and_rescans` (Temp-Repo + Worktree, `test_app` mit Repos, Dialog bestätigen, Worker abwarten → Ordner weg, `start_scan` angestoßen).
 - [ ] **Step 2:** `docker compose run --rm dev cargo test remove_worktree_dialog dialog_needs_force delete_branch_disabled remove_runs` → FAIL.
-- [ ] **Step 3: Implementieren** (Texte laut Spec Abschnitt 3; Button `Entfernen` bzw. roter `Trotzdem entfernen`; Hinweis „Eine Claude Session läuft in diesem Ordner“; Branch-Löschen mit `force_delete = safety == Some(MrMerged)`). Fehler → `self.error` mit übersetztem Text.
+- [ ] **Step 3: Implementieren** (Texte laut Spec Abschnitt 3; Button `Entfernen` bzw. roter `Trotzdem entfernen`; Hinweis „Eine Claude Session läuft in diesem Ordner“; Branch-Löschen mit `force_delete = safety.is_some_and(|s| s.needs_force_delete())`; `needs_force()` zusätzlich wahr bei `git::head_unreachable(path)`). Fehler → `self.error` mit übersetztem Text.
 - [ ] **Step 4:** `docker compose run --rm dev cargo test` → PASS.
 - [ ] **Step 5: Commit** `feat: worktree aus der repo-liste entfernen`.
 
