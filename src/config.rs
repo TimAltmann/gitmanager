@@ -892,6 +892,16 @@ pub struct AppConfig {
     /// ist. Ältere Versionen ignorieren das Feld.
     #[serde(default = "default_claude_notify")]
     pub claude_notify: bool,
+
+    /// Favorisierte Repos/Worktrees (Schlüssel aus `repo_state_key`); stehen
+    /// oben in ihrer Liste. Ältere Versionen ignorieren das Feld.
+    #[serde(default)]
+    pub favorite_repos: Vec<String>,
+
+    /// Favorisierte Claude Sessions (Session-IDs). Ältere Versionen
+    /// ignorieren das Feld.
+    #[serde(default)]
+    pub favorite_sessions: Vec<String>,
 }
 
 fn default_claude_notify() -> bool {
@@ -1024,6 +1034,8 @@ impl Default for AppConfig {
             claude_default_dir: None,
             folder_files: Vec::new(),
             claude_notify: default_claude_notify(),
+            favorite_repos: Vec::new(),
+            favorite_sessions: Vec::new(),
         }
     }
 }
@@ -1752,6 +1764,43 @@ impl AppConfig {
         #[cfg(not(windows))]
         {
             s
+        }
+    }
+
+    /// Favoriten-Schlüssel: Komponenten normalisiert (kein abschließender
+    /// Slash), auf Windows zusätzlich ohne Groß-/Kleinschreibung.
+    fn favorite_key(path: &Path) -> String {
+        Self::repo_state_key(&path.components().collect::<PathBuf>())
+    }
+
+    /// Ist das Repo/der Worktree als Favorit markiert?
+    pub fn is_favorite_repo(&self, path: &Path) -> bool {
+        let key = Self::favorite_key(path);
+        self.favorite_repos.contains(&key)
+    }
+
+    /// Favorit setzen bzw. entfernen. Aufrufer sortieren die Liste neu
+    /// (`repo_sort_dirty`).
+    pub fn toggle_favorite_repo(&mut self, path: &Path) {
+        let key = Self::favorite_key(path);
+        if let Some(i) = self.favorite_repos.iter().position(|k| *k == key) {
+            self.favorite_repos.remove(i);
+        } else {
+            self.favorite_repos.push(key);
+        }
+    }
+
+    /// Ist die Claude Session (ID) als Favorit markiert?
+    pub fn is_favorite_session(&self, id: &str) -> bool {
+        self.favorite_sessions.iter().any(|s| s == id)
+    }
+
+    /// Favorit setzen bzw. entfernen.
+    pub fn toggle_favorite_session(&mut self, id: &str) {
+        if let Some(i) = self.favorite_sessions.iter().position(|s| s == id) {
+            self.favorite_sessions.remove(i);
+        } else {
+            self.favorite_sessions.push(id.to_string());
         }
     }
 
@@ -2541,6 +2590,54 @@ mod tests {
         cfg.active_profile_id = "invalid".to_string();
         let fallback = cfg.get_active_profile();
         assert_eq!(fallback.id, cfg.profiles[0].id);
+    }
+
+    #[test]
+    fn favorites_roundtrip() {
+        let mut cfg = AppConfig::default();
+        cfg.toggle_favorite_repo(Path::new("/a/app"));
+        cfg.toggle_favorite_session("s-1");
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.favorite_repos, cfg.favorite_repos);
+        assert_eq!(back.favorite_sessions, vec!["s-1".to_string()]);
+        assert!(back.is_favorite_repo(Path::new("/a/app")));
+    }
+
+    #[test]
+    fn old_config_without_favorites_loads() {
+        let cfg: AppConfig = serde_json::from_str(r#"{"roots":[],"max_depth":2}"#).unwrap();
+        assert!(cfg.favorite_repos.is_empty());
+        assert!(cfg.favorite_sessions.is_empty());
+    }
+
+    #[test]
+    fn toggle_favorite_repo_twice_removes() {
+        let mut cfg = AppConfig::default();
+        let p = Path::new("/a/app");
+        cfg.toggle_favorite_repo(p);
+        assert!(cfg.is_favorite_repo(p));
+        cfg.toggle_favorite_repo(p);
+        assert!(!cfg.is_favorite_repo(p));
+        assert!(cfg.favorite_repos.is_empty());
+        cfg.toggle_favorite_session("x");
+        cfg.toggle_favorite_session("x");
+        assert!(!cfg.is_favorite_session("x"));
+    }
+
+    #[test]
+    fn favorite_repo_key_is_normalized() {
+        let mut cfg = AppConfig::default();
+        #[cfg(windows)]
+        {
+            cfg.toggle_favorite_repo(Path::new(r"C:\Dev\App"));
+            assert!(cfg.is_favorite_repo(Path::new(r"c:\dev\app")));
+        }
+        #[cfg(not(windows))]
+        {
+            cfg.toggle_favorite_repo(Path::new("/a/App"));
+            assert!(cfg.is_favorite_repo(Path::new("/a/App/")));
+        }
     }
 
     #[test]

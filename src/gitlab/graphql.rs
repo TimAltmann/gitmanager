@@ -699,6 +699,72 @@ pub fn parse_recent_notes(data: &Value, count: usize) -> Vec<Vec<NoteInfo>> {
         .collect()
 }
 
+/// Projekte je Abfrage für `merged_by_branches` (Komplexität)
+pub const MERGED_BRANCHES_CHUNK: usize = 10;
+
+/// `MERGED_BRANCHES`: je Projekt `(projektpfad, quell-branches)` die
+/// gemergten MRs dieser Branches, bis zu `MERGED_BRANCHES_CHUNK` Projekte
+/// per Alias (`p0`, `p1`, …) je Abfrage.
+pub fn merged_by_branches(projects: &[(String, Vec<String>)]) -> Vec<Query> {
+    // Eine leere Branch-Liste würde GitLab als „kein Filter“ lesen: Projekte
+    // ohne Branches fragen wir nicht ab.
+    let asked: Vec<&(String, Vec<String>)> =
+        projects.iter().filter(|(_, b)| !b.is_empty()).collect();
+    asked
+        .chunks(MERGED_BRANCHES_CHUNK)
+        .map(|chunk| {
+            let mut query = Query::new("GmMergedBranches", Vec::new());
+            for (i, (path, branches)) in chunk.iter().enumerate() {
+                let (p, b) = (format!("p{i}"), format!("b{i}"));
+                let mrs = Field::object(
+                    "mergeRequests",
+                    &["MergeRequestConnection"],
+                    vec![Field::object(
+                        "nodes",
+                        &["MergeRequest"],
+                        scalars("iid sourceBranch diffHeadSha"),
+                    )
+                    .into()],
+                )
+                .arg("state", "merged")
+                .arg("sourceBranches", format!("${b}"))
+                .arg("first", 100);
+                let project = Field::object("project", &["Project"], vec![mrs.into()])
+                    .alias(format!("p{i}"))
+                    .arg("fullPath", format!("${p}"));
+                query.root.items.push(project.into());
+                query = query.var(p, "ID!", Some(Value::from(path.as_str()))).var(
+                    b,
+                    "[String!]",
+                    Some(Value::from(branches.clone())),
+                );
+            }
+            query
+        })
+        .collect()
+}
+
+/// `(iid, quell-branch, kopf-sha)` der gemergten MRs je Alias-Index;
+/// fehlende Projekte (keine Rechte) sind leer.
+pub fn parse_merged_by_branches(
+    data: &Value,
+    count: usize,
+) -> Vec<Vec<(u64, String, Option<String>)>> {
+    (0..count)
+        .map(|i| {
+            let project = data.get(format!("p{i}")).unwrap_or(&Value::Null);
+            nodes(project, "mergeRequests")
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|n| {
+                    let iid = text(n, "iid")?.parse().ok()?;
+                    Some((iid, text(n, "sourceBranch")?, text(n, "diffHeadSha")))
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// `ACCESS`: Benutzer (samt Probe, ob GitLab die To-dos verbirgt),
 /// Server-Version und Zugriff je Projekt, höchstens
 /// `ACCESS_CHUNK` Pfade je Abfrage. Ohne Pfade eine Abfrage ohne
@@ -2277,6 +2343,57 @@ mod tests {
             assert_eq!(query.text().matches(": project(").count(), 3);
         }
         assert_eq!(queries[9].variables["p2"], "g/p29");
+    }
+
+    #[test]
+    fn merged_by_branches_query_text() {
+        let projects = vec![(
+            "acme/shop".to_string(),
+            vec!["feature/a".to_string(), "fix/b".to_string()],
+        )];
+        let queries = merged_by_branches(&projects);
+        assert_eq!(queries.len(), 1);
+        let text = queries[0].text();
+        assert!(
+            text.contains("p0: project(fullPath: $p0) { mergeRequests(state: merged, sourceBranches: $b0, first: 100) { nodes { iid sourceBranch diffHeadSha } } }"),
+            "{text}"
+        );
+        assert!(text.contains("$p0: ID!"), "{text}");
+        assert!(text.contains("$b0: [String!]"), "{text}");
+        assert_eq!(
+            queries[0].variables["b0"],
+            serde_json::json!(["feature/a", "fix/b"])
+        );
+    }
+
+    #[test]
+    fn merged_by_branches_chunks() {
+        let projects: Vec<(String, Vec<String>)> = (0..11)
+            .map(|i| (format!("g/p{i}"), vec!["b".to_string()]))
+            .collect();
+        assert_eq!(merged_by_branches(&projects).len(), 2);
+    }
+
+    #[test]
+    fn parse_merged_by_branches_reads_nodes_and_missing_project() {
+        let data = serde_json::json!({
+            "p0": {"mergeRequests": {"nodes": [
+                {"iid": "134", "sourceBranch": "feature/a", "diffHeadSha": "abc"},
+                {"iid": "135", "sourceBranch": "feature/b"},
+                null
+            ]}},
+            "p1": null
+        });
+        let parsed = parse_merged_by_branches(&data, 3);
+        assert_eq!(
+            parsed[0],
+            vec![
+                (134, "feature/a".to_string(), Some("abc".to_string())),
+                (135, "feature/b".to_string(), None)
+            ]
+        );
+        assert!(parsed[1].is_empty());
+        assert!(parsed[2].is_empty());
     }
 
     #[test]

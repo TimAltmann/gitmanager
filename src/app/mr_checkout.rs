@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// So lange bleibt eine Karte nach „In Repo-Liste zeigen“ hervorgehoben.
-const HIGHLIGHT_DURATION: Duration = Duration::from_secs(2);
+pub(super) const HIGHLIGHT_DURATION: Duration = Duration::from_secs(2);
 
 /// Warum das Auschecken gescheitert ist; den Text baut erst die App
 /// (Sprache, Auth-Hinweis).
@@ -177,7 +177,7 @@ impl MyApp {
 
     /// Ordner, in dem der MR-Branch (`sourceBranch` oder `mr-<iid>`) laut
     /// Scan schon ausgecheckt ist, auch als Worktree außerhalb der Suchpfade.
-    fn mr_checked_out_at(&self, mr: &MergeRequest) -> Option<PathBuf> {
+    pub(super) fn mr_checked_out_at(&self, mr: &MergeRequest) -> Option<PathBuf> {
         let project = ProjectRef {
             hosts: &self.mr_hosts,
             host_key: &mr.host_key,

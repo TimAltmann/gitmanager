@@ -101,6 +101,41 @@ pub struct RepoInfo {
     /// Verknüpfter Worktree (`git worktree add`), kein eigener Klon: nie
     /// Basis-Klon für neue Worktrees (K1). Scan-only, Default `false`.
     pub is_linked_worktree: bool,
+    /// Letzter Commit auf HEAD (Betreff, Autor, Zeit). Scan-only, Default `None`.
+    pub last_commit: Option<LastCommit>,
+    /// Zustand des Repos für den Status-Chip. Scan-only, Default `Dirty`
+    /// bei `dirty`, sonst `Clean`.
+    pub state: RepoState,
+}
+
+/// Letzter Commit auf HEAD (`RepoInfo.last_commit`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastCommit {
+    pub summary: String,
+    pub author: String,
+    /// Unix-Sekunden
+    pub time: i64,
+}
+
+/// Art einer laufenden Git-Operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InProgressKind {
+    #[default]
+    Other,
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+/// Zustand eines Repos: Konflikte vor laufender Operation vor Dirty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RepoState {
+    #[default]
+    Clean,
+    Dirty,
+    Conflict,
+    InProgress(InProgressKind),
 }
 
 /// Anderer Worktree eines Repos (`RepoInfo.worktrees`).
@@ -136,6 +171,12 @@ impl RepoInfo {
             dirty_files: usize::from(dirty),
             worktrees: Vec::new(),
             is_linked_worktree: false,
+            last_commit: None,
+            state: if dirty {
+                RepoState::Dirty
+            } else {
+                RepoState::Clean
+            },
         }
     }
 
@@ -218,6 +259,44 @@ pub fn has_merge_conflicts(repo: &Repository) -> bool {
     repo.index().map(|idx| idx.has_conflicts()).unwrap_or(false)
 }
 
+/// Zustand des Repos: Konflikte zuerst, dann laufende Operation, dann Dirty.
+pub fn repo_state_of(repo: &Repository, dirty_files: usize) -> RepoState {
+    use git2::RepositoryState as S;
+    if has_merge_conflicts(repo) {
+        return RepoState::Conflict;
+    }
+    match repo.state() {
+        S::Clean => {
+            if dirty_files > 0 {
+                RepoState::Dirty
+            } else {
+                RepoState::Clean
+            }
+        }
+        S::Merge => RepoState::InProgress(InProgressKind::Merge),
+        S::Rebase
+        | S::RebaseInteractive
+        | S::RebaseMerge
+        | S::ApplyMailbox
+        | S::ApplyMailboxOrRebase => RepoState::InProgress(InProgressKind::Rebase),
+        S::CherryPick | S::CherryPickSequence => RepoState::InProgress(InProgressKind::CherryPick),
+        S::Revert | S::RevertSequence => RepoState::InProgress(InProgressKind::Revert),
+        _ => RepoState::InProgress(InProgressKind::Other),
+    }
+}
+
+/// Letzter Commit auf HEAD; `None` bei leerem Repo oder Lesefehler.
+pub fn last_commit_of(repo: &Repository) -> Option<LastCommit> {
+    let commit = repo.head().ok()?.peel_to_commit().ok()?;
+    let summary = commit.summary().ok().flatten()?.to_string();
+    let author = commit.author().name().ok()?.to_string();
+    Some(LastCommit {
+        summary,
+        author,
+        time: commit.time().seconds(),
+    })
+}
+
 pub fn is_merge_in_progress(repo: &Repository) -> bool {
     repo.state() != git2::RepositoryState::Clean
 }
@@ -275,6 +354,124 @@ pub fn list_branches(path: &Path) -> Vec<String> {
         Err(_) => return Vec::new(),
     };
     list_branches_in(&repo)
+}
+
+/// Ergebnis von [`fast_forward`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FfOutcome {
+    UpToDate,
+    FastForwarded {
+        commits: usize,
+    },
+    Dirty {
+        files: usize,
+    },
+    Diverged {
+        ahead: usize,
+        behind: usize,
+    },
+    NoUpstream,
+    Detached,
+    /// HEAD oder Branch hat sich während des Abrufs geändert – nichts getan
+    Changed,
+}
+
+/// Zieht den aktuellen Branch per Fast-Forward auf seinen Upstream. Setzt nie
+/// einen Branch zurück: bei lokalen Commits (`Diverged`) oder uncommitteten
+/// Änderungen (`Dirty`) passiert nichts. Fetch-Fehler werden als `Err`
+/// durchgereicht.
+pub fn fast_forward(path: &Path) -> anyhow::Result<FfOutcome> {
+    fast_forward_inner(path, || {})
+}
+
+/// Wie [`fast_forward`]; `after_fetch` läuft direkt nach dem Fetch (Tests
+/// simulieren damit Änderungen während des Abrufs).
+fn fast_forward_inner(path: &Path, after_fetch: impl FnOnce()) -> anyhow::Result<FfOutcome> {
+    let repo =
+        Repository::open(path).map_err(|e| anyhow::anyhow!("Failed to open repository: {e}"))?;
+    let (branch, detached) = get_branch(&repo);
+    if detached {
+        return Ok(FfOutcome::Detached);
+    }
+    let cfg = repo.config()?;
+    let remote = cfg.get_string(&format!("branch.{branch}.remote")).ok();
+    let merge = cfg.get_string(&format!("branch.{branch}.merge")).ok();
+    let (Some(remote), Some(merge)) = (remote, merge) else {
+        return Ok(FfOutcome::NoUpstream);
+    };
+    let Some(merge_branch) = merge.strip_prefix("refs/heads/") else {
+        return Ok(FfOutcome::NoUpstream);
+    };
+    // Lokaler Remote ("."): kein Tracking-Ref zum Fetchen.
+    if remote == "." {
+        return Ok(FfOutcome::NoUpstream);
+    }
+    let refname = format!("refs/heads/{branch}");
+    // Stand vor dem Fetch merken: danach wird nur umgesetzt, wenn HEAD und
+    // Branch noch genau so stehen (Compare-and-Swap).
+    let Ok(local_oid) = repo.refname_to_id(&refname) else {
+        return Ok(FfOutcome::NoUpstream);
+    };
+    drop(repo);
+    let spec = format!("+refs/heads/{merge_branch}:refs/remotes/{remote}/{merge_branch}");
+    // Als Fetch-Fehler kennzeichnen (UI: Fetch-Text samt Auth-Hinweis)
+    fetch_refspecs(path, &remote, &[&spec]).map_err(|e| {
+        anyhow::Error::new(PartialFetch {
+            succeeded: Vec::new(),
+            failed: vec![(remote.clone(), format!("{e:#}"))],
+        })
+    })?;
+    after_fetch();
+
+    // Nach dem Fetch neu öffnen, damit der Handle die neuen Refs sicher sieht.
+    let repo = Repository::open(path)?;
+    // HEAD muss noch auf denselben Branch zeigen, der Branch auf denselben Commit
+    let head_same = repo
+        .find_reference("HEAD")
+        .ok()
+        .is_some_and(|h| h.symbolic_target().ok().flatten() == Some(refname.as_str()));
+    if !head_same || repo.refname_to_id(&refname).ok() != Some(local_oid) {
+        return Ok(FfOutcome::Changed);
+    }
+    let local = repo.find_branch(&branch, BranchType::Local)?;
+    let Some(up_oid) = local.upstream().ok().and_then(|u| u.get().target()) else {
+        return Ok(FfOutcome::NoUpstream);
+    };
+    let (ahead, behind) = repo.graph_ahead_behind(local_oid, up_oid)?;
+    if behind == 0 {
+        return Ok(FfOutcome::UpToDate);
+    }
+    if ahead > 0 {
+        return Ok(FfOutcome::Diverged { ahead, behind });
+    }
+    let files = dirty_count(&repo);
+    if files > 0 {
+        return Ok(FfOutcome::Dirty { files });
+    }
+    let target = repo.find_commit(up_oid)?;
+    // Erst Arbeitsverzeichnis (safe: überschreibt nichts Lokales), dann Ref.
+    repo.checkout_tree(
+        target.as_object(),
+        Some(git2::build::CheckoutBuilder::new().safe()),
+    )?;
+    // Ref nur umsetzen, wenn er noch auf `local_oid` steht.
+    if let Err(e) = repo.reference_matching(
+        &refname,
+        up_oid,
+        true,
+        local_oid,
+        "gitmanager: fast-forward",
+    ) {
+        // Arbeitsverzeichnis bestmöglich auf den alten Stand zurückholen
+        if let Ok(old) = repo.find_commit(local_oid) {
+            let _ = repo.checkout_tree(
+                old.as_object(),
+                Some(git2::build::CheckoutBuilder::new().safe()),
+            );
+        }
+        return Err(anyhow::anyhow!("Branch-Ref nicht aktualisiert: {e}"));
+    }
+    Ok(FfOutcome::FastForwarded { commits: behind })
 }
 
 /// Finding C: Variante mit bereits geöffnetem Handle — kein zweites
@@ -843,6 +1040,274 @@ fn git_cli_command(args: &[&str]) -> std::process::Command {
         .stderr(std::process::Stdio::piped());
     set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
     cmd
+}
+
+/// Warum ein lokaler Branch gefahrlos gelöscht werden darf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchSafety {
+    /// Upstream existiert und enthält alle lokalen Commits. Vertraut dem
+    /// zuletzt gefetchten Tracking-Ref: ohne frischen Fetch kann der Remote
+    /// inzwischen anders aussehen.
+    Pushed,
+    /// Branch-Spitze ist schon im Default-Branch des Remotes enthalten
+    MergedIntoDefault,
+    /// Der Merge Request ist laut Hoster gemergt
+    MrMerged,
+}
+
+impl BranchSafety {
+    /// `git branch -d` prüft die Merge-Eigenschaft gegen den Upstream bzw.
+    /// den HEAD des Hauptrepos, nicht gegen den Default-Branch des Remotes.
+    /// Bei `MergedIntoDefault` und `MrMerged` würde `-d` daher trotz sicherer
+    /// Lage scheitern; dort muss `-D` genommen werden. Nur `Pushed` kommt
+    /// mit `-d` aus.
+    pub fn needs_force_delete(self) -> bool {
+        !matches!(self, BranchSafety::Pushed)
+    }
+}
+
+/// Prüft, ob ein lokaler Branch ohne Datenverlust gelöscht werden darf.
+/// `None` = nicht sicher (Aufrufer muss ausdrücklich bestätigen lassen).
+///
+/// `merged_heads`: Kopf-Commits gemergter MRs dieses Branches. `MrMerged`
+/// gilt nur, wenn die lokale Spitze einer davon ist oder darin enthalten
+/// ist; spätere lokale Commits (Branch weiterbenutzt, Name wiederverwendet)
+/// machen den Branch unsicher. Ein lokal unbekannter Kopf zählt nicht.
+pub fn branch_safety(
+    repo_path: &Path,
+    branch: &str,
+    merged_heads: &[git2::Oid],
+) -> Option<BranchSafety> {
+    let repo = Repository::open(repo_path).ok()?;
+    let local = repo.find_branch(branch, BranchType::Local).ok()?;
+    let oid = local.get().target()?;
+    if let Some(up_oid) = local.upstream().ok().and_then(|u| u.get().target()) {
+        if let Ok((ahead, _)) = repo.graph_ahead_behind(oid, up_oid) {
+            if ahead == 0 {
+                return Some(BranchSafety::Pushed);
+            }
+        }
+    }
+    // Default-Branch des Remotes: origin/HEAD, sonst origin/main, origin/master
+    let mut defaults = Vec::new();
+    if let Ok(head) = repo.find_reference("refs/remotes/origin/HEAD") {
+        if let Ok(resolved) = head.resolve() {
+            defaults.extend(resolved.target());
+        }
+    }
+    for name in ["refs/remotes/origin/main", "refs/remotes/origin/master"] {
+        defaults.extend(repo.refname_to_id(name).ok());
+    }
+    let merged = defaults
+        .into_iter()
+        .any(|d| d == oid || repo.graph_descendant_of(d, oid).unwrap_or(false));
+    if merged {
+        return Some(BranchSafety::MergedIntoDefault);
+    }
+    tip_in_merged_heads(&repo, oid, merged_heads).then_some(BranchSafety::MrMerged)
+}
+
+/// Ist `tip` einer der gemergten MR-Köpfe oder darin enthalten? Ein lokal
+/// unbekannter Kopf zählt nicht. Gemeinsame Regel für die Branch-Sicherheit
+/// und den Aufräum-Grund „MR gemergt“.
+pub fn tip_in_merged_heads(repo: &Repository, tip: git2::Oid, merged_heads: &[git2::Oid]) -> bool {
+    merged_heads.iter().any(|&head| {
+        head == tip
+            || (repo.find_commit(head).is_ok()
+                && repo.graph_descendant_of(head, tip).unwrap_or(false))
+    })
+}
+
+/// Hat der Branch einen konfigurierten Upstream, dessen Remote-Branch aber
+/// nicht mehr existiert (nach `fetch --prune` gelöscht)?
+pub fn upstream_gone(repo: &Repository, branch: &str) -> bool {
+    let Ok(cfg) = repo.config() else {
+        return false;
+    };
+    let remote = cfg.get_string(&format!("branch.{branch}.remote")).ok();
+    let merge = cfg.get_string(&format!("branch.{branch}.merge")).ok();
+    let (Some(remote), Some(merge)) = (remote, merge) else {
+        return false;
+    };
+    // Lokaler Upstream ("."): kein Remote-Tracking-Ref, nie „gone“.
+    if remote == "." {
+        return false;
+    }
+    let Some(name) = merge.strip_prefix("refs/heads/") else {
+        return false;
+    };
+    repo.find_reference(&format!("refs/remotes/{remote}/{name}"))
+        .is_err()
+}
+
+/// Lokale Branches mit verwaistem Upstream, ohne den aktuell ausgecheckten
+/// und ohne die in anderen Worktrees ausgecheckten.
+pub fn gone_local_branches(repo_path: &Path) -> Vec<String> {
+    let Ok(repo) = Repository::open(repo_path) else {
+        return Vec::new();
+    };
+    let mut checked_out: Vec<String> = Vec::new();
+    let mut note_head = |r: &Repository| {
+        if let Ok(head) = r.find_reference("HEAD") {
+            if let Some(name) = head
+                .symbolic_target()
+                .ok()
+                .flatten()
+                .and_then(|t| t.strip_prefix("refs/heads/"))
+            {
+                checked_out.push(name.to_string());
+            }
+        }
+    };
+    note_head(&repo);
+    // Aus einem Worktree heraus: auch das Hauptrepo und alle Geschwister
+    let main = Repository::open(repo.commondir()).ok();
+    let base = main.as_ref().unwrap_or(&repo);
+    if !base.is_bare() {
+        note_head(base);
+    }
+    if let Ok(names) = base.worktrees() {
+        for name in names.iter().flatten().flatten() {
+            if let Ok(wt) = base.find_worktree(name) {
+                if let Ok(wt_repo) = Repository::open_from_worktree(&wt) {
+                    note_head(&wt_repo);
+                }
+            }
+        }
+    }
+    let Ok(branches) = repo.branches(Some(BranchType::Local)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = branches
+        .flatten()
+        .filter_map(|(b, _)| b.name().ok().flatten().map(str::to_string))
+        .filter(|n| !checked_out.contains(n) && upstream_gone(&repo, n))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Hauptrepo eines Worktrees: Elternordner von `common_dir` (heißt er
+/// `.git`), sonst `common_dir` selbst (Bare-Repo).
+pub fn main_repo_of(common_dir: &Path) -> PathBuf {
+    if common_dir.file_name().is_some_and(|n| n == ".git") {
+        if let Some(parent) = common_dir.parent() {
+            return parent.to_path_buf();
+        }
+    }
+    common_dir.to_path_buf()
+}
+
+/// Ist HEAD des Worktrees detached und sein Commit von keinem lokalen oder
+/// Remote-Tracking-Branch erreichbar? Dann gingen beim Entfernen Commits
+/// verloren. Im Zweifel (Fehler beim Öffnen/Lesen) `true`.
+pub fn head_unreachable(worktree_path: &Path) -> bool {
+    let Ok(repo) = Repository::open(worktree_path) else {
+        return true;
+    };
+    match repo.head_detached() {
+        Ok(false) => return false,
+        Ok(true) => {}
+        Err(_) => return true,
+    }
+    let Some(head) = repo.head().ok().and_then(|h| h.target()) else {
+        return true;
+    };
+    let Ok(refs) = repo.references() else {
+        return true;
+    };
+    for r in refs {
+        let Ok(r) = r else {
+            return true;
+        };
+        let Ok(name) = r.name() else {
+            continue;
+        };
+        if !(name.starts_with("refs/heads/") || name.starts_with("refs/remotes/")) {
+            continue;
+        }
+        let Ok(r) = r.resolve() else {
+            continue;
+        };
+        if let Some(tip) = r.target() {
+            match repo.graph_descendant_of(tip, head) {
+                Ok(true) => return false,
+                Ok(false) if tip == head => return false,
+                Ok(false) => {}
+                Err(_) => return true,
+            }
+        }
+    }
+    true
+}
+
+/// Entfernt einen Worktree über System-`git`. Ohne `force` verweigert git
+/// bei uncommitteten Änderungen (und gesperrten Worktrees); zusätzlich
+/// verweigern wir bei detached HEAD mit sonst nirgends erreichbaren Commits
+/// ([`head_unreachable`]), bevor etwas angefasst wird. Existiert der Ordner
+/// schon nicht mehr, wird nur der verwaiste Eintrag geprunt; `worktree
+/// prune` wirkt dabei auf das ganze Repo, nicht nur auf diesen Worktree. Am
+/// Ende muss der Pfad aus der Worktree-Liste verschwunden sein, sonst `Err`.
+/// Der Branch wird nur gelöscht, wenn `delete_branch` gesetzt ist; sein
+/// `force_delete` entscheidet zwischen `-d` und `-D`.
+pub fn remove_worktree(
+    worktree_path: &Path,
+    main_repo: &Path,
+    force: bool,
+    delete_branch: Option<(&str, bool)>,
+) -> anyhow::Result<()> {
+    let worktree_path = strip_verbatim(worktree_path);
+    let main_repo = strip_verbatim(main_repo);
+    let main_str = main_repo.display().to_string();
+    let path_str = worktree_path.display().to_string();
+    let exists = worktree_path.exists();
+    if exists && !force && head_unreachable(&worktree_path) {
+        anyhow::bail!(
+            "worktree '{path_str}' has a detached HEAD with commits not reachable from any \
+             branch; removing it would lose them (force required)"
+        );
+    }
+    if exists {
+        let mut args = vec!["-C", &main_str, "worktree", "remove"];
+        if force {
+            args.push("--force");
+        }
+        args.push("--");
+        args.push(&path_str);
+        run_git_cli(&args, "worktree remove", GIT_CLI_WORKTREE_TIMEOUT)?;
+    }
+    // Immer: räumt auch Einträge, deren Ordner von Hand gelöscht wurde
+    run_git_cli(
+        &["-C", &main_str, "worktree", "prune"],
+        "worktree prune",
+        GIT_CLI_WORKTREE_TIMEOUT,
+    )?;
+    // Nichts als erledigt melden, was git unter anderem Pfad führt
+    let repo = Repository::open(&main_repo)?;
+    let wanted = canonical_key_path(&worktree_path);
+    for name in repo.worktrees()?.iter().flatten().flatten() {
+        if let Ok(wt) = repo.find_worktree(name) {
+            if canonical_key_path(&strip_verbatim(wt.path())) == wanted {
+                anyhow::bail!("worktree '{path_str}' is still registered after removal");
+            }
+        }
+    }
+    if let Some((branch, force_delete)) = delete_branch {
+        delete_local_branch(&main_repo, branch, force_delete)?;
+    }
+    Ok(())
+}
+
+/// Löscht einen lokalen Branch (`git branch -d`, mit `force` `-D`). Ohne
+/// `force` verweigert git bei ungemergten Commits.
+pub fn delete_local_branch(repo_path: &Path, branch: &str, force: bool) -> anyhow::Result<()> {
+    let repo_str = repo_path.display().to_string();
+    let flag = if force { "-D" } else { "-d" };
+    run_git_cli(
+        &["-C", &repo_str, "branch", flag, "--", branch],
+        &format!("branch {flag} '{branch}'"),
+        GIT_CLI_WORKTREE_TIMEOUT,
+    )
 }
 
 /// Strukturierter Fetch-Fehler (alle Remotes failed UND partielle Fehlschläge).
@@ -2252,6 +2717,8 @@ pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
     info.dirty_files = dirty_files;
     info.worktrees = read_worktree_heads(&repo);
     info.is_linked_worktree = repo.is_worktree();
+    info.state = repo_state_of(&repo, dirty_files);
+    info.last_commit = last_commit_of(&repo);
     Some(info)
 }
 
@@ -2311,17 +2778,26 @@ fn canonical_key_path(path: &Path) -> PathBuf {
     };
     #[cfg(windows)]
     {
-        if let Some(rest) = canon.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
-            if let Some(unc) = rest.strip_prefix(r"UNC\") {
-                return PathBuf::from(format!(r"\\{unc}"));
-            }
-            // Nur Laufwerkspfade (`C:\…`), `Volume{…}` bleibt verbatim
-            if rest.as_bytes().get(1) == Some(&b':') {
-                return PathBuf::from(rest);
-            }
+        return strip_verbatim(&canon);
+    }
+    #[cfg(not(windows))]
+    {
+        canon
+    }
+}
+
+/// Entfernt ein `\\?\`- bzw. `\\?\UNC\`-Präfix (nur Laufwerks- und UNC-Pfade;
+/// `Volume{…}` bleibt verbatim). Reine Textlogik, daher plattformunabhängig.
+fn strip_verbatim(path: &Path) -> PathBuf {
+    if let Some(rest) = path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        if let Some(unc) = rest.strip_prefix(r"UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        if rest.as_bytes().get(1) == Some(&b':') {
+            return PathBuf::from(rest);
         }
     }
-    canon
+    path.to_path_buf()
 }
 
 /// Remotes für die Merge-Request-Zuordnung: origin zuerst, dann
@@ -5549,6 +6025,68 @@ mod tests {
     }
 
     #[test]
+    fn repo_state_clean_dirty() {
+        let dir = tempdir().unwrap();
+        let repo = init_repo_with_commit(dir.path(), "main");
+        assert_eq!(repo_state_of(&repo, 0), RepoState::Clean);
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        assert_eq!(repo_state_of(&repo, dirty_count(&repo)), RepoState::Dirty);
+    }
+
+    #[test]
+    fn repo_state_conflict_and_merge() {
+        let dir = tempdir().unwrap();
+        let p = dir.path();
+        init_repo_with_commit(p, "main");
+        commit_file(p, "a.txt", "base\n", "base");
+        git_cmd(p, &["checkout", "-b", "other"]);
+        commit_file(p, "a.txt", "other\n", "other");
+        git_cmd(p, &["checkout", "main"]);
+        commit_file(p, "a.txt", "main\n", "main");
+        // Merge scheitert mit Konflikt: Fehler bewusst ignorieren
+        let _ = std::process::Command::new("git")
+            .args(["merge", "other"])
+            .current_dir(p)
+            .output();
+        let repo = Repository::open(p).unwrap();
+        assert_eq!(repo_state_of(&repo, 1), RepoState::Conflict);
+        fs::write(p.join("a.txt"), "resolved\n").unwrap();
+        git_cmd(p, &["add", "a.txt"]);
+        let repo = Repository::open(p).unwrap();
+        assert_eq!(
+            repo_state_of(&repo, 1),
+            RepoState::InProgress(InProgressKind::Merge)
+        );
+    }
+
+    #[test]
+    fn last_commit_reads_head() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        commit_file(dir.path(), "a.txt", "x", "Fix rounding\n\nbody");
+        let repo = Repository::open(dir.path()).unwrap();
+        let lc = last_commit_of(&repo).unwrap();
+        assert_eq!(lc.summary, "Fix rounding");
+        assert_eq!(lc.author, "Test");
+        assert!(lc.time > 0);
+        let empty = tempdir().unwrap();
+        let repo = Repository::init(empty.path()).unwrap();
+        assert!(last_commit_of(&repo).is_none());
+    }
+
+    #[test]
+    fn get_repo_info_fills_state_and_last_commit() {
+        let dir = tempdir().unwrap();
+        init_repo_with_commit(dir.path(), "main");
+        let info = get_repo_info(dir.path().to_path_buf()).unwrap();
+        assert_eq!(info.state, RepoState::Clean);
+        assert_eq!(info.last_commit.unwrap().summary, "initial");
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        let info = get_repo_info(dir.path().to_path_buf()).unwrap();
+        assert_eq!(info.state, RepoState::Dirty);
+    }
+
+    #[test]
     fn get_repo_info_counts_dirty_files() {
         let dir = tempdir().unwrap();
         init_repo_with_commit(dir.path(), "main");
@@ -6164,5 +6702,405 @@ mod tests {
         let repo = Path::new("/tmp/repo");
         let sub = substitute_placeholders("{file} {dir} {repo}", file, repo);
         assert_eq!(sub, "/tmp/repo/sub/app.sln /tmp/repo/sub /tmp/repo");
+    }
+
+    // --- fast_forward: Bare-Origin, c1 ist behind, c2 pusht zwei Commits ---
+
+    /// c1 (auf `main`, Upstream origin/main); c2 pusht danach zwei Commits.
+    fn ff_setup(base: &Path) -> PathBuf {
+        let c1 = origin_and_clone_with_feature(base);
+        git_cmd(base, &["clone", "-b", "main", "origin.git", "c2"]);
+        let c2 = base.join("c2");
+        git_identity(&c2);
+        commit_file(&c2, "n1.txt", "1\n", "remote 1");
+        commit_file(&c2, "n2.txt", "2\n", "remote 2");
+        git_cmd(&c2, &["push", "origin", "main"]);
+        c1
+    }
+
+    #[test]
+    fn ff_fast_forwards_clean_branch() {
+        let base = tempdir().unwrap();
+        let c1 = ff_setup(base.path());
+        let out = fast_forward(&c1).unwrap();
+        assert_eq!(out, FfOutcome::FastForwarded { commits: 2 });
+        assert_eq!(
+            ref_oid(&c1, "refs/heads/main"),
+            ref_oid(&base.path().join("c2"), "refs/heads/main")
+        );
+        assert!(c1.join("n2.txt").exists());
+        assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::UpToDate);
+    }
+
+    #[test]
+    fn ff_up_to_date() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::UpToDate);
+    }
+
+    #[test]
+    fn ff_refuses_dirty() {
+        let base = tempdir().unwrap();
+        let c1 = ff_setup(base.path());
+        let before = ref_oid(&c1, "refs/heads/main");
+        fs::write(c1.join("a.txt"), "geaendert\n").unwrap();
+        assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::Dirty { files: 1 });
+        assert_eq!(ref_oid(&c1, "refs/heads/main"), before);
+    }
+
+    #[test]
+    fn ff_refuses_diverged() {
+        let base = tempdir().unwrap();
+        let c1 = ff_setup(base.path());
+        commit_file(&c1, "own.txt", "own\n", "own");
+        let before = ref_oid(&c1, "refs/heads/main");
+        assert_eq!(
+            fast_forward(&c1).unwrap(),
+            FfOutcome::Diverged {
+                ahead: 1,
+                behind: 2
+            }
+        );
+        assert_eq!(ref_oid(&c1, "refs/heads/main"), before);
+    }
+
+    #[test]
+    fn ff_no_upstream() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["checkout", "-b", "lokal"]);
+        assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::NoUpstream);
+    }
+
+    #[test]
+    fn ff_detached() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["checkout", "--detach"]);
+        assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::Detached);
+    }
+
+    #[test]
+    fn ff_fetch_failure_is_a_fetch_error() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let gone = base.path().join("weg.git");
+        git_cmd(
+            &c1,
+            &["remote", "set-url", "origin", gone.to_str().unwrap()],
+        );
+        let err = fast_forward(&c1).unwrap_err();
+        assert!(is_fetch_error(&err), "{err:#}");
+    }
+
+    #[test]
+    fn ff_head_switched_during_fetch_changes_nothing() {
+        let base = tempdir().unwrap();
+        let c1 = ff_setup(base.path());
+        let main_before = ref_oid(&c1, "refs/heads/main");
+        let feat_before = ref_oid(&c1, "refs/heads/feature/x");
+        // Zwischen Fetch und Umsetzen wechselt jemand den Branch.
+        let out = fast_forward_inner(&c1, || {
+            git_cmd(&c1, &["checkout", "feature/x"]);
+        })
+        .unwrap();
+        assert_eq!(out, FfOutcome::Changed);
+        assert_eq!(ref_oid(&c1, "refs/heads/main"), main_before);
+        assert_eq!(ref_oid(&c1, "refs/heads/feature/x"), feat_before);
+        assert_eq!(head_target(&c1), "refs/heads/feature/x");
+        assert!(c1.join("x.txt").exists());
+        assert!(!c1.join("n1.txt").exists());
+    }
+
+    #[test]
+    fn ff_branch_moved_during_fetch_changes_nothing() {
+        let base = tempdir().unwrap();
+        let c1 = ff_setup(base.path());
+        // Zwischen Fetch und Umsetzen entsteht ein neuer lokaler Commit.
+        let out = fast_forward_inner(&c1, || {
+            commit_file(&c1, "own.txt", "own\n", "own");
+        })
+        .unwrap();
+        assert_eq!(out, FfOutcome::Changed);
+        let repo = Repository::open(&c1).unwrap();
+        let main = repo.refname_to_id("refs/heads/main").unwrap();
+        let commit = repo.find_commit(main).unwrap();
+        assert_eq!(commit.summary().ok().flatten(), Some("own"));
+        assert!(c1.join("own.txt").exists());
+        assert!(!c1.join("n1.txt").exists());
+    }
+
+    /// Hauptrepo `c1` (origin + main) und ein CLI-Worktree `wt` auf neuem
+    /// Branch `feat` (ein eigener Commit, ungepusht).
+    fn repo_with_feat_worktree(base: &Path) -> (PathBuf, PathBuf) {
+        let c1 = origin_and_clone_with_feature(base);
+        let wt = base.join("wt");
+        git_cmd(
+            &c1,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat",
+                wt.to_str().unwrap(),
+                "main",
+            ],
+        );
+        git_identity(&wt);
+        commit_file(&wt, "f.txt", "f\n", "own commit");
+        (c1, wt)
+    }
+
+    fn worktree_listing(repo: &Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[test]
+    fn remove_clean_worktree() {
+        let base = tempdir().unwrap();
+        let (c1, wt) = repo_with_feat_worktree(base.path());
+        remove_worktree(&wt, &c1, false, None).unwrap();
+        assert!(!wt.exists());
+        assert!(!worktree_listing(&c1).contains("wt"));
+        assert!(ref_exists(&c1, "refs/heads/feat"), "Branch bleibt");
+    }
+
+    #[test]
+    fn remove_dirty_worktree_needs_force() {
+        let base = tempdir().unwrap();
+        let (c1, wt) = repo_with_feat_worktree(base.path());
+        fs::write(wt.join("f.txt"), "geändert\n").unwrap();
+        assert!(remove_worktree(&wt, &c1, false, None).is_err());
+        assert!(wt.exists(), "dirty Worktree bleibt ohne force");
+        remove_worktree(&wt, &c1, true, None).unwrap();
+        assert!(!wt.exists());
+    }
+
+    #[test]
+    fn remove_worktree_already_deleted_folder() {
+        let base = tempdir().unwrap();
+        let (c1, wt) = repo_with_feat_worktree(base.path());
+        fs::remove_dir_all(&wt).unwrap();
+        remove_worktree(&wt, &c1, false, None).unwrap();
+        assert!(!worktree_listing(&c1).contains("wt"));
+        assert!(!c1.join(".git").join("worktrees").join("wt").exists());
+    }
+
+    #[test]
+    fn remove_worktree_deletes_branch() {
+        let base = tempdir().unwrap();
+        let (c1, wt) = repo_with_feat_worktree(base.path());
+        // Ungemergter Branch: ohne force Fehler (Worktree ist dann schon weg)
+        let err = remove_worktree(&wt, &c1, false, Some(("feat", false))).unwrap_err();
+        assert!(err.to_string().contains("feat"), "{err}");
+        assert!(!wt.exists());
+        assert!(ref_exists(&c1, "refs/heads/feat"));
+        delete_local_branch(&c1, "feat", true).unwrap();
+        assert!(!ref_exists(&c1, "refs/heads/feat"));
+        // Direkt mit force_delete
+        git_cmd(
+            &c1,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat2",
+                wt.to_str().unwrap(),
+                "main",
+            ],
+        );
+        git_identity(&wt);
+        commit_file(&wt, "g.txt", "g\n", "own");
+        remove_worktree(&wt, &c1, false, Some(("feat2", true))).unwrap();
+        assert!(!ref_exists(&c1, "refs/heads/feat2"));
+        // Gemergter Branch: -d genügt
+        git_cmd(&c1, &["branch", "merged", "main"]);
+        delete_local_branch(&c1, "merged", false).unwrap();
+        assert!(!ref_exists(&c1, "refs/heads/merged"));
+    }
+
+    #[test]
+    fn branch_safety_cases() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        // gepusht (Upstream vorhanden, ahead == 0)
+        assert_eq!(
+            branch_safety(&c1, "feature/x", &[]),
+            Some(BranchSafety::Pushed)
+        );
+        // in origin/main gemergt, Upstream weg
+        git_cmd(&c1, &["branch", "old", "main"]);
+        assert_eq!(
+            branch_safety(&c1, "old", &[]),
+            Some(BranchSafety::MergedIntoDefault)
+        );
+        // eigener Commit ohne Upstream
+        git_cmd(&c1, &["checkout", "-b", "own", "main"]);
+        commit_file(&c1, "o.txt", "o\n", "own");
+        git_cmd(&c1, &["checkout", "main"]);
+        assert_eq!(branch_safety(&c1, "own", &[]), None);
+        // eigener Commit zusätzlich zum Upstream: nicht „Pushed“
+        git_cmd(&c1, &["checkout", "feature/x"]);
+        commit_file(&c1, "x2.txt", "x2\n", "unpushed");
+        git_cmd(&c1, &["checkout", "main"]);
+        assert_eq!(branch_safety(&c1, "feature/x", &[]), None);
+    }
+
+    #[test]
+    fn branch_safety_mr_merged_needs_matching_head() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        git_cmd(&c1, &["checkout", "-b", "own", "main"]);
+        commit_file(&c1, "o.txt", "o\n", "own");
+        let repo = Repository::open(&c1).unwrap();
+        let tip = repo.refname_to_id("refs/heads/own").unwrap();
+        // MR-Kopf == Spitze
+        assert_eq!(
+            branch_safety(&c1, "own", &[tip]),
+            Some(BranchSafety::MrMerged)
+        );
+        // Spitze ist Vorfahre des MR-Kopfs (MR hatte später mehr Commits)
+        commit_file(&c1, "o2.txt", "o2\n", "later in mr");
+        let later = repo.refname_to_id("refs/heads/own").unwrap();
+        git_cmd(&c1, &["reset", "-q", "--hard", &tip.to_string()]);
+        assert_eq!(
+            branch_safety(&c1, "own", &[later]),
+            Some(BranchSafety::MrMerged)
+        );
+        // Lokaler Commit über den MR-Kopf hinaus: nicht sicher
+        commit_file(&c1, "o3.txt", "o3\n", "after merge");
+        assert_eq!(branch_safety(&c1, "own", &[tip]), None);
+        // MR-Kopf lokal unbekannt: nicht sicher
+        let missing = git2::Oid::from_str("1234567890abcdef1234567890abcdef12345678").unwrap();
+        git_cmd(&c1, &["reset", "-q", "--hard", &tip.to_string()]);
+        assert_eq!(branch_safety(&c1, "own", &[missing]), None);
+        assert_eq!(
+            branch_safety(&c1, "own", &[missing, tip]),
+            Some(BranchSafety::MrMerged)
+        );
+        git_cmd(&c1, &["checkout", "main"]);
+    }
+
+    #[test]
+    fn gone_upstream_detected() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let repo = Repository::open(&c1).unwrap();
+        assert!(!upstream_gone(&repo, "feature/x"));
+        assert!(!upstream_gone(&repo, "nonexistent"));
+        // Remote-Branch löschen (über zweiten Klon) und prunen
+        git_cmd(base.path(), &["clone", "origin.git", "c2"]);
+        git_cmd(
+            &base.path().join("c2"),
+            &["push", "origin", "--delete", "feature/x"],
+        );
+        git_cmd(&c1, &["fetch", "--prune", "origin"]);
+        let repo = Repository::open(&c1).unwrap();
+        assert!(upstream_gone(&repo, "feature/x"));
+        assert!(!upstream_gone(&repo, "main"));
+        assert_eq!(gone_local_branches(&c1), vec!["feature/x".to_string()]);
+        // Aktueller Branch wird nie vorgeschlagen
+        git_cmd(&c1, &["checkout", "feature/x"]);
+        assert!(gone_local_branches(&c1).is_empty());
+        // … und ebenso keiner, der in einem Worktree ausgecheckt ist
+        git_cmd(&c1, &["checkout", "main"]);
+        let wt = base.path().join("wt");
+        git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "feature/x"]);
+        assert!(gone_local_branches(&c1).is_empty());
+    }
+
+    #[test]
+    fn needs_force_delete_per_safety() {
+        assert!(!BranchSafety::Pushed.needs_force_delete());
+        assert!(BranchSafety::MergedIntoDefault.needs_force_delete());
+        assert!(BranchSafety::MrMerged.needs_force_delete());
+    }
+
+    #[test]
+    fn merged_into_origin_default_is_deletable_via_safety() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        // origin/main enthält `merged`; das Hauptrepo steht auf einem anderen
+        // Branch ohne diesen Commit
+        git_cmd(&c1, &["checkout", "-b", "merged", "main"]);
+        commit_file(&c1, "m.txt", "m\n", "merged work");
+        git_cmd(&c1, &["push", "origin", "merged:main"]);
+        git_cmd(&c1, &["fetch", "origin"]);
+        git_cmd(&c1, &["checkout", "-b", "other", "main"]);
+        let safety = branch_safety(&c1, "merged", &[]).unwrap();
+        assert_eq!(safety, BranchSafety::MergedIntoDefault);
+        // `-d` würde hier am HEAD des Hauptrepos scheitern
+        assert!(delete_local_branch(&c1, "merged", false).is_err());
+        let wt = base.path().join("wt");
+        git_cmd(&c1, &["worktree", "add", wt.to_str().unwrap(), "main"]);
+        remove_worktree(
+            &wt,
+            &c1,
+            false,
+            Some(("merged", safety.needs_force_delete())),
+        )
+        .unwrap();
+        assert!(!ref_exists(&c1, "refs/heads/merged"));
+    }
+
+    #[test]
+    fn head_unreachable_detached_cases() {
+        let base = tempdir().unwrap();
+        let (c1, wt) = repo_with_feat_worktree(base.path());
+        // Branch ausgecheckt: nicht detached → false
+        assert!(!head_unreachable(&wt));
+        // Detached auf einem Branch-Commit
+        git_cmd(&wt, &["checkout", "--detach", "main"]);
+        assert!(!head_unreachable(&wt));
+        remove_worktree(&wt, &c1, false, None).unwrap();
+        assert!(!wt.exists());
+        // Detached mit eigenem, nirgends erreichbarem Commit
+        git_cmd(
+            &c1,
+            &["worktree", "add", "--detach", wt.to_str().unwrap(), "main"],
+        );
+        git_identity(&wt);
+        commit_file(&wt, "d.txt", "d\n", "lost");
+        assert!(head_unreachable(&wt));
+        let err = remove_worktree(&wt, &c1, false, None).unwrap_err();
+        assert!(err.to_string().contains("detached"), "{err}");
+        assert!(wt.exists());
+        remove_worktree(&wt, &c1, true, None).unwrap();
+        assert!(!wt.exists());
+        // Kein Repo → im Zweifel „unerreichbar“
+        assert!(head_unreachable(&base.path().join("nirgends")));
+    }
+
+    #[test]
+    fn remove_worktree_rejects_unregistered_path() {
+        let base = tempdir().unwrap();
+        let (c1, _wt) = repo_with_feat_worktree(base.path());
+        let other = base.path().join("other");
+        fs::create_dir(&other).unwrap();
+        assert!(remove_worktree(&other, &c1, false, None).is_err());
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_cases() {
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\C:\Dev\x")),
+            PathBuf::from(r"C:\Dev\x")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\UNC\srv\share\x")),
+            PathBuf::from(r"\\srv\share\x")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\Volume{1}\x")),
+            PathBuf::from(r"\\?\Volume{1}\x")
+        );
+        assert_eq!(strip_verbatim(Path::new("/a/b")), PathBuf::from("/a/b"));
     }
 }

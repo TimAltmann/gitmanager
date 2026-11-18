@@ -117,6 +117,27 @@ pub fn layout_mode(width: f32) -> LayoutMode {
     }
 }
 
+/// MR, den die Ansicht anspringt und zeitweise hervorhebt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MrFocus {
+    pub host_key: String,
+    pub id: String,
+    pub since: std::time::Instant,
+    /// Die Zeile wurde schon angescrollt (nur einmal)
+    pub scrolled: bool,
+}
+
+impl MrFocus {
+    pub fn new(host_key: &str, id: &str) -> Self {
+        Self {
+            host_key: host_key.to_string(),
+            id: id.to_string(),
+            since: std::time::Instant::now(),
+            scrolled: false,
+        }
+    }
+}
+
 /// Zustand der Ansicht für die Sitzung (nicht gespeichert, E13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MrViewState {
@@ -133,6 +154,9 @@ pub struct MrViewState {
     /// Suche je Spalte
     pub mine_query: String,
     pub others_query: String,
+    /// MR, den die Ansicht einmal anspringt und hervorhebt (`host_key`, `id`),
+    /// z. B. vom Chip der Repo-Karte
+    pub focus: Option<MrFocus>,
 }
 
 impl MrViewState {
@@ -148,6 +172,7 @@ impl MrViewState {
             merged_days: MERGED_DEFAULT_DAYS,
             mine_query: String::new(),
             others_query: String::new(),
+            focus: None,
         }
     }
 
@@ -215,6 +240,8 @@ pub struct MrViewActions {
     pub open_settings_mr_tab: bool,
     /// MR in dieser Zeile geöffnet (`host_key`, `id`): Neues gilt als gesehen
     pub seen: Option<(String, String)>,
+    /// Die Zeile des Fokus wurde in diesem Frame gezeichnet (hervorgehoben)
+    pub focus_drawn: bool,
 }
 
 /// Was die Ansicht je Frame braucht; baut `app.rs` (Task 10).
@@ -565,6 +592,7 @@ pub fn show_merge_requests(
             snap,
             multi_host: snap.per_host.len() > 1,
             has_data: snap.per_host.is_empty() || snap.per_host.iter().any(|h| h.error.is_none()),
+            focus: state.focus.clone(),
         };
         show_dashboard(ui, &view, state, actions);
     });
@@ -579,6 +607,8 @@ struct View<'v> {
     multi_host: bool,
     /// Mindestens ein Host lieferte Daten; sonst keine Leerzustände
     has_data: bool,
+    /// Zeile, die diesen Frame hervorgehoben und angescrollt wird
+    focus: Option<MrFocus>,
 }
 
 impl View<'_> {
@@ -1518,7 +1548,11 @@ fn draw_row(
                 bottom: 10,
             }
         };
-        Frame::new().inner_margin(margin).show(ui, |ui| {
+        let focused = v
+            .focus
+            .as_ref()
+            .is_some_and(|f| f.host_key == mr.host_key && f.id == mr.id);
+        let frame = Frame::new().inner_margin(margin).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = if kind == RowKind::Uninvolved {
                 4.0
@@ -1584,6 +1618,19 @@ fn draw_row(
                 }
             }
         });
+        if focused {
+            let rect = frame.response.rect;
+            ui.painter().rect_stroke(
+                rect,
+                egui::CornerRadius::same(4),
+                egui::Stroke::new(2.0_f32, ui.visuals().selection.stroke.color),
+                egui::StrokeKind::Inside,
+            );
+            if v.focus.as_ref().is_some_and(|f| !f.scrolled) {
+                ui.scroll_to_rect(rect, Some(egui::Align::Center));
+            }
+            actions.focus_drawn = true;
+        }
     });
     // Browser, Auschecken oder Öffnen im Klon (Agent, IDE …): MR gesehen
     let after = (
@@ -1929,16 +1976,7 @@ impl Row<'_> {
     /// „Keine Pipeline“ bzw. ohne sicheren Link nur Text.
     fn pipeline(&self, ui: &mut Ui, actions: &mut MrViewActions, min_width: f32) {
         let (lang, p, mr) = (self.lang(), &self.v.p, self.mr);
-        let (icon, color) = match mr.pipeline {
-            PipelineState::Success => (ICON_CHECK_CIRCLE, p.ok_icon),
-            PipelineState::Failed => (ICON_X_CIRCLE, p.fail_icon),
-            PipelineState::Running => (ICON_CIRCLE_NOTCH, p.run_icon),
-            PipelineState::Pending => (ICON_CLOCK, p.run_icon),
-            PipelineState::Canceled => (ICON_PROHIBIT, p.neutral_icon),
-            PipelineState::Skipped => (ICON_SKIP_CIRCLE, p.neutral_icon),
-            PipelineState::Manual => (ICON_PLAY_CIRCLE, p.neutral_icon),
-            PipelineState::NoPipeline => (ICON_MINUS_CIRCLE, p.neutral_icon),
-        };
+        let (icon, color) = pipeline_icon(mr.pipeline, p);
         let label = tr(lang, mr.pipeline.label_key());
         let tooltip = pipeline_tooltip(lang, mr);
         let width = (19.0 + text_width(ui, &label, FontId::proportional(11.0))).max(min_width);
@@ -2799,6 +2837,23 @@ fn divider(ui: &mut Ui, v: &View) {
     let y = ui.cursor().top();
     ui.painter()
         .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, v.p.line));
+}
+
+/// Icon und Farbe des Pipeline-Status (MR-Zeile und Chip der Repo-Karte).
+pub(crate) fn pipeline_icon(
+    state: PipelineState,
+    p: &MrPalette,
+) -> (ImageSource<'static>, Color32) {
+    match state {
+        PipelineState::Success => (ICON_CHECK_CIRCLE, p.ok_icon),
+        PipelineState::Failed => (ICON_X_CIRCLE, p.fail_icon),
+        PipelineState::Running => (ICON_CIRCLE_NOTCH, p.run_icon),
+        PipelineState::Pending => (ICON_CLOCK, p.run_icon),
+        PipelineState::Canceled => (ICON_PROHIBIT, p.neutral_icon),
+        PipelineState::Skipped => (ICON_SKIP_CIRCLE, p.neutral_icon),
+        PipelineState::Manual => (ICON_PLAY_CIRCLE, p.neutral_icon),
+        PipelineState::NoPipeline => (ICON_MINUS_CIRCLE, p.neutral_icon),
+    }
 }
 
 fn icon_image(icon: ImageSource<'static>, size: f32, tint: Color32) -> Image<'static> {
@@ -4135,6 +4190,7 @@ mod tests {
             snap: &snap,
             multi_host: false,
             has_data: true,
+            focus: None,
         };
         let counts = |state: &MrViewState| -> (Option<String>, Option<String>) {
             let [open, merged] = mine_segments(&view, state);
@@ -4219,6 +4275,7 @@ mod tests {
                 snap: &snap,
                 multi_host: false,
                 has_data: true,
+                focus: None,
             };
             let mut state = MrViewState::new(&cfg);
             state.mine_merged = true;
@@ -4330,6 +4387,7 @@ mod tests {
             snap: &snap,
             multi_host: false,
             has_data: true,
+            focus: None,
         };
         let review = &snap.others[0];
         let cache_id = Id::new("menu_test");
@@ -4415,6 +4473,7 @@ mod tests {
             snap: &snap,
             multi_host: false,
             has_data: true,
+            focus: None,
         };
         let buttons = |path: &str| {
             let ctx = egui::Context::default();
