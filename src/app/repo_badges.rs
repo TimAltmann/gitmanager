@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::{MainView, MyApp};
+use crate::claude_live::{LiveSession, LiveStatus};
+use crate::claude_sessions::path_key;
 use crate::config::MrConfig;
+use crate::git::RepoInfo;
 use crate::gitlab::model::{approvals, MergeRequest, PipelineState};
 use crate::ui::merge_requests::MrFocus;
 
@@ -66,6 +69,53 @@ pub(crate) fn pick_badges(hits: Vec<(PathBuf, MrBadge)>) -> HashMap<PathBuf, MrB
     out
 }
 
+/// Rang für den Claude-Chip: „wartet“ vor „arbeitet“; `Idle` zählt nicht.
+fn claude_rank(status: LiveStatus) -> u8 {
+    match status {
+        LiveStatus::Waiting => 2,
+        LiveStatus::Busy | LiveStatus::Shell => 1,
+        LiveStatus::Idle => 0,
+    }
+}
+
+/// Live-Status je Repo-Ordner (gleicher `path_key` wie `cwd` der Session);
+/// teilen sich mehrere Sessions einen Ordner, gewinnt „wartet“.
+pub(crate) fn claude_card_status(
+    live: &[LiveSession],
+    repos: &[RepoInfo],
+) -> HashMap<PathBuf, LiveStatus> {
+    let active: Vec<(String, LiveStatus)> = live
+        .iter()
+        .filter(|s| claude_rank(s.status) > 0)
+        .map(|s| (path_key(&s.cwd), s.status))
+        .collect();
+    let mut out = HashMap::new();
+    if active.is_empty() {
+        return out;
+    }
+    for repo in repos {
+        let key = path_key(&repo.path.to_string_lossy());
+        let best = active
+            .iter()
+            .filter(|(k, _)| *k == key)
+            .map(|(_, s)| *s)
+            .max_by_key(|s| claude_rank(*s));
+        if let Some(status) = best {
+            out.insert(repo.path.clone(), status);
+        }
+    }
+    out
+}
+
+/// PID der Session für den Klick auf den Claude-Chip (wartende zuerst).
+pub(crate) fn claude_pid_for(live: &[LiveSession], path: &std::path::Path) -> Option<u32> {
+    let key = path_key(&path.to_string_lossy());
+    live.iter()
+        .filter(|s| claude_rank(s.status) > 0 && path_key(&s.cwd) == key)
+        .max_by_key(|s| claude_rank(s.status))
+        .map(|s| s.pid)
+}
+
 impl MyApp {
     /// Karte je Repo-Ordner neu: offene MRs, deren Quell-Branch dort laut
     /// Scan ausgecheckt ist. Nach jedem Abruf und Umsortieren von `repos`.
@@ -93,7 +143,6 @@ impl MyApp {
 
     /// Chip der Repo-Karte: in die MR-Ansicht wechseln und die Zeile
     /// hervorheben.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn focus_mr(&mut self, host_key: &str, id: &str) {
         self.main_view = MainView::MergeRequests;
         // Ein offener MR steht nicht unter „Gemergt“
@@ -110,6 +159,7 @@ mod tests {
     use crate::gitlab::model::{MrSnapshot, UninvolvedList};
     use crate::gitlab::remote::GlabHost;
     use crate::gitlab::remote::RemoteInfo;
+    use std::path::Path;
 
     const HOST: &str = "gitlab.example.com";
 
@@ -303,5 +353,41 @@ mod tests {
         app.focus_mr(HOST, "gid://gitlab/MergeRequest/99");
         render(&mut app, &ctx);
         assert_eq!(app.mr_view.focus, None);
+    }
+
+    fn live(pid: u32, cwd: &str, status: LiveStatus) -> LiveSession {
+        LiveSession {
+            pid,
+            session_id: format!("s{pid}"),
+            cwd: cwd.to_string(),
+            status,
+            status_since_ms: 0,
+            name: None,
+            proc_start: None,
+        }
+    }
+
+    #[test]
+    fn claude_card_status_waiting_wins_and_idle_hidden() {
+        let repos = vec![
+            RepoInfo::new(PathBuf::from("/code/app"), "main".into(), false, false),
+            RepoInfo::new(PathBuf::from("/code/web"), "main".into(), false, false),
+            RepoInfo::new(PathBuf::from("/code/idle"), "main".into(), false, false),
+        ];
+        let sessions = vec![
+            live(1, "/code/app", LiveStatus::Busy),
+            live(2, "/code/app", LiveStatus::Waiting),
+            live(3, "/code/web", LiveStatus::Shell),
+            live(4, "/code/idle", LiveStatus::Idle),
+            live(5, "/elsewhere", LiveStatus::Waiting),
+        ];
+        let map = claude_card_status(&sessions, &repos);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&PathBuf::from("/code/app")], LiveStatus::Waiting);
+        assert_eq!(map[&PathBuf::from("/code/web")], LiveStatus::Shell);
+        assert!(claude_card_status(&[], &repos).is_empty());
+        // Klick fokussiert die wartende Session
+        assert_eq!(claude_pid_for(&sessions, Path::new("/code/app")), Some(2));
+        assert_eq!(claude_pid_for(&sessions, Path::new("/code/idle")), None);
     }
 }

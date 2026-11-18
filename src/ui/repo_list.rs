@@ -1,17 +1,19 @@
+use crate::app::repo_badges::MrBadge;
+use crate::claude_live::LiveStatus;
 use crate::claude_sessions::matches_words;
 use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt};
+use crate::ui::repo_card_chips::{favorite_star, show_bottom_row, show_chip_row};
 use crate::ui::search_field::search_field;
 use egui::{Color32, RichText, Ui, Vec2};
+use std::collections::HashMap;
 
 // Icons via egui include_image! (Simple Icons CC0 + Phosphor for folder)
 const ICON_VSCODE: egui::ImageSource = egui::include_image!("../../assets/icons/vscode.svg");
 const ICON_VS: egui::ImageSource = egui::include_image!("../../assets/icons/visualstudio.svg");
 const ICON_RIDER: egui::ImageSource = egui::include_image!("../../assets/icons/rider.svg");
 const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
-const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
-const ICON_TERMINAL: egui::ImageSource = egui::include_image!("../../assets/icons/terminal.svg");
 const ICON_CODEX: egui::ImageSource = egui::include_image!("../../assets/icons/codex.svg");
 const ICON_GEMINI: egui::ImageSource = egui::include_image!("../../assets/icons/gemini.svg");
 const ICON_COPILOT: egui::ImageSource = egui::include_image!("../../assets/icons/copilot.svg");
@@ -27,26 +29,16 @@ const ICON_GIT_COMMIT: egui::ImageSource =
     egui::include_image!("../../assets/icons/git-commit.svg");
 const ICON_SEARCH: egui::ImageSource = egui::include_image!("../../assets/icons/search.svg");
 const ICON_REFRESH: egui::ImageSource = egui::include_image!("../../assets/icons/refresh.svg");
-const ICON_WARNING: egui::ImageSource = egui::include_image!("../../assets/icons/warning.svg");
+const ICON_TRASH: egui::ImageSource = egui::include_image!("../../assets/icons/trash.svg");
 const ICON_PLUS: egui::ImageSource = egui::include_image!("../../assets/icons/plus.svg");
 
-/// Tooltip-Text für den Branch-Button: Basis + optional `branch_behind`-Hinweis.
-pub fn branch_button_tooltip(
-    lang: crate::i18n::Language,
-    branch: &str,
-    detached: bool,
-    behind: usize,
-) -> String {
-    let base = if detached {
+/// Tooltip-Text für den Branch-Button. Der Rückstand steht im ↓-Chip
+/// (`repo_card_chips::behind_tooltip`).
+pub fn branch_button_tooltip(lang: crate::i18n::Language, branch: &str, detached: bool) -> String {
+    if detached {
         format!("{}: {}", branch, tr(lang, "detached_tooltip"))
     } else {
         format!("{} – {}", branch, tr(lang, "branch_switch_tooltip"))
-    };
-    if behind > 0 {
-        let behind_txt = tr_fmt(lang, "branch_behind", &[&behind.to_string()]);
-        format!("{base} • {behind_txt}")
-    } else {
-        base
     }
 }
 
@@ -83,7 +75,7 @@ pub(crate) fn ide_image(ide: &crate::config::IdeConfig) -> egui::Image<'static> 
     egui::Image::new(ide_icon_for(&ide.id)).fit_to_exact_size(Vec2::splat(18.0))
 }
 
-fn agent_image(agent: &crate::config::AgentProfile) -> egui::Image<'static> {
+pub(crate) fn agent_image(agent: &crate::config::AgentProfile) -> egui::Image<'static> {
     if let Some(path) = &agent.icon {
         let pb = std::path::PathBuf::from(path);
         if pb.exists() {
@@ -177,6 +169,7 @@ pub fn sorted_main_repos(repos: &[RepoInfo], config: &AppConfig) -> Vec<RepoInfo
     out
 }
 
+#[derive(Default)]
 pub struct RepoListActions {
     pub branch_switch: Option<(PathBuf, String)>,
     pub solution_select: Option<(PathBuf, PathBuf)>,
@@ -192,6 +185,54 @@ pub struct RepoListActions {
     pub new_worktree: Option<Option<PathBuf>>,
     /// „Neue Claude Session“ aus der Werkzeugleiste
     pub new_claude_session: bool,
+    /// Stern der Karte: Favorit umschalten
+    pub toggle_favorite: Option<PathBuf>,
+    /// ↓-Chip: Fast-Forward-Pull
+    pub pull: Option<PathBuf>,
+    /// MR-Chip: (host_key, id) in der MR-Ansicht hervorheben
+    pub open_mr: Option<(String, String)>,
+    /// Claude-Chip: Terminal der Session in diesem Ordner fokussieren
+    pub focus_claude: Option<PathBuf>,
+    /// `⋯`: Pfad bzw. Branch-Namen in die Zwischenablage
+    pub copy_text: Option<String>,
+    /// `⋯`: Remote im Browser öffnen
+    pub open_url: Option<String>,
+    /// `⋯`: verknüpften Worktree entfernen (Dialog)
+    pub remove_worktree: Option<PathBuf>,
+    /// Werkzeugleiste „Aufräumen …“
+    pub cleanup: bool,
+}
+
+/// Zusatzdaten für die Karten (statt weiterer Einzelparameter).
+pub struct RepoListContext<'a> {
+    /// Offener MR je ausgechecktem Ordner
+    pub mrs: &'a HashMap<PathBuf, MrBadge>,
+    /// Live-Status laufender Claude Sessions je Repo-Ordner
+    pub claude: &'a HashMap<PathBuf, LiveStatus>,
+    /// Ordner, in dem gerade ein Pull läuft (Spinner im ↓-Chip)
+    pub pulling: Option<&'a Path>,
+    /// Jetzt (Unix-Sekunden) für „vor 2 Std.“
+    pub now: i64,
+    /// Fetch-Lauf hält die Refs (Branch-Popup: Refresh gesperrt, Spinner)
+    pub fetching: bool,
+}
+
+#[cfg(test)]
+impl RepoListContext<'static> {
+    /// Ohne MRs, Claude Sessions und Pull.
+    pub fn empty() -> Self {
+        static MRS: std::sync::LazyLock<HashMap<PathBuf, MrBadge>> =
+            std::sync::LazyLock::new(HashMap::new);
+        static CLAUDE: std::sync::LazyLock<HashMap<PathBuf, LiveStatus>> =
+            std::sync::LazyLock::new(HashMap::new);
+        Self {
+            mrs: &MRS,
+            claude: &CLAUDE,
+            pulling: None,
+            now: 0,
+            fetching: false,
+        }
+    }
 }
 
 /// Suche der Repo-Liste: jedes Wort (durch Leerzeichen getrennt) muss in
@@ -238,7 +279,7 @@ pub fn split_visible(repos: &[RepoInfo], query: &str) -> (Vec<usize>, Vec<usize>
     (mains, worktrees)
 }
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// „In Repo-Liste zeigen“ aus der MR-Ansicht (K1): Karte kurz hervorheben,
 /// im ersten Frame dorthin scrollen.
@@ -253,9 +294,9 @@ pub fn show_repo_list(
     repos: &mut [RepoInfo],
     config: &AppConfig,
     actions: &mut RepoListActions,
-    fetching: bool,
     highlight: Option<&RepoHighlight>,
     search: &mut String,
+    cx: &RepoListContext,
 ) {
     if repos.is_empty() {
         ui.vertical_centered(|ui| {
@@ -329,7 +370,7 @@ pub fn show_repo_list(
                         for &i in indices.iter() {
                             let repo = &mut repos[i];
                             let highlight = highlight.filter(|h| h.path == repo.path);
-                            show_repo_row(ui, repo, config, actions, fetching, highlight);
+                            show_repo_row(ui, repo, config, actions, highlight, cx);
                             ui.add_space(6.0);
                         }
                     });
@@ -364,6 +405,19 @@ fn show_list_toolbar(
             {
                 actions.new_worktree = Some(None);
             }
+            let cleanup = egui::Button::image_and_text(
+                egui::Image::new(ICON_TRASH)
+                    .fit_to_exact_size(Vec2::splat(14.0))
+                    .tint(ui.visuals().text_color()),
+                tr(lang, "repo_cleanup_button"),
+            );
+            if ui
+                .add(cleanup)
+                .on_hover_text(tr(lang, "repo_cleanup_tooltip"))
+                .clicked()
+            {
+                actions.cleanup = true;
+            }
             let claude = egui::Button::image_and_text(
                 egui::Image::new(ICON_CLAUDE).fit_to_exact_size(Vec2::splat(14.0)),
                 tr(lang, "claude_new_button"),
@@ -384,9 +438,11 @@ fn show_repo_row(
     repo: &mut RepoInfo,
     config: &AppConfig,
     actions: &mut RepoListActions,
-    fetching: bool,
     highlight: Option<&RepoHighlight>,
+    cx: &RepoListContext,
 ) {
+    // Fetch-Lauf hält die Refs → Fetch-/Refresh-Buttons gesperrt + Spinner
+    let fetching = cx.fetching;
     let visuals = ui.visuals();
     let frame = egui::Frame::new()
         .fill(visuals.widgets.inactive.bg_fill)
@@ -399,31 +455,18 @@ fn show_repo_row(
 
     let card = frame.show(ui, |ui| {
         ui.vertical(|ui| {
-            // Zeile 1: Name + Dirty + Branch Dropdown + Solution Dropdown + Profile Override
+            // Zeile 1: Stern, Name (Tooltip Pfad), „Worktree von“, Branch,
+            // Solution, Config-Dropdowns
             ui.horizontal(|ui| {
-                ui.label(RichText::new("📁").size(14.0));
-                ui.label(RichText::new(&repo.name).size(13.0).strong());
+                favorite_star(ui, repo, config, actions);
+                ui.label(RichText::new(&repo.name).size(13.0).strong())
+                    .on_hover_text(repo.path.display().to_string());
                 if let Some(main) = main_repo_name(repo) {
                     ui.label(
                         RichText::new(tr_fmt(config.language, "wt_of_repo", &[&main]))
                             .size(11.0)
                             .weak(),
                     );
-                }
-                if repo.dirty {
-                    ui.label(
-                        RichText::new("●")
-                            .size(14.0)
-                            .color(crate::ui::theme::COLOR_DIRTY),
-                    )
-                    .on_hover_text(tr(config.language, "dirty_tooltip"));
-                } else {
-                    ui.label(
-                        RichText::new("○")
-                            .size(14.0)
-                            .color(crate::ui::theme::COLOR_CLEAN),
-                    )
-                    .on_hover_text(tr(config.language, "clean_tooltip"));
                 }
 
                 ui.add_space(8.0);
@@ -454,12 +497,8 @@ fn show_repo_row(
                 } else {
                     ICON_GIT_BRANCH
                 };
-                let branch_tooltip = branch_button_tooltip(
-                    config.language,
-                    &repo.branch,
-                    repo.is_detached,
-                    repo.behind,
-                );
+                let branch_tooltip =
+                    branch_button_tooltip(config.language, &repo.branch, repo.is_detached);
                 // Branch Dropdown: adaptive Breite für lange Branchenamen (140..280)
                 // F1#10: Zeichen statt Bytes zählen (Umlaute/Emoji).
                 let branch_width =
@@ -495,20 +534,6 @@ fn show_repo_row(
                         .on_hover_text(branch_tooltip.clone())
                     })
                     .inner;
-                // Task 5: Veraltet-Icon wenn behind>0 (Pattern app.rs: WARNING tint orange/rot)
-                if repo.behind > 0 {
-                    let behind_txt = tr_fmt(
-                        config.language,
-                        "branch_behind",
-                        &[&repo.behind.to_string()],
-                    );
-                    ui.add(
-                        egui::Image::new(ICON_WARNING)
-                            .fit_to_exact_size(Vec2::splat(14.0))
-                            .tint(Color32::from_rgb(200, 120, 40)),
-                    )
-                    .on_hover_text(behind_txt);
-                }
                 let should_toggle = btn_resp.clicked();
                 if should_toggle {
                     popup_open = !popup_open;
@@ -1088,249 +1113,14 @@ fn show_repo_row(
                         }
                     }
                 }
-
-                // Profile Override Combo (klein, rechts)
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let current_profile = config.get_effective_profile_for_repo(&repo.path);
-                    let override_text = current_profile.display_name.to_string();
-                    egui::ComboBox::from_id_salt(format!("profile_{}", repo.path.display()))
-                        .selected_text(override_text)
-                        .width(90.0)
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_label(
-                                    config
-                                        .get_repo_state(&repo.path)
-                                        .and_then(|s| s.profile_override.as_ref())
-                                        .is_none(),
-                                    "— Global —",
-                                )
-                                .clicked()
-                            {
-                                actions.profile_override = Some((repo.path.clone(), None));
-                            }
-                            for p in &config.profiles {
-                                let is_selected = config
-                                    .get_repo_state(&repo.path)
-                                    .and_then(|s| s.profile_override.as_ref())
-                                    .map(|id| id == &p.id)
-                                    .unwrap_or(false);
-                                let label = if p.id == config.active_profile_id
-                                    && !is_selected
-                                    && config.get_repo_state(&repo.path).is_none()
-                                {
-                                    format!("● {} (global)", p.display_name)
-                                } else {
-                                    p.display_name.clone()
-                                };
-                                if ui.selectable_label(is_selected, label).clicked() {
-                                    actions.profile_override =
-                                        Some((repo.path.clone(), Some(p.id.clone())));
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text(tr(config.language, "profile_override_tooltip"));
-                });
             });
 
             ui.add_space(4.0);
-
-            // Zeile 2: Pfad + Explorer + Shell + IDE Buttons + AI Button (ohne Branch Pill)
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(repo.path.display().to_string())
-                        .size(11.5)
-                        .color(Color32::from_rgb(90, 90, 90)),
-                );
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let effective_profile = config.get_effective_profile_for_repo(&repo.path);
-                    // AI Buttons (per Profil hidden/order) – respect hidden, fallback only when no active
-                    let agents_to_show = {
-                        let filtered = effective_profile
-                            .filtered_agents(&config.agents, &config.active_agent_ids);
-                        if filtered.is_empty() && config.active_agent_ids.is_empty() {
-                            config
-                                .agents
-                                .iter()
-                                .filter(|a| !effective_profile.hidden_agent_ids.contains(&a.id))
-                                .take(1)
-                                .collect::<Vec<_>>()
-                        } else {
-                            filtered
-                        }
-                    };
-                    for agent in agents_to_show.iter().rev() {
-                        let btn = egui::Button::image(agent_image(agent));
-                        let resp = ui.add(btn).on_hover_text(
-                            tr(config.language, "open_in_terminal")
-                                .replace("{}", &agent.display_name),
-                        );
-                        if resp.clicked() {
-                            actions.agent_open = Some((repo.path.clone(), agent.id.clone()));
-                        }
-                        if resp.hovered() {
-                            let painter = ui.painter();
-                            let rect = resp.rect;
-                            painter.rect_stroke(
-                                rect,
-                                egui::CornerRadius::same(4),
-                                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 100, 100)),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-                    }
-
-                    // IDE Buttons (Icons) – per Profil hidden/order
-                    let ides_to_show = effective_profile.visible_ides();
-                    for ide in ides_to_show.iter().take(4) {
-                        let btn = egui::Button::image(ide_image(ide));
-                        let preview_path = if ide.no_args {
-                            format!("{} (cwd: {})", ide.display_name, repo.path.display())
-                        } else {
-                            let eff = ide.effective_args();
-                            let arg_preview = eff.join(" ");
-                            // Zeige substituierte Vorschau mit Repo + Lösung
-                            let sln_path = repo.selected_solution.as_ref().unwrap_or(&repo.path);
-                            let substituted: Vec<String> = eff
-                                .iter()
-                                .map(|a| {
-                                    crate::git::substitute_placeholders(a, sln_path, &repo.path)
-                                })
-                                .collect();
-                            let sub_str = substituted.join(" ");
-                            format!(
-                                "{} {} (cwd: {})",
-                                ide.display_name,
-                                if sub_str.is_empty() {
-                                    arg_preview
-                                } else {
-                                    sub_str
-                                },
-                                repo.path.display()
-                            )
-                        };
-                        let resp = ui.add(btn).on_hover_text(format!(
-                            "{} {}",
-                            tr(config.language, "open_in"),
-                            preview_path
-                        ));
-                        if resp.clicked() {
-                            let file_to_open = repo
-                                .selected_solution
-                                .clone()
-                                .unwrap_or_else(|| repo.path.clone());
-                            actions.ide_open =
-                                Some((repo.path.clone(), ide.id.clone(), file_to_open));
-                        }
-                        if resp.hovered() {
-                            let painter = ui.painter();
-                            let rect = resp.rect;
-                            painter.rect_stroke(
-                                rect,
-                                egui::CornerRadius::same(4),
-                                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 100, 100)),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-                    }
-
-                    if effective_profile.ides.is_empty() {
-                        let btn =
-                            egui::Button::new(RichText::new("VS Code").size(11.0)).corner_radius(6);
-                        if ui.add(btn).clicked() {
-                            let file = repo
-                                .selected_solution
-                                .clone()
-                                .unwrap_or_else(|| repo.path.clone());
-                            actions.ide_open =
-                                Some((repo.path.clone(), "vscode".to_string(), file));
-                        }
-                    }
-
-                    // Shell Button (per Profil show_shell)
-                    if effective_profile.show_shell {
-                        let shell_btn = egui::Button::image(
-                            egui::Image::new(ICON_TERMINAL)
-                                .fit_to_exact_size(Vec2::splat(18.0))
-                                .tint(ui.visuals().text_color()),
-                        );
-                        let resp = ui
-                            .add(shell_btn)
-                            .on_hover_text(tr(config.language, "open_in_shell"));
-                        if resp.clicked() {
-                            actions.shell_open = Some(repo.path.clone());
-                        }
-                        if resp.hovered() {
-                            let painter = ui.painter();
-                            let rect = resp.rect;
-                            painter.rect_stroke(
-                                rect,
-                                egui::CornerRadius::same(4),
-                                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 100, 100)),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-                    }
-
-                    // Explorer Button (per Profil show_explorer)
-                    if effective_profile.show_explorer {
-                        let explorer_btn = egui::Button::image(
-                            egui::Image::new(ICON_FOLDER)
-                                .fit_to_exact_size(Vec2::splat(18.0))
-                                .tint(ui.visuals().text_color()),
-                        );
-                        let resp = ui
-                            .add(explorer_btn)
-                            .on_hover_text(tr(config.language, "open_in_explorer"));
-                        if resp.clicked() {
-                            actions.explorer_open = Some(repo.path.clone());
-                        }
-                        if resp.hovered() {
-                            let painter = ui.painter();
-                            let rect = resp.rect;
-                            painter.rect_stroke(
-                                rect,
-                                egui::CornerRadius::same(4),
-                                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 100, 100)),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-                    }
-
-                    // Neuer Worktree dieses Repos (nicht auf Worktree-Karten)
-                    if !repo.is_linked_worktree {
-                        let wt_btn = egui::Button::image(
-                            egui::Image::new(ICON_PLUS)
-                                .fit_to_exact_size(Vec2::splat(18.0))
-                                .tint(ui.visuals().text_color()),
-                        );
-                        if ui
-                            .add(wt_btn)
-                            .on_hover_text(tr(config.language, "wt_new_for_repo_tooltip"))
-                            .clicked()
-                        {
-                            actions.new_worktree = Some(Some(repo.path.clone()));
-                        }
-                    }
-                });
-            });
-
-            if let Some(sel) = &repo.selected_solution {
-                if repo.solutions.len() > 1 {
-                    ui.add_space(2.0);
-                    ui.label(
-                        RichText::new(
-                            tr(config.language, "selected")
-                                .replace("{}", &sel.display().to_string()),
-                        )
-                        .size(10.0)
-                        .color(Color32::from_rgb(100, 100, 100))
-                        .italics(),
-                    );
-                }
-            }
+            // Zeile 2: Status-Chips
+            show_chip_row(ui, repo, config, cx, actions);
+            ui.add_space(2.0);
+            // Zeile 3: letzter Commit · Explorer, Shell, IDE, Agents, ⋯
+            show_bottom_row(ui, repo, config, cx, actions);
         });
     });
     if let Some(highlight) = highlight {
@@ -1384,19 +1174,7 @@ mod tests {
 
     #[test]
     fn repo_list_actions_default() {
-        let actions = RepoListActions {
-            branch_switch: None,
-            solution_select: None,
-            ide_open: None,
-            agent_open: None,
-            profile_override: None,
-            fetch_branches: None,
-            explorer_open: None,
-            shell_open: None,
-            custom_select: None,
-            new_worktree: None,
-            new_claude_session: false,
-        };
+        let actions = RepoListActions::default();
         assert!(actions.branch_switch.is_none());
         assert!(actions.solution_select.is_none());
         assert!(actions.ide_open.is_none());
@@ -1411,19 +1189,9 @@ mod tests {
     #[test]
     fn repo_list_actions_can_be_set() {
         let mut actions = RepoListActions {
-            branch_switch: None,
-            solution_select: None,
-            ide_open: None,
-            agent_open: None,
-            profile_override: None,
-            fetch_branches: None,
-            explorer_open: None,
-            shell_open: None,
-            custom_select: None,
-            new_worktree: None,
-            new_claude_session: false,
+            branch_switch: Some((PathBuf::from("/tmp/repo"), "main".to_string())),
+            ..Default::default()
         };
-        actions.branch_switch = Some((PathBuf::from("/tmp/repo"), "main".to_string()));
         assert_eq!(
             actions.branch_switch,
             Some((PathBuf::from("/tmp/repo"), "main".to_string()))
@@ -1475,6 +1243,10 @@ mod tests {
 
     #[test]
     fn repo_dirty_indicator_logic() {
+        // Statt ●/○ neben dem Namen: Status-Chip aus `RepoInfo.state`
+        use crate::git::RepoState;
+        use crate::i18n::Language;
+        use crate::ui::repo_card_chips::state_chip;
         assert_eq!(
             crate::ui::theme::COLOR_DIRTY,
             Color32::from_rgb(220, 70, 40)
@@ -1483,10 +1255,16 @@ mod tests {
             crate::ui::theme::COLOR_CLEAN,
             Color32::from_rgb(60, 160, 80)
         );
-        let dirty_symbol = if true { "●" } else { "○" };
-        let clean_symbol = if false { "●" } else { "○" };
-        assert_eq!(dirty_symbol, "●");
-        assert_eq!(clean_symbol, "○");
+        let mut repo = RepoInfo::new(PathBuf::from("/tmp/r"), "main".into(), true, false);
+        assert_eq!(repo.state, RepoState::Dirty);
+        let (text, color) = state_chip(Language::En, repo.state, repo.dirty_files);
+        assert_eq!(
+            (text.as_str(), color),
+            ("1 changed", crate::ui::theme::COLOR_DIRTY)
+        );
+        repo = RepoInfo::new(PathBuf::from("/tmp/r"), "main".into(), false, false);
+        let (_, color) = state_chip(Language::En, repo.state, repo.dirty_files);
+        assert_eq!(color, crate::ui::theme::COLOR_CLEAN);
     }
 
     #[test]
@@ -1547,17 +1325,18 @@ mod tests {
 
     #[test]
     fn repo_ide_and_agent_buttons_logic() {
+        // Eine IDE auf der Karte: Auswahl, sonst Default des Profils
+        use crate::ui::repo_card_chips::card_ide;
         let cfg = AppConfig::default();
         let profile = cfg.get_effective_profile_for_repo(Path::new("/tmp/repo"));
         let agents_to_show = profile.filtered_agents(&cfg.agents, &cfg.active_agent_ids);
         assert!(!agents_to_show.is_empty());
-        let ides_to_show: Vec<_> = profile.visible_ides().into_iter().take(4).collect();
-        assert!(ides_to_show.len() <= 4);
-        if let Some(def) = &profile.default_ide_id {
-            let mut sorted = profile.ides.clone();
-            sorted.sort_by_key(|ide| if &ide.id == def { 0 } else { 1 });
-            assert_eq!(&sorted[0].id, def);
-        }
+        let def = profile.default_ide_id.clone().expect("Default-IDE");
+        assert_eq!(card_ide(profile, None).map(|i| &i.id), Some(&def));
+        assert_eq!(
+            card_ide(profile, Some("rider")).map(|i| i.id.as_str()),
+            Some("rider")
+        );
     }
 
     #[test]
@@ -1656,20 +1435,10 @@ mod tests {
 
     #[test]
     fn repo_list_actions_has_custom_select() {
-        let mut a = RepoListActions {
-            branch_switch: None,
-            solution_select: None,
-            ide_open: None,
-            agent_open: None,
-            profile_override: None,
-            fetch_branches: None,
-            explorer_open: None,
-            shell_open: None,
-            custom_select: None,
-            new_worktree: None,
-            new_claude_session: false,
+        let a = RepoListActions {
+            custom_select: Some((PathBuf::from("/tmp/repo"), "db".into(), "prod".into())),
+            ..Default::default()
         };
-        a.custom_select = Some((PathBuf::from("/tmp/repo"), "db".into(), "prod".into()));
         assert_eq!(
             a.custom_select,
             Some((PathBuf::from("/tmp/repo"), "db".into(), "prod".into()))
@@ -1772,21 +1541,20 @@ mod tests {
 
     #[test]
     fn branch_button_tooltip_embeds_behind() {
+        // „hinterher“ steht jetzt im ↓-Chip, nicht mehr am Branch-Button
         use crate::i18n::Language;
-        let clean_en = branch_button_tooltip(Language::En, "main", false, 0);
+        let clean_en = branch_button_tooltip(Language::En, "main", false);
         assert!(clean_en.contains("main"));
         assert!(!clean_en.contains("Behind"));
-        let behind_en = branch_button_tooltip(Language::En, "main", false, 3);
-        assert!(behind_en.contains("main"));
+        let detached = branch_button_tooltip(Language::En, "abc1234", true);
+        assert!(detached.contains("Detached"));
+        let behind_en = crate::ui::repo_card_chips::behind_tooltip(Language::En, 3);
         assert!(behind_en.contains('3'));
-        assert!(behind_en.contains("Behind"));
-        let behind_de = branch_button_tooltip(Language::De, "main", false, 2);
+        assert!(behind_en.contains("behind"));
+        let behind_de = crate::ui::repo_card_chips::behind_tooltip(Language::De, 2);
         assert!(behind_de.contains('2'));
         assert!(behind_de.contains("hinterher"));
-        let detached = branch_button_tooltip(Language::En, "abc1234", true, 0);
-        assert!(detached.contains("Detached"));
-        let detached_behind = branch_button_tooltip(Language::En, "abc1234", true, 1);
-        assert!(detached_behind.contains('1'));
+        assert!(behind_de.contains("Fast-Forward"));
     }
 
     /// „Neue Claude Session“ in der Werkzeugleiste setzt die Aktion.
@@ -1825,27 +1593,15 @@ mod tests {
                 ..egui::RawInput::default()
             };
             let output = ctx.run_ui(raw, |ui| {
-                let mut actions = RepoListActions {
-                    branch_switch: None,
-                    solution_select: None,
-                    ide_open: None,
-                    agent_open: None,
-                    profile_override: None,
-                    fetch_branches: None,
-                    explorer_open: None,
-                    shell_open: None,
-                    custom_select: None,
-                    new_worktree: None,
-                    new_claude_session: false,
-                };
+                let mut actions = RepoListActions::default();
                 show_repo_list(
                     ui,
                     &mut repos,
                     &config,
                     &mut actions,
-                    false,
                     None,
                     &mut String::new(),
+                    &RepoListContext::empty(),
                 );
                 clicked |= actions.new_claude_session;
             });
@@ -1903,27 +1659,15 @@ mod tests {
                 ..egui::RawInput::default()
             };
             let output = ctx.run_ui(raw, |ui| {
-                let mut actions = RepoListActions {
-                    branch_switch: None,
-                    solution_select: None,
-                    ide_open: None,
-                    agent_open: None,
-                    profile_override: None,
-                    fetch_branches: None,
-                    explorer_open: None,
-                    shell_open: None,
-                    custom_select: None,
-                    new_worktree: None,
-                    new_claude_session: false,
-                };
+                let mut actions = RepoListActions::default();
                 show_repo_list(
                     ui,
                     &mut repos,
                     &config,
                     &mut actions,
-                    false,
                     Some(&highlight),
                     &mut String::new(),
+                    &RepoListContext::empty(),
                 );
             });
             // Gescrollt wird nur im ersten Frame
@@ -2078,5 +1822,280 @@ mod tests {
         assert_eq!(split_visible(&repos, "web"), (vec![2], vec![3]));
         assert_eq!(split_visible(&repos, "feature"), (vec![], vec![1]));
         assert_eq!(split_visible(&repos, "nichts"), (vec![], vec![]));
+    }
+
+    // --- Neue Karte (Chips, Stern, `⋯`) ----------------------------------
+
+    /// Rendert die Liste; klickt nacheinander die AccessKit-Knoten mit den
+    /// Labels aus `clicks` (je Klick: finden, stabil abwarten, dann
+    /// klicken). Liefert die Aktionen aller Frames und die Labels des
+    /// letzten Frames.
+    fn drive(
+        repos: &mut [RepoInfo],
+        config: &AppConfig,
+        cx: &RepoListContext,
+        clicks: &[&str],
+    ) -> (Vec<RepoListActions>, Vec<String>) {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 700.0));
+        let mut pending: std::collections::VecDeque<&str> = clicks.iter().copied().collect();
+        let mut target: Option<egui::Pos2> = None;
+        // Erst klicken, wenn der Knoten zwei Frames an derselben Stelle
+        // steht (Popups messen sich im ersten Frame unsichtbar aus)
+        let mut seen: Option<egui::Pos2> = None;
+        let mut all = Vec::new();
+        let mut labels = Vec::new();
+        for _ in 0..(4 + 4 * clicks.len()) {
+            let mut events = Vec::new();
+            if let Some(pos) = target.take() {
+                events.push(egui::Event::PointerMoved(pos));
+                for pressed in [true, false] {
+                    events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+            }
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            };
+            let output = ctx.run_ui(raw, |ui| {
+                let mut actions = RepoListActions::default();
+                show_repo_list(
+                    ui,
+                    repos,
+                    config,
+                    &mut actions,
+                    None,
+                    &mut String::new(),
+                    cx,
+                );
+                all.push(actions);
+            });
+            let update = output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("AccessKit");
+            labels = update
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| n.label().map(str::to_string))
+                .collect();
+            if let Some(&next) = pending.front() {
+                let found = update
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| n.label() == Some(next))
+                    .and_then(|(_, n)| n.bounds());
+                let center = found.map(|b| {
+                    egui::pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32)
+                });
+                if center.is_some() && center == seen {
+                    target = center;
+                    seen = None;
+                    pending.pop_front();
+                } else {
+                    seen = center;
+                }
+            }
+            output.drop_without_applying_deltas();
+        }
+        assert!(
+            pending.is_empty(),
+            "nicht gefunden: {pending:?} in {labels:?}"
+        );
+        (all, labels)
+    }
+
+    fn card_config() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.roots.clear();
+        config
+    }
+
+    fn one_repo() -> Vec<RepoInfo> {
+        vec![RepoInfo::new(
+            PathBuf::from("/tmp/gm-card/app"),
+            "main".into(),
+            false,
+            false,
+        )]
+    }
+
+    #[test]
+    fn star_click_sets_toggle_favorite() {
+        let config = card_config();
+        let mut repos = one_repo();
+        let label = tr(config.language, "repo_fav_add");
+        let (all, _) = drive(&mut repos, &config, &RepoListContext::empty(), &[&label]);
+        assert!(all
+            .iter()
+            .any(|a| a.toggle_favorite.as_deref() == Some(Path::new("/tmp/gm-card/app"))));
+    }
+
+    #[test]
+    fn behind_chip_click_sets_pull() {
+        use crate::ui::repo_card_chips::behind_tooltip;
+        let config = card_config();
+        // Ohne Rückstand kein Chip
+        let mut repos = one_repo();
+        let (_, labels) = drive(&mut repos, &config, &RepoListContext::empty(), &[]);
+        assert!(!labels.iter().any(|l| l.contains("behind")), "{labels:?}");
+        repos[0].behind = 5;
+        let label = behind_tooltip(config.language, 5);
+        let (all, _) = drive(&mut repos, &config, &RepoListContext::empty(), &[&label]);
+        assert!(all
+            .iter()
+            .any(|a| a.pull.as_deref() == Some(Path::new("/tmp/gm-card/app"))));
+    }
+
+    #[test]
+    fn mr_chip_click_sets_open_mr() {
+        use crate::app::repo_badges::MrBadge;
+        use crate::gitlab::model::PipelineState;
+        use crate::ui::repo_card_chips::mr_chip_text;
+        let config = card_config();
+        let mut repos = one_repo();
+        let badge = MrBadge {
+            host_key: "gitlab.example.com".into(),
+            id: "gid://gitlab/MergeRequest/9".into(),
+            iid: 128,
+            title: "Fix rounding".into(),
+            draft: false,
+            approved: 1,
+            required: Some(2),
+            pipeline: PipelineState::Success,
+            mine: true,
+            updated_at: None,
+        };
+        let label = mr_chip_text(&badge);
+        let mut mrs = std::collections::HashMap::new();
+        mrs.insert(repos[0].path.clone(), badge);
+        let claude = std::collections::HashMap::new();
+        let cx = RepoListContext {
+            mrs: &mrs,
+            claude: &claude,
+            pulling: None,
+            now: 0,
+            fetching: false,
+        };
+        let (all, _) = drive(&mut repos, &config, &cx, &[&label]);
+        assert!(all.iter().any(|a| a.open_mr
+            == Some((
+                "gitlab.example.com".to_string(),
+                "gid://gitlab/MergeRequest/9".to_string()
+            ))));
+    }
+
+    #[test]
+    fn claude_chip_click_sets_focus_claude() {
+        use crate::claude_live::LiveStatus;
+        let config = card_config();
+        let mut repos = one_repo();
+        let mrs = std::collections::HashMap::new();
+        let mut claude = std::collections::HashMap::new();
+        claude.insert(repos[0].path.clone(), LiveStatus::Waiting);
+        let cx = RepoListContext {
+            mrs: &mrs,
+            claude: &claude,
+            pulling: None,
+            now: 0,
+            fetching: false,
+        };
+        let (all, _) = drive(&mut repos, &config, &cx, &["Claude waiting"]);
+        assert!(all
+            .iter()
+            .any(|a| a.focus_claude.as_deref() == Some(Path::new("/tmp/gm-card/app"))));
+    }
+
+    #[test]
+    fn only_one_ide_button_visible() {
+        let mut config = card_config();
+        let mut repos = one_repo();
+        let open_in = tr(config.language, "open_in");
+        let ide_labels: Vec<String> = config.profiles[0]
+            .ides
+            .iter()
+            .map(|i| format!("{open_in} {}", i.display_name))
+            .collect();
+        let count = |labels: &[String]| -> Vec<String> {
+            labels
+                .iter()
+                .filter(|l| ide_labels.contains(l))
+                .cloned()
+                .collect()
+        };
+        let (_, labels) = drive(&mut repos, &config, &RepoListContext::empty(), &[]);
+        assert_eq!(count(&labels), [format!("{open_in} Visual Studio")]);
+        // Gemerkte Wahl gewinnt
+        config.get_repo_state_mut(&repos[0].path).selected_ide = Some("rider".into());
+        let (_, labels) = drive(&mut repos, &config, &RepoListContext::empty(), &[]);
+        assert_eq!(count(&labels), [format!("{open_in} Rider")]);
+    }
+
+    #[test]
+    fn more_menu_has_remove_only_for_worktrees() {
+        let config = card_config();
+        let lang = config.language;
+        let more = tr(lang, "repo_more");
+        let remove = tr(lang, "repo_menu_remove_worktree");
+        let new_wt = tr(lang, "repo_menu_new_worktree");
+        let copy_path = tr(lang, "repo_menu_copy_path");
+
+        let mut mains = one_repo();
+        let (_, labels) = drive(&mut mains, &config, &RepoListContext::empty(), &[&more]);
+        assert!(labels.contains(&new_wt), "{labels:?}");
+        assert!(!labels.contains(&remove), "{labels:?}");
+
+        let mut wts = vec![linked_worktree(
+            "/tmp/gm-card/app-wt",
+            "/tmp/gm-card/app",
+            "feat",
+        )];
+        let (_, labels) = drive(&mut wts, &config, &RepoListContext::empty(), &[&more]);
+        assert!(labels.contains(&remove), "{labels:?}");
+        assert!(!labels.contains(&new_wt), "{labels:?}");
+
+        // Einträge lösen ihre Aktionen aus
+        let (all, _) = drive(
+            &mut wts,
+            &config,
+            &RepoListContext::empty(),
+            &[&more, &remove],
+        );
+        assert!(all
+            .iter()
+            .any(|a| a.remove_worktree.as_deref() == Some(Path::new("/tmp/gm-card/app-wt"))));
+        let (all, _) = drive(
+            &mut mains,
+            &config,
+            &RepoListContext::empty(),
+            &[&more, &copy_path],
+        );
+        assert!(all.iter().any(|a| a.copy_text.is_some()));
+        let (all, _) = drive(
+            &mut mains,
+            &config,
+            &RepoListContext::empty(),
+            &[&more, &new_wt],
+        );
+        assert!(all
+            .iter()
+            .any(|a| a.new_worktree == Some(Some(PathBuf::from("/tmp/gm-card/app")))));
+    }
+
+    #[test]
+    fn toolbar_cleanup_button_sets_action() {
+        let config = card_config();
+        let mut repos = one_repo();
+        let label = tr(config.language, "repo_cleanup_button");
+        let (all, _) = drive(&mut repos, &config, &RepoListContext::empty(), &[&label]);
+        assert!(all.iter().any(|a| a.cleanup));
     }
 }

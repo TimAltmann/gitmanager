@@ -1779,9 +1779,8 @@ impl AppConfig {
         self.favorite_repos.contains(&key)
     }
 
-    /// Favorit setzen bzw. entfernen.
-    // Wird erst von der UI (Repo-/Session-Karten) genutzt
-    #[allow(dead_code)]
+    /// Favorit setzen bzw. entfernen. Aufrufer sortieren die Liste neu
+    /// (`repo_sort_dirty`).
     pub fn toggle_favorite_repo(&mut self, path: &Path) {
         let key = Self::favorite_key(path);
         if let Some(i) = self.favorite_repos.iter().position(|k| *k == key) {

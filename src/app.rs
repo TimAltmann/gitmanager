@@ -4,7 +4,7 @@ mod mr_activity;
 mod mr_checkout;
 mod mr_settings;
 mod new_worktree;
-mod repo_badges;
+pub(crate) mod repo_badges;
 
 use crate::config::{AfterAction, AppConfig, RepoSortMode};
 use crate::git::{launch_agent, launch_ide, MrPrep, RepoInfo};
@@ -15,7 +15,7 @@ use crate::i18n::{tr, tr_fmt, Language};
 use crate::scanner::scan_repos;
 use crate::ui::{
     merge_requests::{MrCheckoutChoice, MrViewState},
-    repo_list::{show_repo_list, sort_main_repos, RepoHighlight, RepoListActions},
+    repo_list::{show_repo_list, sort_main_repos, RepoHighlight, RepoListActions, RepoListContext},
     settings::SettingsState,
 };
 use egui::{Color32, RichText, Vec2};
@@ -1195,6 +1195,44 @@ impl MyApp {
             });
         });
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+
+    /// Neue Aktionen der Repo-Karte (Stern, Chips, `⋯`-Menü). `pull`,
+    /// `remove_worktree` und `cleanup` werden erst in Task 8–10 verdrahtet
+    /// und hier bis dahin ignoriert.
+    fn apply_card_actions(&mut self, ctx: &egui::Context, actions: &mut RepoListActions) {
+        if let Some(path) = actions.toggle_favorite.take() {
+            self.config.toggle_favorite_repo(&path);
+            // Favoriten stehen oben in ihrem Abschnitt
+            self.repo_sort_dirty = true;
+            if let Err(e) = self.config.save() {
+                self.note_config_save_error(&e);
+            }
+        }
+        if let Some((host_key, id)) = actions.open_mr.take() {
+            self.focus_mr(&host_key, &id);
+        }
+        if let Some(path) = actions.focus_claude.take() {
+            if let Some(pid) = repo_badges::claude_pid_for(&self.claude.live, &path) {
+                self.apply_claude_actions(crate::ui::claude_sessions::ClaudeSessionActions {
+                    focus: Some(pid),
+                    ..Default::default()
+                });
+            }
+        }
+        if let Some(text) = actions.copy_text.take() {
+            ctx.copy_text(text);
+        }
+        if let Some(url) = actions.open_url.take() {
+            ctx.open_url(egui::OpenUrl::new_tab(url));
+        }
+        // TODO Task 8 (Pull per Klick), Task 9 (Worktree entfernen), Task 10
+        // (Aufräumen): bis dahin bewusst ignoriert
+        let _ = (
+            actions.pull.take(),
+            actions.remove_worktree.take(),
+            actions.cleanup,
+        );
     }
 
     /// #12: Config-Save-Fehler einheitlich melden statt still zu verwerfen:
@@ -2737,19 +2775,7 @@ impl eframe::App for MyApp {
                 }
 
                 // Repo-Liste mit neuen Callbacks
-                let mut actions = RepoListActions {
-                    branch_switch: None,
-                    solution_select: None,
-                    ide_open: None,
-                    agent_open: None,
-                    profile_override: None,
-                    fetch_branches: None,
-                    explorer_open: None,
-                    shell_open: None,
-                    custom_select: None,
-                    new_worktree: None,
-                    new_claude_session: false,
-                };
+                let mut actions = RepoListActions::default();
 
                 // Wir brauchen &mut für repo_list, um selektierte Werte zu zeigen, aber hier clonen wir mut
                 // repo_list wird &mut repos erwarten, wir haben &mut self.repos
@@ -2764,15 +2790,26 @@ impl eframe::App for MyApp {
                 let fetching = self.git_busy.holds_refs();
                 // K1: „In Repo-Liste zeigen“ hebt eine Karte kurz hervor
                 let highlight = self.repo_highlight_frame(&ctx);
+                // Claude-Chip: Live-Status je Repo-Ordner (leer ohne Abfrage)
+                let claude = repo_badges::claude_card_status(&self.claude.live, &self.repos);
+                let card_ctx = RepoListContext {
+                    mrs: &self.repo_mrs,
+                    claude: &claude,
+                    // Pull per Klick folgt in Task 8
+                    pulling: None,
+                    now: crate::gitlab::time::now_unix(),
+                    fetching,
+                };
                 show_repo_list(
                     ui,
                     &mut self.repos,
                     &self.config,
                     &mut actions,
-                    fetching,
                     highlight.as_ref(),
                     &mut self.worktree_ui.search,
+                    &card_ctx,
                 );
+                self.apply_card_actions(&ctx, &mut actions);
                 if let Some(base) = actions.new_worktree.take() {
                     self.open_new_worktree_dialog(base);
                 }

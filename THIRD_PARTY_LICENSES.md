@@ -41,6 +41,7 @@ For a complete transitive closure, see `Cargo.lock` and run `cargo tree`.
 |-------|--------|---------|-----------|
 | `folder.svg` | [Phosphor Icons](https://github.com/phosphor-icons/core) | **MIT** | — |
 | `mr/*.svg` (Merge Requests): `arrow-square-out`, `arrow-u-up-left`, `chat-circle`, `chat-circle-check`, `chat-circle-dots`, `check`, `check-circle`, `circle-notch`, `clock`, `code`, `copy`, `dots-three`, `download-simple`, `folder`, `folder-plus`, `git-branch`, `git-pull-request`, `lock-simple`, `minus-circle`, `play-circle`, `prohibit`, `skip-forward-circle`, `sort-descending`, `sparkle`, `terminal-window`, `user`, `warning-circle`, `x-circle` | [Phosphor Icons](https://github.com/phosphor-icons/core) (Regular) | **MIT** | — |
+| `star.svg`, `dots-three.svg`, `arrow-up.svg`, `arrow-down.svg` (Regular), `star-fill.svg` (Fill) — Repo-Karte | [Phosphor Icons](https://github.com/phosphor-icons/core) | **MIT** | — |
 | `mr/folder-arrow.svg` | Phosphor `folder` (Regular) with an added arrow | **MIT** | — |
 | `vscode.svg`, `visualstudio.svg`, `rider.svg`, `claude.svg`, `codex.svg`, `gemini.svg`, `copilot.svg`, `cursor.svg`, `aider.svg` | [Simple Icons](https://github.com/simple-icons/simple-icons) | **CC0 1.0 Universal** (collection) | Individual icons are trademarks: VS Code / Visual Studio (Microsoft), Rider (JetBrains), Claude (Anthropic), Codex (OpenAI), Gemini (Google), Copilot (GitHub/Microsoft), Cursor (Cursor Inc.), Aider (Paul Gauthier). Use under **nominative fair use** — see `assets/icons/LICENSE.txt`. |
 

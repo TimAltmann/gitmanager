@@ -1976,16 +1976,7 @@ impl Row<'_> {
     /// „Keine Pipeline“ bzw. ohne sicheren Link nur Text.
     fn pipeline(&self, ui: &mut Ui, actions: &mut MrViewActions, min_width: f32) {
         let (lang, p, mr) = (self.lang(), &self.v.p, self.mr);
-        let (icon, color) = match mr.pipeline {
-            PipelineState::Success => (ICON_CHECK_CIRCLE, p.ok_icon),
-            PipelineState::Failed => (ICON_X_CIRCLE, p.fail_icon),
-            PipelineState::Running => (ICON_CIRCLE_NOTCH, p.run_icon),
-            PipelineState::Pending => (ICON_CLOCK, p.run_icon),
-            PipelineState::Canceled => (ICON_PROHIBIT, p.neutral_icon),
-            PipelineState::Skipped => (ICON_SKIP_CIRCLE, p.neutral_icon),
-            PipelineState::Manual => (ICON_PLAY_CIRCLE, p.neutral_icon),
-            PipelineState::NoPipeline => (ICON_MINUS_CIRCLE, p.neutral_icon),
-        };
+        let (icon, color) = pipeline_icon(mr.pipeline, p);
         let label = tr(lang, mr.pipeline.label_key());
         let tooltip = pipeline_tooltip(lang, mr);
         let width = (19.0 + text_width(ui, &label, FontId::proportional(11.0))).max(min_width);
@@ -2846,6 +2837,23 @@ fn divider(ui: &mut Ui, v: &View) {
     let y = ui.cursor().top();
     ui.painter()
         .hline(ui.max_rect().x_range(), y, Stroke::new(1.0, v.p.line));
+}
+
+/// Icon und Farbe des Pipeline-Status (MR-Zeile und Chip der Repo-Karte).
+pub(crate) fn pipeline_icon(
+    state: PipelineState,
+    p: &MrPalette,
+) -> (ImageSource<'static>, Color32) {
+    match state {
+        PipelineState::Success => (ICON_CHECK_CIRCLE, p.ok_icon),
+        PipelineState::Failed => (ICON_X_CIRCLE, p.fail_icon),
+        PipelineState::Running => (ICON_CIRCLE_NOTCH, p.run_icon),
+        PipelineState::Pending => (ICON_CLOCK, p.run_icon),
+        PipelineState::Canceled => (ICON_PROHIBIT, p.neutral_icon),
+        PipelineState::Skipped => (ICON_SKIP_CIRCLE, p.neutral_icon),
+        PipelineState::Manual => (ICON_PLAY_CIRCLE, p.neutral_icon),
+        PipelineState::NoPipeline => (ICON_MINUS_CIRCLE, p.neutral_icon),
+    }
 }
 
 fn icon_image(icon: ImageSource<'static>, size: f32, tint: Color32) -> Image<'static> {
