@@ -5,6 +5,7 @@ mod mr_checkout;
 mod mr_settings;
 mod new_worktree;
 mod pull;
+mod remove_worktree;
 pub(crate) mod repo_badges;
 
 use crate::config::{AfterAction, AppConfig, RepoSortMode};
@@ -166,6 +167,7 @@ fn repo_busy_text(lang: Language, busy: &GitBusy) -> Option<String> {
         GitBusy::Checkout { iid } => Some(tr_fmt(lang, "mr_checkout_running", &[&iid.to_string()])),
         GitBusy::Worktree => Some(tr(lang, "wt_creating")),
         GitBusy::Pull { .. } => Some(tr(lang, "pull_running")),
+        GitBusy::Remove { .. } => Some(tr(lang, "rm_wt_running")),
     }
 }
 
@@ -284,6 +286,8 @@ enum GitBusy {
     Worktree,
     /// Pull (Fast-Forward) dieses Repos per Klick, danach Rescan
     Pull { repo: PathBuf },
+    /// Worktree entfernen (Dialog), danach Rescan
+    Remove { path: PathBuf },
 }
 
 impl GitBusy {
@@ -433,6 +437,7 @@ pub struct MyApp {
     /// Repo-Liste: Suche und Dialog „Neuer Worktree“
     worktree_ui: new_worktree::WorktreeUi,
     pull_ui: pull::PullUi,
+    remove_ui: remove_worktree::RemoveUi,
 }
 
 impl MyApp {
@@ -549,6 +554,7 @@ impl MyApp {
             mr_settings: MrSettingsCache::default(),
             worktree_ui: Default::default(),
             pull_ui: Default::default(),
+            remove_ui: Default::default(),
         };
         #[cfg(target_os = "windows")]
         {
@@ -664,7 +670,10 @@ impl MyApp {
             GitBusy::Scan | GitBusy::Fetch { .. } => return,
             // K1: das Auschecken endet ohne Scan – Wunsch merken, `poll_scan`
             // holt ihn danach nach
-            GitBusy::Checkout { .. } | GitBusy::Worktree | GitBusy::Pull { .. } => {
+            GitBusy::Checkout { .. }
+            | GitBusy::Worktree
+            | GitBusy::Pull { .. }
+            | GitBusy::Remove { .. } => {
                 self.pending_scan = true;
                 return;
             }
@@ -1235,9 +1244,11 @@ impl MyApp {
         if let Some(path) = actions.pull.take() {
             self.start_pull(path);
         }
-        // TODO Task 9 (Worktree entfernen), Task 10 (Aufräumen): bis dahin
-        // bewusst ignoriert
-        let _ = (actions.remove_worktree.take(), actions.cleanup);
+        if let Some(path) = actions.remove_worktree.take() {
+            self.open_remove_worktree(&path);
+        }
+        // TODO Task 10 (Aufräumen): bis dahin bewusst ignoriert
+        let _ = actions.cleanup;
     }
 
     /// #12: Config-Save-Fehler einheitlich melden statt still zu verwerfen:
@@ -2703,6 +2714,7 @@ impl eframe::App for MyApp {
         self.poll_mr_settings(ctx);
         self.poll_new_worktree(ctx);
         self.poll_pull(ctx);
+        self.poll_remove_worktree(ctx);
         self.maybe_refresh_mr(ctx);
         self.handle_close_request(ctx);
         // P5: gebatchte Usage-Saves hier flush (deckt auch ui()-Actions vom
@@ -2734,6 +2746,7 @@ impl eframe::App for MyApp {
         self.show_status_bar(ui);
         self.show_branch_dialog(&ctx);
         self.show_new_worktree_dialog(&ctx);
+        self.show_remove_worktree_dialog(&ctx);
         self.show_new_claude_dialog(&ctx);
         self.show_update_dialog(&ctx);
 
@@ -3196,6 +3209,7 @@ mod tests {
             mr_settings: MrSettingsCache::default(),
             worktree_ui: Default::default(),
             pull_ui: Default::default(),
+            remove_ui: Default::default(),
         }
     }
 

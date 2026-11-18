@@ -116,6 +116,12 @@ pub(crate) fn claude_pid_for(live: &[LiveSession], path: &std::path::Path) -> Op
         .map(|s| s.pid)
 }
 
+/// Läuft (egal in welchem Zustand) eine Claude Session in diesem Ordner?
+pub(crate) fn claude_running_at(live: &[LiveSession], path: &std::path::Path) -> bool {
+    let key = path_key(&path.to_string_lossy());
+    live.iter().any(|s| path_key(&s.cwd) == key)
+}
+
 impl MyApp {
     /// Karte je Repo-Ordner neu: offene MRs, deren Quell-Branch dort laut
     /// Scan ausgecheckt ist. Nach jedem Abruf und Umsortieren von `repos`.

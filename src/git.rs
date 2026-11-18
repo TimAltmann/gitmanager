@@ -993,7 +993,6 @@ fn git_cli_command(args: &[&str]) -> std::process::Command {
 
 /// Warum ein lokaler Branch gefahrlos gelöscht werden darf.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub enum BranchSafety {
     /// Upstream existiert und enthält alle lokalen Commits. Vertraut dem
     /// zuletzt gefetchten Tracking-Ref: ohne frischen Fetch kann der Remote
@@ -1011,7 +1010,6 @@ impl BranchSafety {
     /// Bei `MergedIntoDefault` und `MrMerged` würde `-d` daher trotz sicherer
     /// Lage scheitern; dort muss `-D` genommen werden. Nur `Pushed` kommt
     /// mit `-d` aus.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn needs_force_delete(self) -> bool {
         !matches!(self, BranchSafety::Pushed)
     }
@@ -1019,7 +1017,6 @@ impl BranchSafety {
 
 /// Prüft, ob ein lokaler Branch ohne Datenverlust gelöscht werden darf.
 /// `None` = nicht sicher (Aufrufer muss ausdrücklich bestätigen lassen).
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn branch_safety(repo_path: &Path, branch: &str, mr_merged: bool) -> Option<BranchSafety> {
     let repo = Repository::open(repo_path).ok()?;
     let local = repo.find_branch(branch, BranchType::Local).ok()?;
@@ -1123,8 +1120,7 @@ pub fn gone_local_branches(repo_path: &Path) -> Vec<String> {
 
 /// Hauptrepo eines Worktrees: Elternordner von `common_dir` (heißt er
 /// `.git`), sonst `common_dir` selbst (Bare-Repo).
-#[cfg_attr(not(test), allow(dead_code))]
-fn main_repo_of(common_dir: &Path) -> PathBuf {
+pub fn main_repo_of(common_dir: &Path) -> PathBuf {
     if common_dir.file_name().is_some_and(|n| n == ".git") {
         if let Some(parent) = common_dir.parent() {
             return parent.to_path_buf();
@@ -1136,7 +1132,6 @@ fn main_repo_of(common_dir: &Path) -> PathBuf {
 /// Ist HEAD des Worktrees detached und sein Commit von keinem lokalen oder
 /// Remote-Tracking-Branch erreichbar? Dann gingen beim Entfernen Commits
 /// verloren. Im Zweifel (Fehler beim Öffnen/Lesen) `true`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn head_unreachable(worktree_path: &Path) -> bool {
     let Ok(repo) = Repository::open(worktree_path) else {
         return true;
@@ -1186,7 +1181,6 @@ pub fn head_unreachable(worktree_path: &Path) -> bool {
 /// Ende muss der Pfad aus der Worktree-Liste verschwunden sein, sonst `Err`.
 /// Der Branch wird nur gelöscht, wenn `delete_branch` gesetzt ist; sein
 /// `force_delete` entscheidet zwischen `-d` und `-D`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn remove_worktree(
     worktree_path: &Path,
     main_repo: &Path,
