@@ -2,6 +2,7 @@
 //! glab-Runner, GraphQL-Abfragen und Parser, Domänenlogik, Service (Abruf,
 //! Prüfung, Token) und Checkout-Menü (K1).
 
+pub mod activity;
 pub mod checkout;
 pub mod glab;
 pub mod graphql;

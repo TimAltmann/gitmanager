@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// So lange bleibt eine Karte nach „In Repo-Liste zeigen“ hervorgehoben.
-const HIGHLIGHT_DURATION: Duration = Duration::from_secs(2);
+pub(super) const HIGHLIGHT_DURATION: Duration = Duration::from_secs(2);
 
 /// Warum das Auschecken gescheitert ist; den Text baut erst die App
 /// (Sprache, Auth-Hinweis).
@@ -177,7 +177,7 @@ impl MyApp {
 
     /// Ordner, in dem der MR-Branch (`sourceBranch` oder `mr-<iid>`) laut
     /// Scan schon ausgecheckt ist, auch als Worktree außerhalb der Suchpfade.
-    fn mr_checked_out_at(&self, mr: &MergeRequest) -> Option<PathBuf> {
+    pub(super) fn mr_checked_out_at(&self, mr: &MergeRequest) -> Option<PathBuf> {
         let project = ProjectRef {
             hosts: &self.mr_hosts,
             host_key: &mr.host_key,
@@ -269,11 +269,14 @@ impl MyApp {
                 {
                     self.mr_notice = Some(diverged_text(lang, local_branch, *ahead, *behind));
                 }
-                let message = tr_fmt(
+                let mut message = tr_fmt(
                     lang,
                     "mr_worktree_created",
                     &[&path.display().to_string(), &iid.to_string()],
                 );
+                if let Some(extra) = self.apply_folder_files(&path) {
+                    message = format!("{message} · {extra}");
+                }
                 // Basis-Klon kennt den neuen Worktree erst nach dem Rescan
                 self.finish_mr_checkout(&path, Some(&base), &choice.after, message);
             }
@@ -696,28 +699,7 @@ fn resolve_ide(
     path: &Path,
     base: Option<&Path>,
 ) -> Option<IdeLaunch> {
-    let scanned = |p: &Path| repos.iter().find(|r| same_dir(&r.path, p));
-    let base_repo = || {
-        repos
-            .iter()
-            .find(|r| r.worktrees.iter().any(|w| same_dir(&w.path, path)))
-            .or_else(|| base.and_then(scanned))
-    };
-    let (profile_path, file) = if let Some(repo) = scanned(path) {
-        (repo.path.clone(), repo.selected_solution.clone())
-    } else if in_search_roots(config, path) {
-        (path.to_path_buf(), None)
-    } else if let Some(base) = base_repo() {
-        let file = base
-            .selected_solution
-            .as_ref()
-            .and_then(|s| s.strip_prefix(&base.path).ok())
-            .map(|rel| path.join(rel))
-            .filter(|f| f.is_file());
-        (base.path.clone(), file)
-    } else {
-        (path.to_path_buf(), None)
-    };
+    let (profile_path, file) = ide_source(config, repos, path, base);
     let profile = config.get_effective_profile_for_repo(&profile_path);
     let ide = profile.visible_ides().into_iter().next()?;
     Some(IdeLaunch {
@@ -726,6 +708,45 @@ fn resolve_ide(
         file: file.unwrap_or_else(|| path.to_path_buf()),
         profile: profile_path,
     })
+}
+
+/// Ordner, dessen Profil die IDE liefert, und Solution/Projektdatei für
+/// `path` (siehe [`resolve_ide`]); auch für die Buttons offener Claude
+/// Sessions.
+pub(super) fn ide_source(
+    config: &AppConfig,
+    repos: &[RepoInfo],
+    path: &Path,
+    base: Option<&Path>,
+) -> (PathBuf, Option<PathBuf>) {
+    let scanned = |p: &Path| repos.iter().find(|r| same_dir(&r.path, p));
+    // Bekannter Worktree eines gescannten Repos: auch unter einem Suchpfad,
+    // aber zu tief für den Scan (z. B. `C:\Code\worktrees\x` bei Tiefe 1)
+    let owner = || {
+        repos
+            .iter()
+            .find(|r| r.worktrees.iter().any(|w| same_dir(&w.path, path)))
+    };
+    let from_base = |base: &RepoInfo| {
+        let file = base
+            .selected_solution
+            .as_ref()
+            .and_then(|s| s.strip_prefix(&base.path).ok())
+            .map(|rel| path.join(rel))
+            .filter(|f| f.is_file());
+        (base.path.clone(), file)
+    };
+    if let Some(repo) = scanned(path) {
+        (repo.path.clone(), repo.selected_solution.clone())
+    } else if let Some(base) = owner() {
+        from_base(base)
+    } else if in_search_roots(config, path) {
+        (path.to_path_buf(), None)
+    } else if let Some(base) = base.and_then(scanned) {
+        from_base(base)
+    } else {
+        (path.to_path_buf(), None)
+    }
 }
 
 /// Name der IDE, die „In {IDE} öffnen“ der MR-Ansicht für `path` startet

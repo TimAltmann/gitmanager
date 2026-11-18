@@ -265,6 +265,9 @@ pub struct OpenSession {
     pub place: String,
     /// Repo/Worktree der Session, falls sie in einem gescannten liegt
     pub repo_path: Option<PathBuf>,
+    /// Ordner, dessen Profil die IDE-Buttons liefert (Basis-Klon bei einem
+    /// Worktree außerhalb der Suchpfade); `None` = `repo_path` bzw. `cwd`
+    pub profile_path: Option<PathBuf>,
     pub branch: Option<String>,
     pub last_prompt: Option<String>,
 }
@@ -292,6 +295,7 @@ pub fn build_open(live: &[LiveSession], scan: &SessionScan) -> Vec<OpenSession> 
                     .unwrap_or_else(|| folder.clone()),
                 place: entry.map_or(folder, |e| e.repo_name.clone()),
                 repo_path: entry.map(|e| e.repo_path.clone()),
+                profile_path: None,
                 branch: session.and_then(|s| s.git_branch.clone()),
                 last_prompt: session.and_then(|s| s.last_prompt.clone()),
                 live: l.clone(),

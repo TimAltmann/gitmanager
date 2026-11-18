@@ -1,6 +1,7 @@
 //! Ansicht „Claude Sessions“: Zustand, Hintergrund-Scan, Live-Status der
 //! laufenden Instanzen, Fortsetzen und Terminal-Fokus.
 
+use super::mr_checkout::ide_source;
 use super::{MainView, MyApp};
 use crate::claude_live::{
     build_open, claude_live_dir, focus_session_window, process_alive, read_live_sessions,
@@ -473,7 +474,14 @@ impl MyApp {
     pub(super) fn show_claude_view(&mut self, ui: &mut Ui) {
         self.refresh_previews(Instant::now(), &ui.ctx().clone());
         let mut actions = ClaudeSessionActions::default();
-        let open = build_open(&self.claude.live, &self.claude.scan);
+        let mut open = build_open(&self.claude.live, &self.claude.scan);
+        for o in &mut open {
+            let dir = o
+                .repo_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(&o.live.cwd));
+            o.profile_path = Some(ide_source(&self.config, &self.repos, &dir, None).0);
+        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
@@ -497,11 +505,21 @@ impl MyApp {
                 self.claude.expanded.insert(id);
             }
         }
+        if let Some(id) = actions.toggle_favorite {
+            self.config.toggle_favorite_session(&id);
+            if let Err(e) = self.config.save() {
+                self.note_config_save_error(&e);
+            }
+        }
         if let Some((cwd, id)) = actions.resume {
             self.resume_claude_session(&cwd, &id);
         }
-        if let Some((repo, ide_id, file)) = actions.ide_open {
-            self.open_ide(&repo, &ide_id, &file);
+        if let Some((dir, ide_id, _)) = actions.ide_open {
+            // Wie „In IDE öffnen“ der MR-Ansicht: Solution des Repos bzw.
+            // bei einem Worktree außerhalb der Suchpfade die des Basis-Klons
+            let (profile, file) = ide_source(&self.config, &self.repos, &dir, None);
+            let file = file.unwrap_or_else(|| dir.clone());
+            self.open_ide_in(&dir, &profile, &ide_id, &file);
         }
         if let Some(path) = actions.shell_open {
             self.open_shell(&path);
@@ -587,7 +605,35 @@ impl MyApp {
     fn start_new_claude_session(&mut self, path: &std::path::Path) {
         let profile = new_session_profile(self.claude_profile());
         self.record_usage(path, super::UsageType::Open);
+        let extra = self.apply_folder_files(path);
         self.launch_claude(profile, &path.display().to_string());
+        if let Some(extra) = extra {
+            if let Some(msg) = self.status_message.as_mut() {
+                msg.push_str(&format!(" · {extra}"));
+            }
+        }
+    }
+
+    /// Vorlagedateien aus den Einstellungen in `dir` anlegen, soweit sie
+    /// dort fehlen; Rückgabe = Zusatz für die Statusmeldung.
+    pub(super) fn apply_folder_files(&mut self, dir: &std::path::Path) -> Option<String> {
+        if self.config.folder_files.is_empty() {
+            return None;
+        }
+        let lang = self.config.language;
+        let res = crate::config::write_folder_files(&self.config.folder_files, dir);
+        let mut parts = Vec::new();
+        if !res.written.is_empty() {
+            parts.push(tr_fmt(
+                lang,
+                "folder_files_written",
+                &[&res.written.join(", ")],
+            ));
+        }
+        for (path, err) in &res.failed {
+            parts.push(tr_fmt(lang, "folder_files_failed", &[path, err]));
+        }
+        (!parts.is_empty()).then(|| parts.join(" · "))
     }
 
     fn launch_claude(&mut self, profile: AgentProfile, cwd: &str) {
@@ -644,6 +690,27 @@ mod tests {
             "Standard-Ordner außerhalb als eigener Eintrag"
         );
         assert_eq!(d.selected, Some(0));
+    }
+
+    #[test]
+    fn new_claude_session_writes_folder_files_if_missing() {
+        let mut app = test_app();
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            app.apply_folder_files(dir.path()),
+            None,
+            "ohne Einstellung nichts"
+        );
+        app.config.folder_files = vec![crate::config::FolderFile {
+            path: "dev_config.xml".to_string(),
+            content: "<vorlage/>".to_string(),
+        }];
+        assert!(app.apply_folder_files(dir.path()).is_some());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dev_config.xml")).unwrap(),
+            "<vorlage/>"
+        );
+        assert_eq!(app.apply_folder_files(dir.path()), None, "schon vorhanden");
     }
 
     #[test]

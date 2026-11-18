@@ -185,6 +185,9 @@ pub struct MrConfig {
     /// Gilt ebenso für `after_checkout_default = Fixed(Agent(id))`.
     #[serde(deserialize_with = "de_after_checkout_last")]
     pub after_checkout_last: AfterAction,
+    /// Windows-Benachrichtigung bei neuer Review-Anfrage, Erwähnung und
+    /// neuen Kommentaren anderer
+    pub notify: bool,
 }
 
 impl Default for MrConfig {
@@ -202,6 +205,7 @@ impl Default for MrConfig {
             review_root: None,
             after_checkout_default: AfterCheckoutPref::LastUsed,
             after_checkout_last: default_after_checkout_last(),
+            notify: true,
         }
     }
 }
@@ -877,10 +881,27 @@ pub struct AppConfig {
     #[serde(default)]
     pub claude_default_dir: Option<String>,
 
+    /// Dateien, die beim Anlegen eines Worktrees und beim Start einer neuen
+    /// Claude Session im Ordner angelegt werden, falls sie dort fehlen
+    /// (z. B. eine lokale `dev_config.xml`). Ältere Versionen ignorieren das
+    /// Feld.
+    #[serde(default)]
+    pub folder_files: Vec<FolderFile>,
+
     /// Windows-Benachrichtigung, wenn eine Claude Session wartet oder fertig
     /// ist. Ältere Versionen ignorieren das Feld.
     #[serde(default = "default_claude_notify")]
     pub claude_notify: bool,
+
+    /// Favorisierte Repos/Worktrees (Schlüssel aus `repo_state_key`); stehen
+    /// oben in ihrer Liste. Ältere Versionen ignorieren das Feld.
+    #[serde(default)]
+    pub favorite_repos: Vec<String>,
+
+    /// Favorisierte Claude Sessions (Session-IDs). Ältere Versionen
+    /// ignorieren das Feld.
+    #[serde(default)]
+    pub favorite_sessions: Vec<String>,
 }
 
 fn default_claude_notify() -> bool {
@@ -898,6 +919,78 @@ impl AppConfig {
     pub fn claude_default_dir_path(&self) -> Option<PathBuf> {
         absolute_dir(self.claude_default_dir.as_deref())
     }
+}
+
+/// Datei für neue Worktrees/Claude-Ordner: Pfad relativ zum Ordner und
+/// Inhalt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FolderFile {
+    /// Relativ zum Ordner, z. B. `dev_config.xml` oder `config/local.json`
+    pub path: String,
+    pub content: String,
+}
+
+impl FolderFile {
+    /// Ziel unter `dir`; `None` bei leerem, absolutem Pfad oder `..`
+    /// (die Datei darf nicht außerhalb des Ordners landen).
+    pub fn target(&self, dir: &Path) -> Option<PathBuf> {
+        let rel = Path::new(self.path.trim());
+        let mut out = dir.to_path_buf();
+        let mut any = false;
+        for c in rel.components() {
+            match c {
+                std::path::Component::Normal(part) => {
+                    out.push(part);
+                    any = true;
+                }
+                std::path::Component::CurDir => {}
+                _ => return None,
+            }
+        }
+        any.then_some(out)
+    }
+}
+
+/// Ergebnis von [`write_folder_files`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FolderFilesResult {
+    /// Angelegt (relative Pfade wie eingestellt)
+    pub written: Vec<String>,
+    /// `(pfad, fehler)`
+    pub failed: Vec<(String, String)>,
+}
+
+/// Legt jede Datei aus `files` unter `dir` an, die dort noch fehlt
+/// (Unterordner werden erzeugt); bestehende Dateien bleiben unverändert.
+pub fn write_folder_files(files: &[FolderFile], dir: &Path) -> FolderFilesResult {
+    let mut result = FolderFilesResult::default();
+    for file in files.iter().filter(|f| !f.path.trim().is_empty()) {
+        let name = file.path.trim().to_string();
+        let Some(target) = file.target(dir) else {
+            result.failed.push((name, "ungültiger Pfad".to_string()));
+            continue;
+        };
+        if target.exists() {
+            continue;
+        }
+        let written = if dir.is_dir() {
+            target
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&target, &file.content))
+        } else {
+            Err(std::io::Error::other(format!(
+                "Ordner fehlt: {}",
+                dir.display()
+            )))
+        };
+        match written {
+            Ok(()) => result.written.push(name),
+            Err(e) => result.failed.push((name, e.to_string())),
+        }
+    }
+    result
 }
 
 /// Getrimmt, einheitliche Trenner, nur absolut.
@@ -939,7 +1032,10 @@ impl Default for AppConfig {
             merge_requests: MrConfig::default(),
             worktree_root: None,
             claude_default_dir: None,
+            folder_files: Vec::new(),
             claude_notify: default_claude_notify(),
+            favorite_repos: Vec::new(),
+            favorite_sessions: Vec::new(),
         }
     }
 }
@@ -1668,6 +1764,43 @@ impl AppConfig {
         #[cfg(not(windows))]
         {
             s
+        }
+    }
+
+    /// Favoriten-Schlüssel: Komponenten normalisiert (kein abschließender
+    /// Slash), auf Windows zusätzlich ohne Groß-/Kleinschreibung.
+    fn favorite_key(path: &Path) -> String {
+        Self::repo_state_key(&path.components().collect::<PathBuf>())
+    }
+
+    /// Ist das Repo/der Worktree als Favorit markiert?
+    pub fn is_favorite_repo(&self, path: &Path) -> bool {
+        let key = Self::favorite_key(path);
+        self.favorite_repos.contains(&key)
+    }
+
+    /// Favorit setzen bzw. entfernen. Aufrufer sortieren die Liste neu
+    /// (`repo_sort_dirty`).
+    pub fn toggle_favorite_repo(&mut self, path: &Path) {
+        let key = Self::favorite_key(path);
+        if let Some(i) = self.favorite_repos.iter().position(|k| *k == key) {
+            self.favorite_repos.remove(i);
+        } else {
+            self.favorite_repos.push(key);
+        }
+    }
+
+    /// Ist die Claude Session (ID) als Favorit markiert?
+    pub fn is_favorite_session(&self, id: &str) -> bool {
+        self.favorite_sessions.iter().any(|s| s == id)
+    }
+
+    /// Favorit setzen bzw. entfernen.
+    pub fn toggle_favorite_session(&mut self, id: &str) {
+        if let Some(i) = self.favorite_sessions.iter().position(|s| s == id) {
+            self.favorite_sessions.remove(i);
+        } else {
+            self.favorite_sessions.push(id.to_string());
         }
     }
 
@@ -2457,6 +2590,54 @@ mod tests {
         cfg.active_profile_id = "invalid".to_string();
         let fallback = cfg.get_active_profile();
         assert_eq!(fallback.id, cfg.profiles[0].id);
+    }
+
+    #[test]
+    fn favorites_roundtrip() {
+        let mut cfg = AppConfig::default();
+        cfg.toggle_favorite_repo(Path::new("/a/app"));
+        cfg.toggle_favorite_session("s-1");
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.favorite_repos, cfg.favorite_repos);
+        assert_eq!(back.favorite_sessions, vec!["s-1".to_string()]);
+        assert!(back.is_favorite_repo(Path::new("/a/app")));
+    }
+
+    #[test]
+    fn old_config_without_favorites_loads() {
+        let cfg: AppConfig = serde_json::from_str(r#"{"roots":[],"max_depth":2}"#).unwrap();
+        assert!(cfg.favorite_repos.is_empty());
+        assert!(cfg.favorite_sessions.is_empty());
+    }
+
+    #[test]
+    fn toggle_favorite_repo_twice_removes() {
+        let mut cfg = AppConfig::default();
+        let p = Path::new("/a/app");
+        cfg.toggle_favorite_repo(p);
+        assert!(cfg.is_favorite_repo(p));
+        cfg.toggle_favorite_repo(p);
+        assert!(!cfg.is_favorite_repo(p));
+        assert!(cfg.favorite_repos.is_empty());
+        cfg.toggle_favorite_session("x");
+        cfg.toggle_favorite_session("x");
+        assert!(!cfg.is_favorite_session("x"));
+    }
+
+    #[test]
+    fn favorite_repo_key_is_normalized() {
+        let mut cfg = AppConfig::default();
+        #[cfg(windows)]
+        {
+            cfg.toggle_favorite_repo(Path::new(r"C:\Dev\App"));
+            assert!(cfg.is_favorite_repo(Path::new(r"c:\dev\app")));
+        }
+        #[cfg(not(windows))]
+        {
+            cfg.toggle_favorite_repo(Path::new("/a/App"));
+            assert!(cfg.is_favorite_repo(Path::new("/a/App/")));
+        }
     }
 
     #[test]
@@ -3486,6 +3667,7 @@ mod tests {
             review_root: Some(r"C:\Dev\Reviews".to_string()),
             after_checkout_default: AfterCheckoutPref::Fixed(AfterAction::Shell),
             after_checkout_last: AfterAction::Agent("codex".to_string()),
+            notify: false,
         };
         let json = serde_json::to_string(&mr).unwrap();
         let de: MrConfig = serde_json::from_str(&json).unwrap();
@@ -3705,6 +3887,65 @@ mod tests {
         value.as_object_mut().unwrap().remove("claude_default_dir");
         let old: AppConfig = serde_json::from_value(value).unwrap();
         assert_eq!(old.claude_default_dir, None);
+    }
+
+    fn folder_file(path: &str, content: &str) -> FolderFile {
+        FolderFile {
+            path: path.to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    #[test]
+    fn folder_files_written_only_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [
+            folder_file("dev_config.xml", "<vorlage/>"),
+            folder_file("config/local.json", "{}"),
+            folder_file("  ", "leer: übersprungen"),
+        ];
+        let missing = dir.path().join("fehlt");
+        let res = write_folder_files(&files, &missing);
+        assert_eq!(res.failed.len(), 2, "Ordner fehlt");
+        let res = write_folder_files(&files, dir.path());
+        assert_eq!(res.written, ["dev_config.xml", "config/local.json"]);
+        assert!(res.failed.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("config/local.json")).unwrap(),
+            "{}"
+        );
+        std::fs::write(dir.path().join("dev_config.xml"), "<eigen/>").unwrap();
+        let res = write_folder_files(&files, dir.path());
+        assert!(res.written.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dev_config.xml")).unwrap(),
+            "<eigen/>"
+        );
+    }
+
+    #[test]
+    fn folder_file_rejects_paths_outside() {
+        let dir = Path::new("/work/repo");
+        assert_eq!(folder_file("../x", "").target(dir), None);
+        assert_eq!(folder_file("/etc/x", "").target(dir), None);
+        assert_eq!(folder_file("", "").target(dir), None);
+        assert_eq!(
+            folder_file("./a/b.txt", "").target(dir),
+            Some(dir.join("a").join("b.txt"))
+        );
+    }
+
+    #[test]
+    fn folder_files_serde_default() {
+        let mut cfg = AppConfig::default();
+        cfg.folder_files.push(folder_file("a.txt", "x"));
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.folder_files, cfg.folder_files);
+        let mut value = serde_json::to_value(&cfg).unwrap();
+        value.as_object_mut().unwrap().remove("folder_files");
+        let old: AppConfig = serde_json::from_value(value).unwrap();
+        assert!(old.folder_files.is_empty());
     }
 
     #[test]

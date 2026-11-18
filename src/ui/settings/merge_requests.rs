@@ -2061,6 +2061,7 @@ fn display_section(ui: &mut Ui, t: &Tab, cfg: &mut MrConfig) {
         tr(lang, "mrs_show_all_default"),
     );
     ui.checkbox(&mut cfg.ignore_bot_approvals, tr(lang, "mrs_ignore_bots"));
+    ui.checkbox(&mut cfg.notify, tr(lang, "mr_notify_label"));
     ui.horizontal(|ui| {
         ui.label(tr(lang, "mrs_approval_goal"));
         ui.add(

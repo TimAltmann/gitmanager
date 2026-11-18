@@ -1,7 +1,7 @@
 #!/bin/bash
 # Legt erfundene Demo-Repos unter $DEMO_HOME/Code an (Klone, Worktree,
-# Branches, ahead/behind, Änderungen). Remotes zeigen auf
-# gitlab.example.com, ohne Netz: Remote-Branches sind lokale Refs.
+# Branches, ahead/behind, Änderungen, Konflikt, verwaiste Upstreams).
+# Remotes zeigen auf gitlab.example.com, ohne Netz: Remote-Branches sind lokale Refs.
 set -euo pipefail
 CODE="${DEMO_HOME:?}/Code"
 rm -rf "$CODE" && mkdir -p "$CODE"
@@ -11,7 +11,9 @@ export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EM
 n=0
 commit() { # commit <repo> <file> <message>
   n=$((n + 1))
-  export GIT_AUTHOR_DATE="2026-10-0$(( (n % 9) + 1 ))T09:$(( n % 50 + 10 )):00Z"
+  # Relativ zu jetzt (die Karte zeigt „vor 2 h“ usw.): spätere Commits jünger
+  local m=$(( 30 - n < 1 ? 1 : 30 - n ))
+  export GIT_AUTHOR_DATE="$(date -u -d "-$(( m * m * 5 )) minutes" +%Y-%m-%dT%H:%M:%SZ)"
   export GIT_COMMITTER_DATE="$GIT_AUTHOR_DATE"
   mkdir -p "$(dirname "$1/$2")" && echo "$3 ($n)" >> "$1/$2"
   git -C "$1" add -A && git -C "$1" commit -qm "$3"
@@ -90,4 +92,35 @@ new_repo "$R" docs-site
 git -C "$R" checkout -q -b develop
 commit "$R" docs/merge-requests.md "Document merge request view"
 remote_branch "$R" develop && track "$R" develop
+
+# Aufräumen: Worktree, dessen Remote-Branch gelöscht wurde (Upstream „gone“),
+# Worktree eines gemergten MR (!125, fake-glab) und lokaler Branch mit
+# gelöschtem Upstream im Haupt-Klon
+R="$CODE/shop-backend"
+git -C "$R" checkout -q -b feature/csv-export main
+commit "$R" src/Orders/OrderExport.cs "Add order export as CSV"
+remote_branch "$R" feature/csv-export && track "$R" feature/csv-export
+git -C "$R" checkout -q main
+git -C "$R" worktree add -q "$CODE/review/shop-backend-csv-export" feature/csv-export
+git -C "$R" branch chore/remove-legacy-tax main
+track "$R" chore/remove-legacy-tax
+git -C "$R" worktree add -q "$CODE/review/shop-backend-legacy-tax" chore/remove-legacy-tax
+R="$CODE/payment-service"
+git -C "$R" branch fix/timeout-config main
+track "$R" fix/timeout-config
+
+# inventory-api: Merge-Konflikt auf einem langen Feature-Branch
+R="$CODE/inventory-api"
+new_repo "$R" inventory-api InventoryApi.sln
+commit "$R" src/Stock/StockLevel.cs "Add stock level model"
+remote_branch "$R" main
+git -C "$R" checkout -q -b feature/warehouse-transfer-reservations-with-partial-allocation
+commit "$R" src/Stock/StockLevel.cs "Reserve stock for warehouse transfers including partial allocations and backorders"
+remote_branch "$R" feature/warehouse-transfer-reservations-with-partial-allocation
+track "$R" feature/warehouse-transfer-reservations-with-partial-allocation
+git -C "$R" checkout -q -b tmp-main main
+commit "$R" src/Stock/StockLevel.cs "Track stock per bin"
+git -C "$R" checkout -q feature/warehouse-transfer-reservations-with-partial-allocation
+git -C "$R" merge -q tmp-main >/dev/null 2>&1 || true
+git -C "$R" branch -q -D tmp-main 2>/dev/null || true
 echo "demo repos: $(find "$CODE" -maxdepth 3 -name .git | wc -l)"

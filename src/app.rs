@@ -1,8 +1,13 @@
 mod claude_sessions;
+mod cleanup;
 mod merge_requests;
+mod mr_activity;
 mod mr_checkout;
 mod mr_settings;
 mod new_worktree;
+mod pull;
+mod remove_worktree;
+pub(crate) mod repo_badges;
 
 use crate::config::{AfterAction, AppConfig, RepoSortMode};
 use crate::git::{launch_agent, launch_ide, MrPrep, RepoInfo};
@@ -13,13 +18,14 @@ use crate::i18n::{tr, tr_fmt, Language};
 use crate::scanner::scan_repos;
 use crate::ui::{
     merge_requests::{MrCheckoutChoice, MrViewState},
-    repo_list::{show_repo_list, sort_main_repos, RepoHighlight, RepoListActions},
+    repo_list::{show_repo_list, sort_main_repos, RepoHighlight, RepoListActions, RepoListContext},
     settings::SettingsState,
 };
 use egui::{Color32, RichText, Vec2};
 use merge_requests::{top_bar_button, MrResult, TOP_BAR_CAPTIONS_WIDTH, TOP_BAR_COMPACT_WIDTH};
 use mr_checkout::{MrCheckoutFailure, MrSwitch};
 use mr_settings::{GlabFactory, MrSettingsCache, MrSettingsResult};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -161,6 +167,9 @@ fn repo_busy_text(lang: Language, busy: &GitBusy) -> Option<String> {
         GitBusy::Scan | GitBusy::Fetch { .. } => Some(tr(lang, "scanning_repos")),
         GitBusy::Checkout { iid } => Some(tr_fmt(lang, "mr_checkout_running", &[&iid.to_string()])),
         GitBusy::Worktree => Some(tr(lang, "wt_creating")),
+        GitBusy::Pull { .. } => Some(tr(lang, "pull_running")),
+        GitBusy::Remove { .. } => Some(tr(lang, "rm_wt_running")),
+        GitBusy::Cleanup => Some(tr(lang, "cleanup_running")),
     }
 }
 
@@ -277,6 +286,12 @@ enum GitBusy {
     Checkout { iid: u64 },
     /// „Neuer Worktree“ aus der Repo-Liste läuft, danach Rescan
     Worktree,
+    /// Pull (Fast-Forward) dieses Repos per Klick, danach Rescan
+    Pull { repo: PathBuf },
+    /// Worktree entfernen (Dialog), danach Rescan
+    Remove { path: PathBuf },
+    /// „Aufräumen …“: Fetch mit Prune und Suche bzw. Entfernen, danach Rescan
+    Cleanup,
 }
 
 impl GitBusy {
@@ -290,6 +305,18 @@ impl GitBusy {
     fn scans_repos(&self) -> bool {
         matches!(self, GitBusy::Scan | GitBusy::Fetch { .. })
     }
+
+    /// Pull oder Entfernen arbeitet gerade an diesem Pfad: ein Branch-Wechsel
+    /// dort muss warten (sonst setzt der Fast-Forward den falschen Branch um).
+    fn works_on(&self, path: &std::path::Path) -> bool {
+        let key = crate::config::AppConfig::repo_state_key(path);
+        match self {
+            GitBusy::Pull { repo: p } | GitBusy::Remove { path: p } => {
+                crate::config::AppConfig::repo_state_key(p) == key
+            }
+            _ => false,
+        }
+    }
 }
 
 pub struct MyApp {
@@ -299,6 +326,9 @@ pub struct MyApp {
     /// `set_git_busy` ändern (Tray)
     git_busy: GitBusy,
     error: Option<String>,
+    /// Fehler, der das nächste Scan-Ergebnis überdauert (z. B. Pull-Fehler
+    /// mit anschließendem Rescan); danach gilt wieder `error = None`.
+    error_after_scan: Option<String>,
     show_settings: bool,
     settings_state: Option<SettingsState>,
     scan_tx: Sender<ScanResult>,
@@ -398,6 +428,8 @@ pub struct MyApp {
     /// Zählt neue Abrufe „Gemergt“; Ergebnisse älterer werden verworfen
     mr_merged_gen: u64,
     mr_tx: Sender<MrResult>,
+    /// Neue Kommentare/Commits je MR und Benachrichtigungen
+    mr_activity: mr_activity::MrActivityState,
     mr_rx: Receiver<MrResult>,
     mr_view: MrViewState,
     /// glab fehlt oder ist zu alt: keine weiteren glab-Aufrufe in der Sitzung
@@ -412,6 +444,8 @@ pub struct MyApp {
     mr_notice: Option<String>,
     /// „In Repo-Liste zeigen“: hervorgehobene Karte und seit wann
     repo_highlight: Option<(RepoHighlight, std::time::Instant)>,
+    /// Offener MR je Repo-Ordner für den Chip der Repo-Karte
+    repo_mrs: HashMap<PathBuf, repo_badges::MrBadge>,
     /// Lokale Erkennung (E16) für diese Hosts erneut, auch wenn bekannt
     mr_rediscover: std::collections::BTreeSet<String>,
     /// Einstellungs-Tab „Merge Requests“: Worker-Ergebnisse kommen auch
@@ -421,6 +455,9 @@ pub struct MyApp {
     mr_settings: MrSettingsCache,
     /// Repo-Liste: Suche und Dialog „Neuer Worktree“
     worktree_ui: new_worktree::WorktreeUi,
+    pull_ui: pull::PullUi,
+    remove_ui: remove_worktree::RemoveUi,
+    cleanup_ui: cleanup::CleanupUi,
 }
 
 impl MyApp {
@@ -461,6 +498,7 @@ impl MyApp {
             repos: Vec::new(),
             git_busy: GitBusy::Idle,
             error: None,
+            error_after_scan: None,
             show_settings: false,
             settings_state: None,
             scan_tx: tx,
@@ -521,6 +559,7 @@ impl MyApp {
             mr_merged_loading: None,
             mr_merged_gen: 0,
             mr_tx,
+            mr_activity: mr_activity::MrActivityState::load_default(),
             mr_rx,
             mr_view,
             mr_glab_missing: false,
@@ -529,11 +568,15 @@ impl MyApp {
             pending_after_checkout: None,
             mr_notice: None,
             repo_highlight: None,
+            repo_mrs: Default::default(),
             mr_rediscover: Default::default(),
             mr_settings_tx,
             mr_settings_rx,
             mr_settings: MrSettingsCache::default(),
             worktree_ui: Default::default(),
+            pull_ui: Default::default(),
+            remove_ui: Default::default(),
+            cleanup_ui: Default::default(),
         };
         #[cfg(target_os = "windows")]
         {
@@ -649,7 +692,11 @@ impl MyApp {
             GitBusy::Scan | GitBusy::Fetch { .. } => return,
             // K1: das Auschecken endet ohne Scan – Wunsch merken, `poll_scan`
             // holt ihn danach nach
-            GitBusy::Checkout { .. } | GitBusy::Worktree => {
+            GitBusy::Checkout { .. }
+            | GitBusy::Worktree
+            | GitBusy::Pull { .. }
+            | GitBusy::Remove { .. }
+            | GitBusy::Cleanup => {
                 self.pending_scan = true;
                 return;
             }
@@ -702,7 +749,7 @@ impl MyApp {
                     self.repo_sort_dirty = false;
                     // P2b: abgeschlossener Scan erfüllt gemerkten Refresh.
                     self.pending_scan = false;
-                    self.error = None;
+                    self.error = self.error_after_scan.take();
                     self.mr_after_scan();
                     self.claude_after_scan();
                     // K1: IDE nach dem Auschecken, sobald der Ordner bekannt ist
@@ -878,7 +925,13 @@ impl MyApp {
         // Tray-Switches laufen headless: Main öffnet sich nie von selbst
         // (Dialog/Fehler bei Dirty/Konflikten warten in main, Popup bleibt offen).
         // Dedup: pro Repo nur der letzte Klick (keine verschwendeten Zwischen-Switches).
-        let pending = std::mem::take(&mut self.pending_branch_switches);
+        // Wechsel auf einem Pfad, an dem Pull/Entfernen gerade arbeitet,
+        // bleiben in der Queue und laufen nach dessen Ende.
+        let (deferred, pending): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.pending_branch_switches)
+                .into_iter()
+                .partition(|(path, _)| self.git_busy.works_on(path));
+        self.pending_branch_switches = deferred;
         if !pending.is_empty() {
             for (path, branch) in dedup_branch_switches(pending) {
                 if tray_branch_switch_opens_main_window() {
@@ -1186,6 +1239,45 @@ impl MyApp {
             });
         });
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+
+    /// Neue Aktionen der Repo-Karte (Stern, Chips, `⋯`-Menü) und der
+    /// Listen-Werkzeugleiste („Aufräumen …“).
+    fn apply_card_actions(&mut self, ctx: &egui::Context, actions: &mut RepoListActions) {
+        if let Some(path) = actions.toggle_favorite.take() {
+            self.config.toggle_favorite_repo(&path);
+            // Favoriten stehen oben in ihrem Abschnitt
+            self.repo_sort_dirty = true;
+            if let Err(e) = self.config.save() {
+                self.note_config_save_error(&e);
+            }
+        }
+        if let Some((host_key, id)) = actions.open_mr.take() {
+            self.focus_mr(&host_key, &id);
+        }
+        if let Some(path) = actions.focus_claude.take() {
+            if let Some(pid) = repo_badges::claude_pid_for(&self.claude.live, &path) {
+                self.apply_claude_actions(crate::ui::claude_sessions::ClaudeSessionActions {
+                    focus: Some(pid),
+                    ..Default::default()
+                });
+            }
+        }
+        if let Some(text) = actions.copy_text.take() {
+            ctx.copy_text(text);
+        }
+        if let Some(url) = actions.open_url.take() {
+            ctx.open_url(egui::OpenUrl::new_tab(url));
+        }
+        if let Some(path) = actions.pull.take() {
+            self.start_pull(path);
+        }
+        if let Some(path) = actions.remove_worktree.take() {
+            self.open_remove_worktree(&path);
+        }
+        if std::mem::take(&mut actions.cleanup) {
+            self.open_cleanup();
+        }
     }
 
     /// #12: Config-Save-Fehler einheitlich melden statt still zu verwerfen:
@@ -2620,6 +2712,7 @@ impl MyApp {
         ui.add_space(8.0);
         if do_clear {
             self.error = None;
+            self.error_after_scan = None;
         }
     }
 }
@@ -2650,6 +2743,9 @@ impl eframe::App for MyApp {
         self.poll_mr(ctx);
         self.poll_mr_settings(ctx);
         self.poll_new_worktree(ctx);
+        self.poll_pull(ctx);
+        self.poll_remove_worktree(ctx);
+        self.poll_cleanup(ctx);
         self.maybe_refresh_mr(ctx);
         self.handle_close_request(ctx);
         // P5: gebatchte Usage-Saves hier flush (deckt auch ui()-Actions vom
@@ -2681,6 +2777,8 @@ impl eframe::App for MyApp {
         self.show_status_bar(ui);
         self.show_branch_dialog(&ctx);
         self.show_new_worktree_dialog(&ctx);
+        self.show_remove_worktree_dialog(&ctx);
+        self.show_cleanup_dialog(&ctx);
         self.show_new_claude_dialog(&ctx);
         self.show_update_dialog(&ctx);
 
@@ -2697,6 +2795,8 @@ impl eframe::App for MyApp {
                     self.show_mr_view(ui);
                     return;
                 }
+                // Ansicht verlassen: Fokus gilt nicht mehr
+                self.mr_view.focus = None;
                 if self.main_view == MainView::ClaudeSessions {
                     self.show_claude_view(ui);
                     return;
@@ -2726,19 +2826,7 @@ impl eframe::App for MyApp {
                 }
 
                 // Repo-Liste mit neuen Callbacks
-                let mut actions = RepoListActions {
-                    branch_switch: None,
-                    solution_select: None,
-                    ide_open: None,
-                    agent_open: None,
-                    profile_override: None,
-                    fetch_branches: None,
-                    explorer_open: None,
-                    shell_open: None,
-                    custom_select: None,
-                    new_worktree: None,
-                    new_claude_session: false,
-                };
+                let mut actions = RepoListActions::default();
 
                 // Wir brauchen &mut für repo_list, um selektierte Werte zu zeigen, aber hier clonen wir mut
                 // repo_list wird &mut repos erwarten, wir haben &mut self.repos
@@ -2753,15 +2841,28 @@ impl eframe::App for MyApp {
                 let fetching = self.git_busy.holds_refs();
                 // K1: „In Repo-Liste zeigen“ hebt eine Karte kurz hervor
                 let highlight = self.repo_highlight_frame(&ctx);
+                // Claude-Chip: Live-Status je Repo-Ordner (leer ohne Abfrage)
+                let claude = repo_badges::claude_card_status(&self.claude.live, &self.repos);
+                let card_ctx = RepoListContext {
+                    mrs: &self.repo_mrs,
+                    claude: &claude,
+                    pulling: match &self.git_busy {
+                        GitBusy::Pull { repo } => Some(repo.as_path()),
+                        _ => None,
+                    },
+                    now: crate::gitlab::time::now_unix(),
+                    fetching,
+                };
                 show_repo_list(
                     ui,
                     &mut self.repos,
                     &self.config,
                     &mut actions,
-                    fetching,
                     highlight.as_ref(),
                     &mut self.worktree_ui.search,
+                    &card_ctx,
                 );
+                self.apply_card_actions(&ctx, &mut actions);
                 if let Some(base) = actions.new_worktree.take() {
                     self.open_new_worktree_dialog(base);
                 }
@@ -3066,6 +3167,7 @@ mod tests {
             repos: Vec::new(),
             git_busy: GitBusy::Idle,
             error: None,
+            error_after_scan: None,
             show_settings: false,
             settings_state: None,
             scan_tx,
@@ -3124,6 +3226,7 @@ mod tests {
             mr_merged_loading: None,
             mr_merged_gen: 0,
             mr_tx,
+            mr_activity: mr_activity::MrActivityState::default(),
             mr_rx,
             mr_view,
             mr_glab_missing: false,
@@ -3132,11 +3235,15 @@ mod tests {
             pending_after_checkout: None,
             mr_notice: None,
             repo_highlight: None,
+            repo_mrs: Default::default(),
             mr_rediscover: Default::default(),
             mr_settings_tx,
             mr_settings_rx,
             mr_settings: MrSettingsCache::default(),
             worktree_ui: Default::default(),
+            pull_ui: Default::default(),
+            remove_ui: Default::default(),
+            cleanup_ui: Default::default(),
         }
     }
 
@@ -3221,6 +3328,35 @@ mod tests {
         app.poll_scan(&ctx);
         assert!(app.tray_dirty, "pending switch must mark tray dirty");
         assert!(app.pending_branch_switches.is_empty());
+    }
+
+    #[test]
+    fn pending_switch_waits_while_pull_or_remove_runs_on_that_path() {
+        let busy = std::path::PathBuf::from("/tmp/no-repo-busy");
+        let other = std::path::PathBuf::from("/tmp/no-repo-other");
+        let ctx = egui::Context::default();
+        for state in [
+            GitBusy::Pull { repo: busy.clone() },
+            GitBusy::Remove { path: busy.clone() },
+        ] {
+            let mut app = test_app();
+            app.set_git_busy(state.clone());
+            app.pending_branch_switches
+                .push((busy.clone(), "main".to_string()));
+            app.pending_branch_switches
+                .push((other.clone(), "main".to_string()));
+            app.poll_scan(&ctx);
+            // Switch auf dem belegten Pfad bleibt in der Queue, der andere läuft
+            assert_eq!(
+                app.pending_branch_switches,
+                vec![(busy.clone(), "main".to_string())],
+                "{state:?}"
+            );
+            // Nach dem Lauf wird er abgearbeitet
+            app.set_git_busy(GitBusy::Idle);
+            app.poll_scan(&ctx);
+            assert!(app.pending_branch_switches.is_empty(), "{state:?}");
+        }
     }
 
     #[test]

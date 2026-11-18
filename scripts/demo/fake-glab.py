@@ -7,6 +7,7 @@ Zeitangaben sind relativ zu jetzt. Aufrufe landen in $FAKE_GLAB_LOG."""
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -27,6 +28,17 @@ NOW = datetime.now(timezone.utc)
 
 def ago(minutes):
     return (NOW - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def demo_sha(repo, branch):
+    """Commit des Demo-Branches (der gemergte Stand passt zum Worktree)."""
+    path = os.path.join(os.environ.get("DEMO_HOME", os.path.expanduser("~")), "Code", repo)
+    try:
+        out = subprocess.run(["git", "-C", path, "rev-parse", branch], capture_output=True,
+                             text=True, check=True)
+        return out.stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "0" * 40
 
 
 def user(username):
@@ -192,6 +204,20 @@ def graphql(request):
                 "userPermissions": {"readMergeRequest": True},
             } for p in paths]},
         }}
+    if op == "GmMergedBranches":
+        # !125 ist gemerged, sein Worktree steht noch (Kandidat fürs Aufräumen)
+        merged = {"acme/shop-backend": [
+            ("125", "feature/csv-export", demo_sha("shop-backend", "feature/csv-export"))]}
+        data = {}
+        for i in range(len(variables) // 2 + 1):
+            path = variables.get(f"p{i}")
+            if path is None:
+                continue
+            wanted = variables.get(f"b{i}") or []
+            data[f"p{i}"] = {"mergeRequests": {"nodes": [
+                {"iid": iid, "sourceBranch": branch, "diffHeadSha": sha}
+                for iid, branch, sha in merged.get(path.lower(), []) if branch in wanted]}}
+        return {"data": data}
     return {"errors": [{"message": f"fake-glab: unknown query {op or '?'}"}]}
 
 

@@ -1,0 +1,25 @@
+{
+  "config_version": 15,
+  "roots": [
+    "/home/demo/Code"
+  ],
+  "max_depth": 2,
+  "active_profile_id": "dotnet",
+  "active_agent_ids": [
+    "claude"
+  ],
+  "theme": "dark",
+  "language": "en",
+  "main_sort_mode": "name",
+  "auto_fetch_interval_min": 0,
+  "check_for_updates": false,
+  "minimize_to_tray": false,
+  "claude_notify": false,
+  "favorite_repos": [
+    "/home/demo/Code/work/shop-backend",
+    "/home/demo/Code/web-frontend"
+  ],
+  "merge_requests": {
+    "review_root": "/home/demo/Code/review"
+  }
+}

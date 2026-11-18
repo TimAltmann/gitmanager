@@ -4,7 +4,7 @@ use crate::config::{
 };
 use crate::i18n::{tr, tr_fmt, Language};
 use egui::{Color32, RichText, Vec2};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod merge_requests;
 
@@ -851,6 +851,11 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
     ui.separator();
     ui.add_space(8.0);
     show_claude_dir_setting(ui, &mut state.draft);
+    // Vorlagedateien für neue Worktrees und Claude Sessions
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+    show_folder_files_setting(ui, &mut state.draft);
     ui.add_space(10.0);
     let lang = state.draft.language;
     ui.checkbox(
@@ -870,6 +875,66 @@ fn show_worktree_root_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
     let lang = draft.language;
     let keys = ["wt_root_label", "wt_root_hint", "wt_root_placeholder"];
     show_dir_setting(ui, lang, keys, &mut draft.worktree_root);
+}
+
+/// Vorlagedateien (Pfad + Inhalt), die neue Worktrees und Ordner neuer
+/// Claude Sessions bekommen, falls sie dort fehlen.
+fn show_folder_files_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
+    let lang = draft.language;
+    let hint_color = Color32::from_rgb(100, 100, 100);
+    ui.label(
+        RichText::new(tr(lang, "folder_files_label"))
+            .size(13.0)
+            .strong(),
+    );
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(tr(lang, "folder_files_hint"))
+            .size(11.0)
+            .color(hint_color),
+    );
+    ui.add_space(6.0);
+    let mut remove = None;
+    for (i, file) in draft.folder_files.iter_mut().enumerate() {
+        ui.push_id(("folder_file", i), |ui| {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(tr(lang, "folder_files_path"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut file.path)
+                            .hint_text(tr(lang, "folder_files_path_hint"))
+                            .desired_width(260.0),
+                    );
+                    if ui.button(tr(lang, "folder_files_remove")).clicked() {
+                        remove = Some(i);
+                    }
+                });
+                if !file.path.trim().is_empty() && file.target(Path::new("x")).is_none() {
+                    ui.label(
+                        RichText::new(tr(lang, "folder_files_invalid"))
+                            .size(11.0)
+                            .color(Color32::from_rgb(200, 120, 40)),
+                    );
+                }
+                ui.label(tr(lang, "folder_files_content"));
+                ui.add(
+                    egui::TextEdit::multiline(&mut file.content)
+                        .code_editor()
+                        .desired_rows(5)
+                        .desired_width(f32::INFINITY),
+                );
+            });
+        });
+        ui.add_space(4.0);
+    }
+    if let Some(i) = remove {
+        draft.folder_files.remove(i);
+    }
+    if ui.button(tr(lang, "folder_files_add")).clicked() {
+        draft
+            .folder_files
+            .push(crate::config::FolderFile::default());
+    }
 }
 
 /// Standard-Ordner für „Neue Claude Session“ (leer = zuletzt benutztes Repo)

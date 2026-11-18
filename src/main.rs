@@ -8,6 +8,7 @@ mod claude_notify;
 mod claude_preview;
 mod claude_sessions;
 mod claude_toast_art;
+mod cleanup;
 mod config;
 mod config_parser;
 #[cfg(target_os = "windows")]

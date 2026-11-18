@@ -153,6 +153,53 @@ pub fn toast_xml(toast: &Toast, logo: Option<&Path>) -> String {
     )
 }
 
+/// Einfache Benachrichtigung mit eigener Kopfzeile (Merge Requests):
+/// Klick auf den Körper bzw. den ersten Button = [`ToastClick::Terminal`]
+/// („öffnen“), zweiter Button bzw. Kopfzeile = [`ToastClick::Show`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimpleToast {
+    /// Kennung der Kopfzeile (bündelt im Benachrichtigungscenter)
+    pub header_id: &'static str,
+    pub header: String,
+    pub title: String,
+    pub line: String,
+    pub attribution: String,
+    pub button_open: String,
+    pub button_show: String,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+/// Toast-XML für [`SimpleToast`]; `logo` = rundes App-Logo.
+pub fn simple_toast_xml(toast: &SimpleToast, logo: Option<&Path>) -> String {
+    let e = xml_escape;
+    let image = logo.map_or_else(String::new, |p| {
+        format!(
+            r#"<image placement="appLogoOverride" hint-crop="circle" src="file:///{}"/>"#,
+            e(&p.display().to_string())
+        )
+    });
+    format!(
+        r#"<toast launch="{ACTION_TERMINAL}" useButtonStyle="true"><header id="{header_id}" title="{header}" arguments="{ACTION_SHOW}"/><visual><binding template="ToastGeneric"><text>{title}</text><text>{line}</text><text placement="attribution">{attribution}</text>{image}</binding></visual><actions><action content="{open}" arguments="{ACTION_TERMINAL}"/><action content="{show}" arguments="{ACTION_SHOW}"/></actions></toast>"#,
+        header_id = e(toast.header_id),
+        header = e(&toast.header),
+        title = e(&toast.title),
+        line = e(&toast.line),
+        attribution = e(&toast.attribution),
+        open = e(&toast.button_open),
+        show = e(&toast.button_show),
+    )
+}
+
+/// Zeigt eine [`SimpleToast`]; außerhalb von Windows ohne Wirkung.
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub fn show_simple_notification(
+    toast: SimpleToast,
+    on_click: impl Fn(ToastClick) + Send + 'static,
+) {
+    #[cfg(windows)]
+    win::show_simple(toast, on_click);
+}
+
 /// Zeichen der Vorschau in der Benachrichtigung
 const SNIPPET_CHARS: usize = 160;
 
@@ -254,14 +301,30 @@ mod win {
         });
     }
 
+    pub fn show_simple(toast: super::SimpleToast, on_click: impl Fn(ToastClick) + Send + 'static) {
+        std::thread::spawn(move || {
+            let xml = super::simple_toast_xml(&toast, icon_path().as_deref());
+            if let Err(e) = show_xml(&xml, on_click) {
+                eprintln!("Benachrichtigung fehlgeschlagen: {e}");
+            }
+        });
+    }
+
     fn show_now(
         toast: &Toast,
         on_click: impl Fn(ToastClick) + Send + 'static,
     ) -> windows::core::Result<()> {
         let logo = data_dir()
             .and_then(|d| crate::claude_toast_art::toast_logo(&d.join("toast"), toast.kind));
+        show_xml(&toast_xml(toast, logo.as_deref()), on_click)
+    }
+
+    fn show_xml(
+        text: &str,
+        on_click: impl Fn(ToastClick) + Send + 'static,
+    ) -> windows::core::Result<()> {
         let xml = XmlDocument::new()?;
-        xml.LoadXml(&HSTRING::from(toast_xml(toast, logo.as_deref())))?;
+        xml.LoadXml(&HSTRING::from(text))?;
         let notification = ToastNotification::CreateToastNotification(&xml)?;
         notification.Activated(&TypedEventHandler::<ToastNotification, IInspectable>::new(
             move |_, args| {
@@ -372,6 +435,24 @@ mod tests {
         let s = snippet_of(&[item(PreviewRole::Assistant, &long)]).unwrap();
         assert!(s.ends_with('…'));
         assert!(s.chars().count() <= SNIPPET_CHARS + 1);
+    }
+
+    #[test]
+    fn simple_toast_xml_escapes_and_has_buttons() {
+        let toast = SimpleToast {
+            header_id: "merge-requests",
+            header: "Merge Requests".into(),
+            title: "Review: <Fix> & mehr".into(),
+            line: "Anna: bitte prüfen".into(),
+            attribution: "group/app !7".into(),
+            button_open: "Im Browser".into(),
+            button_show: "Anzeigen".into(),
+        };
+        let xml = simple_toast_xml(&toast, None);
+        assert!(xml.contains(r#"<header id="merge-requests" title="Merge Requests""#));
+        assert!(xml.contains("Review: &lt;Fix&gt; &amp; mehr"));
+        assert!(xml.contains(r#"<action content="Im Browser" arguments="terminal"/>"#));
+        assert!(xml.contains(r#"<action content="Anzeigen" arguments="show"/>"#));
     }
 
     #[test]

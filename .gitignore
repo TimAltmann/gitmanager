@@ -35,3 +35,6 @@ CLAUDE.md
 
 # Config (lokal, nicht im Repo)
 config.json
+
+# Demo-Config für scripts/demo (erfundene Daten) wird versioniert
+!scripts/demo/config.json
