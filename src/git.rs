@@ -414,7 +414,13 @@ fn fast_forward_inner(path: &Path, after_fetch: impl FnOnce()) -> anyhow::Result
     };
     drop(repo);
     let spec = format!("+refs/heads/{merge_branch}:refs/remotes/{remote}/{merge_branch}");
-    fetch_refspecs(path, &remote, &[&spec])?;
+    // Als Fetch-Fehler kennzeichnen (UI: Fetch-Text samt Auth-Hinweis)
+    fetch_refspecs(path, &remote, &[&spec]).map_err(|e| {
+        anyhow::Error::new(PartialFetch {
+            succeeded: Vec::new(),
+            failed: vec![(remote.clone(), format!("{e:#}"))],
+        })
+    })?;
     after_fetch();
 
     // Nach dem Fetch neu öffnen, damit der Handle die neuen Refs sicher sieht.
@@ -6773,6 +6779,19 @@ mod tests {
         let c1 = origin_and_clone_with_feature(base.path());
         git_cmd(&c1, &["checkout", "--detach"]);
         assert_eq!(fast_forward(&c1).unwrap(), FfOutcome::Detached);
+    }
+
+    #[test]
+    fn ff_fetch_failure_is_a_fetch_error() {
+        let base = tempdir().unwrap();
+        let c1 = origin_and_clone_with_feature(base.path());
+        let gone = base.path().join("weg.git");
+        git_cmd(
+            &c1,
+            &["remote", "set-url", "origin", gone.to_str().unwrap()],
+        );
+        let err = fast_forward(&c1).unwrap_err();
+        assert!(is_fetch_error(&err), "{err:#}");
     }
 
     #[test]

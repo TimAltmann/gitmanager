@@ -26,8 +26,9 @@ struct PullDone {
     result: anyhow::Result<FfOutcome>,
 }
 
-/// Statustext zum Ergebnis eines Pulls. Fehler laufen durch dieselbe
-/// Abbildung wie beim Fetch (inkl. Auth-Hinweis bei Remote-Fehlern).
+/// Text zum Ergebnis eines Pulls. Fetch-Fehler laufen durch dieselbe
+/// Abbildung wie beim Fetch (inkl. Auth-Hinweis), andere Fehler bekommen
+/// den Pull-Text.
 pub(super) fn pull_message(lang: Language, repo: &str, r: &anyhow::Result<FfOutcome>) -> String {
     match r {
         Ok(FfOutcome::UpToDate) => tr_fmt(lang, "pull_up_to_date", &[repo]),
@@ -52,10 +53,25 @@ pub(super) fn pull_message(lang: Language, repo: &str, r: &anyhow::Result<FfOutc
             } else {
                 raw
             };
-            let text = tr_fmt(lang, fetch_error_i18n_key(partial), &[&detail]);
+            // Nur echte Fetch-Fehler heißen „Fetch fehlgeschlagen“
+            let key = if is_fetch {
+                fetch_error_i18n_key(partial)
+            } else {
+                "pull_failed"
+            };
+            let text = tr_fmt(lang, key, &[&detail]);
             format!("{repo}: {text}")
         }
     }
+}
+
+/// Fehler und Verweigerungen (nichts geändert) bleiben als Fehlerbanner
+/// stehen; nur Erfolg und „schon aktuell“ sind flüchtige Statusmeldungen.
+fn pull_is_error(r: &anyhow::Result<FfOutcome>) -> bool {
+    !matches!(
+        r,
+        Ok(FfOutcome::UpToDate) | Ok(FfOutcome::FastForwarded { .. })
+    )
 }
 
 impl MyApp {
@@ -100,8 +116,15 @@ impl MyApp {
             if let Err(e) = &done.result {
                 eprintln!("Pull fehlgeschlagen für {}: {e:#}", done.repo.display());
             }
-            self.set_status(pull_message(lang, &name, &done.result));
+            let text = pull_message(lang, &name, &done.result);
             self.start_scan();
+            if pull_is_error(&done.result) {
+                // Banner bleibt über den Rescan hinweg stehen
+                self.error = Some(text.clone());
+                self.error_after_scan = Some(text);
+            } else {
+                self.set_status(text);
+            }
             ctx.request_repaint();
         }
         if matches!(self.git_busy, GitBusy::Pull { .. }) {
@@ -201,8 +224,80 @@ mod tests {
         assert!(text.starts_with("shop-backend: Fetch failed: "), "{text}");
         assert!(text.contains("'origin': auth failed"), "{text}");
         assert!(text.contains("auth may be required"), "{text}");
+        // Kein Fetch-Fehler (Fast-Forward, Absturz): eigener Pull-Text
         let plain = m(de, Err(anyhow::anyhow!("kaputt")));
-        assert_eq!(plain, "shop-backend: Fetch fehlgeschlagen: kaputt");
+        assert_eq!(plain, "shop-backend: Pull fehlgeschlagen: kaputt");
+        let plain = m(en, Err(anyhow::anyhow!("kaputt")));
+        assert_eq!(plain, "shop-backend: Pull failed: kaputt");
+        assert_eq!(
+            m(de, ok(FfOutcome::Changed)),
+            "shop-backend: Branch hat sich während des Abrufs geändert – nichts geändert"
+        );
+        assert_eq!(
+            m(en, ok(FfOutcome::Changed)),
+            "shop-backend: branch changed while fetching – nothing changed"
+        );
+    }
+
+    /// Ergebnis über den Kanal liefern und abholen.
+    fn deliver(r: anyhow::Result<FfOutcome>) -> MyApp {
+        let mut app = test_app();
+        let repo = PathBuf::from("/x/shop-backend");
+        app.set_git_busy(GitBusy::Pull { repo: repo.clone() });
+        app.pull_ui.tx.send(PullDone { repo, result: r }).unwrap();
+        app.poll_pull(&egui::Context::default());
+        app
+    }
+
+    fn wait_scan(app: &mut MyApp) {
+        let ctx = egui::Context::default();
+        for _ in 0..400 {
+            app.poll_scan(&ctx);
+            if app.git_busy != GitBusy::Scan {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("Scan nicht fertig");
+    }
+
+    #[test]
+    fn pull_refusals_and_errors_go_to_the_error_banner() {
+        let refusals = [
+            ok(FfOutcome::Dirty { files: 1 }),
+            ok(FfOutcome::Diverged {
+                ahead: 1,
+                behind: 1,
+            }),
+            ok(FfOutcome::NoUpstream),
+            ok(FfOutcome::Detached),
+            ok(FfOutcome::Changed),
+            Err(anyhow::anyhow!("kaputt")),
+        ];
+        for r in refusals {
+            let lang = Language::En;
+            let text = pull_message(lang, "shop-backend", &r);
+            let mut app = deliver(r);
+            assert_eq!(app.error.as_deref(), Some(text.as_str()));
+            assert_eq!(app.status_message, None, "{text}");
+            // Der anschließende Rescan löscht den Fehler nicht
+            assert_eq!(app.git_busy, GitBusy::Scan);
+            wait_scan(&mut app);
+            assert_eq!(app.error.as_deref(), Some(text.as_str()), "nach Scan");
+            // Ein späterer Scan schon (Fehler gilt für diesen Pull)
+            app.start_scan();
+            wait_scan(&mut app);
+            assert_eq!(app.error, None, "{text}");
+        }
+        for r in [
+            ok(FfOutcome::UpToDate),
+            ok(FfOutcome::FastForwarded { commits: 2 }),
+        ] {
+            let text = pull_message(Language::En, "shop-backend", &r);
+            let app = deliver(r);
+            assert_eq!(app.status_message.as_deref(), Some(text.as_str()));
+            assert_eq!(app.error, None, "{text}");
+        }
     }
 
     #[test]

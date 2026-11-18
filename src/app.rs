@@ -326,6 +326,9 @@ pub struct MyApp {
     /// `set_git_busy` ändern (Tray)
     git_busy: GitBusy,
     error: Option<String>,
+    /// Fehler, der das nächste Scan-Ergebnis überdauert (z. B. Pull-Fehler
+    /// mit anschließendem Rescan); danach gilt wieder `error = None`.
+    error_after_scan: Option<String>,
     show_settings: bool,
     settings_state: Option<SettingsState>,
     scan_tx: Sender<ScanResult>,
@@ -495,6 +498,7 @@ impl MyApp {
             repos: Vec::new(),
             git_busy: GitBusy::Idle,
             error: None,
+            error_after_scan: None,
             show_settings: false,
             settings_state: None,
             scan_tx: tx,
@@ -745,7 +749,7 @@ impl MyApp {
                     self.repo_sort_dirty = false;
                     // P2b: abgeschlossener Scan erfüllt gemerkten Refresh.
                     self.pending_scan = false;
-                    self.error = None;
+                    self.error = self.error_after_scan.take();
                     self.mr_after_scan();
                     self.claude_after_scan();
                     // K1: IDE nach dem Auschecken, sobald der Ordner bekannt ist
@@ -2708,6 +2712,7 @@ impl MyApp {
         ui.add_space(8.0);
         if do_clear {
             self.error = None;
+            self.error_after_scan = None;
         }
     }
 }
@@ -3162,6 +3167,7 @@ mod tests {
             repos: Vec::new(),
             git_busy: GitBusy::Idle,
             error: None,
+            error_after_scan: None,
             show_settings: false,
             settings_state: None,
             scan_tx,
