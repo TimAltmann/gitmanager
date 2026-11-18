@@ -634,7 +634,11 @@ fn show_open_card(
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         status_line(ui, o, lang, now_ms);
                         title_row(ui, |ui| {
-                            star_clicked = favorite_star(ui, &o.live.session_id, config, actions);
+                            // Nur Favoriten zeigen den Stern (zum Entfernen)
+                            if config.is_favorite_session(&o.live.session_id) {
+                                star_clicked =
+                                    favorite_star(ui, &o.live.session_id, config, actions);
+                            }
                             ui.add(
                                 egui::Label::new(RichText::new(&o.title).size(13.0).strong())
                                     .truncate(),
@@ -882,6 +886,17 @@ mod tests {
     }
 
     #[test]
+    fn open_card_has_no_star_unless_favorite() {
+        let o = open(3, "a1", "Titel", LiveStatus::Idle);
+        let config = AppConfig::default();
+        let add = tr(config.language, "repo_fav_add");
+        let (_, labels) = click_label(&add, |ui, a| {
+            show_open_card(ui, &o, &config, 0, Preview::Collapsed, a);
+        });
+        assert!(!labels.contains(&add), "{labels:?}");
+    }
+
+    #[test]
     fn open_card_shows_filled_star_for_favorite() {
         let o = open(3, "a1", "Titel", LiveStatus::Idle);
         let mut config = AppConfig::default();
@@ -914,7 +929,7 @@ mod tests {
     fn click_on_card_title_resumes() {
         let e = entry("a1", "Ein recht langer Titel");
         // Titelzeile: oben links in der Karte
-        let on_title = |r: egui::Rect| egui::pos2(r.left() + 30.0, r.top() + 18.0);
+        let on_title = |r: egui::Rect| egui::pos2(r.left() + 60.0, r.top() + 18.0);
         let (_, actions) = run_ui(card_id(&e), on_title, true, |ui, a| {
             show_session_card(ui, &e, &de_config(), 10, Preview::Collapsed, a);
         });
