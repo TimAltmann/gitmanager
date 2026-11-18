@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use super::{MainView, MyApp};
 use crate::config::MrConfig;
 use crate::gitlab::model::{approvals, MergeRequest, PipelineState};
+use crate::ui::merge_requests::MrFocus;
 
 /// Kurzfassung eines MR für den Chip `!iid · n/m ✓ · Pipeline`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +96,9 @@ impl MyApp {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn focus_mr(&mut self, host_key: &str, id: &str) {
         self.main_view = MainView::MergeRequests;
-        self.mr_view.focus = Some((host_key.to_string(), id.to_string()));
+        // Ein offener MR steht nicht unter „Gemergt“
+        self.mr_view.mine_merged = false;
+        self.mr_view.focus = Some(MrFocus::new(host_key, id));
     }
 }
 
@@ -206,14 +209,61 @@ mod tests {
         assert_eq!(app.main_view, MainView::Repos);
         app.focus_mr(HOST, "gid://x/1");
         assert_eq!(app.main_view, MainView::MergeRequests);
+        let focus = app.mr_view.focus.as_ref().expect("focus");
         assert_eq!(
-            app.mr_view.focus,
-            Some((HOST.to_string(), "gid://x/1".to_string()))
+            (focus.host_key.as_str(), focus.id.as_str()),
+            (HOST, "gid://x/1")
         );
+        assert!(!focus.scrolled);
     }
 
     #[test]
-    fn focus_is_consumed_after_rendering() {
+    fn focus_mr_leaves_merged_toggle() {
+        let mut app = test_app();
+        app.mr_view.mine_merged = true;
+        app.focus_mr(HOST, "gid://x/1");
+        assert!(!app.mr_view.mine_merged);
+    }
+
+    #[test]
+    fn more_page_updates_repo_mrs() {
+        use crate::app::merge_requests::MrResult;
+        use crate::gitlab::service::UninvolvedPage;
+        let mut app = app_with_repo();
+        app.mr_snapshot = Some(Box::new(MrSnapshot {
+            uninvolved: Some(UninvolvedList::default()),
+            ..MrSnapshot::default()
+        }));
+        app.mr_more_pending = 1;
+        app.mr_tx
+            .send(MrResult::MorePage {
+                epoch: 0,
+                host_key: HOST.to_string(),
+                page: Ok(UninvolvedPage {
+                    host_key: HOST.to_string(),
+                    mrs: vec![mr(7, "feature/x")],
+                    ..UninvolvedPage::default()
+                }),
+            })
+            .expect("send");
+        app.poll_mr(&egui::Context::default());
+        let path = PathBuf::from("/tmp/gm-badge-test/app");
+        assert_eq!(app.repo_mrs[&path].iid, 7);
+    }
+
+    fn render(app: &mut MyApp, ctx: &egui::Context) {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1200.0, 800.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let output = ctx.run_ui(raw, |ui| app.show_mr_view(ui));
+        output.drop_without_applying_deltas();
+    }
+
+    fn app_with_mr_snapshot() -> MyApp {
         let mut app = app_with_repo();
         app.mr_snapshot = Some(Box::new(MrSnapshot {
             mine: vec![mr(1, "feature/x")],
@@ -224,17 +274,34 @@ mod tests {
             }],
             ..MrSnapshot::default()
         }));
-        app.focus_mr(HOST, "gid://gitlab/MergeRequest/1");
+        app
+    }
+
+    #[test]
+    fn focus_survives_frames_then_expires() {
+        let mut app = app_with_mr_snapshot();
         let ctx = egui::Context::default();
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1200.0, 800.0),
-            )),
-            ..egui::RawInput::default()
-        };
-        let output = ctx.run_ui(raw, |ui| app.show_mr_view(ui));
-        output.drop_without_applying_deltas();
+        app.focus_mr(HOST, "gid://gitlab/MergeRequest/1");
+        render(&mut app, &ctx);
+        // Zeile gefunden und angescrollt, Fokus bleibt
+        assert!(app.mr_view.focus.as_ref().is_some_and(|f| f.scrolled));
+        render(&mut app, &ctx);
+        assert!(app.mr_view.focus.is_some());
+        // abgelaufen
+        let past = std::time::Instant::now()
+            - crate::app::mr_checkout::HIGHLIGHT_DURATION
+            - std::time::Duration::from_millis(10);
+        app.mr_view.focus.as_mut().expect("focus").since = past;
+        render(&mut app, &ctx);
+        assert_eq!(app.mr_view.focus, None);
+    }
+
+    #[test]
+    fn focus_dropped_when_row_not_drawn() {
+        let mut app = app_with_mr_snapshot();
+        let ctx = egui::Context::default();
+        app.focus_mr(HOST, "gid://gitlab/MergeRequest/99");
+        render(&mut app, &ctx);
         assert_eq!(app.mr_view.focus, None);
     }
 }

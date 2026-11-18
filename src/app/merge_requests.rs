@@ -547,6 +547,7 @@ impl MyApp {
                     }
                     Err(kind) => note_more_error(snap, host_key, kind),
                 }
+                self.update_repo_mrs();
             }
         }
         self.run_pending_mr_refresh();
@@ -781,6 +782,7 @@ impl MyApp {
         // K1: Hinweis aus dem Auschecken (überlebt Rescans)
         self.show_mr_notice(ui);
         let mut actions = MrViewActions::default();
+        self.expire_mr_focus(&ctx);
         {
             let config = &self.config;
             let mru = |p: &Path| crate::ui::tray_popup::mru_timestamp(config, p);
@@ -822,7 +824,27 @@ impl MyApp {
             };
             show_merge_requests(ui, &input, &mut self.mr_view, &mut actions);
         }
+        if let Some(focus) = self.mr_view.focus.as_mut() {
+            if actions.focus_drawn {
+                focus.scrolled = true;
+            } else if !focus.scrolled {
+                // Zeile im ersten Frame nicht gezeichnet (gefiltert, nicht
+                // geladen, Karte): Fokus verwerfen, Chips bleiben unberührt
+                self.mr_view.focus = None;
+            }
+        }
         self.handle_mr_actions(&ctx, actions);
+    }
+
+    /// Fokus läuft nach `HIGHLIGHT_DURATION` ab; bis dahin Repaint zum Ende.
+    pub(super) fn expire_mr_focus(&mut self, ctx: &egui::Context) {
+        let Some(focus) = self.mr_view.focus.as_ref() else {
+            return;
+        };
+        match super::mr_checkout::HIGHLIGHT_DURATION.checked_sub(focus.since.elapsed()) {
+            Some(left) => ctx.request_repaint_after(left),
+            None => self.mr_view.focus = None,
+        }
     }
 
     /// Klicks der MR-Ansicht; Auschecken und „Bereits ausgecheckt“ siehe

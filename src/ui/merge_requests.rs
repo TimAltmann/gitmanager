@@ -117,6 +117,27 @@ pub fn layout_mode(width: f32) -> LayoutMode {
     }
 }
 
+/// MR, den die Ansicht anspringt und zeitweise hervorhebt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MrFocus {
+    pub host_key: String,
+    pub id: String,
+    pub since: std::time::Instant,
+    /// Die Zeile wurde schon angescrollt (nur einmal)
+    pub scrolled: bool,
+}
+
+impl MrFocus {
+    pub fn new(host_key: &str, id: &str) -> Self {
+        Self {
+            host_key: host_key.to_string(),
+            id: id.to_string(),
+            since: std::time::Instant::now(),
+            scrolled: false,
+        }
+    }
+}
+
 /// Zustand der Ansicht für die Sitzung (nicht gespeichert, E13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MrViewState {
@@ -135,7 +156,7 @@ pub struct MrViewState {
     pub others_query: String,
     /// MR, den die Ansicht einmal anspringt und hervorhebt (`host_key`, `id`),
     /// z. B. vom Chip der Repo-Karte
-    pub focus: Option<(String, String)>,
+    pub focus: Option<MrFocus>,
 }
 
 impl MrViewState {
@@ -219,8 +240,8 @@ pub struct MrViewActions {
     pub open_settings_mr_tab: bool,
     /// MR in dieser Zeile geöffnet (`host_key`, `id`): Neues gilt als gesehen
     pub seen: Option<(String, String)>,
-    /// Die Zeile des Fokus wurde gezeichnet; `MrViewState::focus` ist erledigt
-    pub focus_done: bool,
+    /// Die Zeile des Fokus wurde in diesem Frame gezeichnet (hervorgehoben)
+    pub focus_drawn: bool,
 }
 
 /// Was die Ansicht je Frame braucht; baut `app.rs` (Task 10).
@@ -574,9 +595,6 @@ pub fn show_merge_requests(
             focus: state.focus.clone(),
         };
         show_dashboard(ui, &view, state, actions);
-        // Auch ohne sichtbare Zeile (gefiltert, nicht geladen) nur einmal
-        // versuchen: der Fokus wird verworfen, Chips und Listen bleiben
-        state.focus = None;
     });
 }
 
@@ -590,7 +608,7 @@ struct View<'v> {
     /// Mindestens ein Host lieferte Daten; sonst keine Leerzustände
     has_data: bool,
     /// Zeile, die diesen Frame hervorgehoben und angescrollt wird
-    focus: Option<(String, String)>,
+    focus: Option<MrFocus>,
 }
 
 impl View<'_> {
@@ -1530,7 +1548,10 @@ fn draw_row(
                 bottom: 10,
             }
         };
-        let focused = v.focus.as_ref() == Some(&(mr.host_key.clone(), mr.id.clone()));
+        let focused = v
+            .focus
+            .as_ref()
+            .is_some_and(|f| f.host_key == mr.host_key && f.id == mr.id);
         let frame = Frame::new().inner_margin(margin).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = if kind == RowKind::Uninvolved {
@@ -1605,8 +1626,10 @@ fn draw_row(
                 egui::Stroke::new(2.0_f32, ui.visuals().selection.stroke.color),
                 egui::StrokeKind::Inside,
             );
-            ui.scroll_to_rect(rect, Some(egui::Align::Center));
-            actions.focus_done = true;
+            if v.focus.as_ref().is_some_and(|f| !f.scrolled) {
+                ui.scroll_to_rect(rect, Some(egui::Align::Center));
+            }
+            actions.focus_drawn = true;
         }
     });
     // Browser, Auschecken oder Öffnen im Klon (Agent, IDE …): MR gesehen

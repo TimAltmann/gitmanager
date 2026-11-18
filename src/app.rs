@@ -2706,6 +2706,8 @@ impl eframe::App for MyApp {
                     self.show_mr_view(ui);
                     return;
                 }
+                // Ansicht verlassen: Fokus gilt nicht mehr
+                self.mr_view.focus = None;
                 if self.main_view == MainView::ClaudeSessions {
                     self.show_claude_view(ui);
                     return;
