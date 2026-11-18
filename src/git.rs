@@ -1098,12 +1098,18 @@ pub fn branch_safety(
     if merged {
         return Some(BranchSafety::MergedIntoDefault);
     }
-    let in_mr = merged_heads.iter().any(|&head| {
-        head == oid
+    tip_in_merged_heads(&repo, oid, merged_heads).then_some(BranchSafety::MrMerged)
+}
+
+/// Ist `tip` einer der gemergten MR-Köpfe oder darin enthalten? Ein lokal
+/// unbekannter Kopf zählt nicht. Gemeinsame Regel für die Branch-Sicherheit
+/// und den Aufräum-Grund „MR gemergt“.
+pub fn tip_in_merged_heads(repo: &Repository, tip: git2::Oid, merged_heads: &[git2::Oid]) -> bool {
+    merged_heads.iter().any(|&head| {
+        head == tip
             || (repo.find_commit(head).is_ok()
-                && repo.graph_descendant_of(head, oid).unwrap_or(false))
-    });
-    in_mr.then_some(BranchSafety::MrMerged)
+                && repo.graph_descendant_of(head, tip).unwrap_or(false))
+    })
 }
 
 /// Hat der Branch einen konfigurierten Upstream, dessen Remote-Branch aber

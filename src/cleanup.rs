@@ -50,6 +50,10 @@ pub struct CleanupCandidate {
     pub tip: Option<git2::Oid>,
     /// Kopf-Commits der gemergten MRs dieses Branches (Worktrees)
     pub merged_heads: Vec<git2::Oid>,
+    /// Worktree: offener MR auf diesem Ordner (iid), wird noch benutzt
+    pub open_mr: Option<u64>,
+    /// Worktree: in diesem Ordner läuft eine Claude Session
+    pub claude_running: bool,
 }
 
 impl CleanupCandidate {
@@ -92,6 +96,20 @@ impl CleanupCandidate {
         self.branch_safety = safety;
         self.selected = !self.needs_force();
         self.delete_branch = self.can_delete_branch() && !self.needs_force();
+    }
+
+    /// Worktree noch in Benutzung (offener MR, laufende Claude Session):
+    /// nie vorausgewählt, der Dialog warnt. Entfernen nur per Haken.
+    pub fn mark_in_use(&mut self, open_mr: Option<u64>, claude_running: bool) {
+        if !matches!(self.target, CleanupTarget::Worktree { .. }) {
+            return;
+        }
+        self.open_mr = open_mr;
+        self.claude_running = claude_running;
+        if open_mr.is_some() || claude_running {
+            self.selected = false;
+            self.delete_branch = false;
+        }
     }
 }
 
@@ -137,6 +155,8 @@ pub fn collect_candidates(
             branch_safety: None,
             tip: None,
             merged_heads: Vec::new(),
+            open_mr: None,
+            claude_running: false,
         });
     }
     for repo in repos.iter().filter(|r| !r.is_linked_worktree) {
@@ -167,6 +187,8 @@ pub fn collect_candidates(
                 branch_safety: None,
                 tip: None,
                 merged_heads: Vec::new(),
+                open_mr: None,
+                claude_running: false,
             });
         }
     }

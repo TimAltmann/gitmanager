@@ -8,7 +8,7 @@
 //! Unmittelbar vor jeder Aktion prüft der Worker den Zustand erneut; ist ein
 //! Eintrag unsicherer geworden als angezeigt, bleibt er unangetastet.
 
-use super::{GitBusy, MyApp};
+use super::{repo_badges, GitBusy, MyApp};
 use crate::cleanup::{collect_candidates, CleanupCandidate, CleanupReason, CleanupTarget};
 use crate::git::{self, RepoInfo};
 use crate::gitlab::glab::GlabRunner;
@@ -244,18 +244,29 @@ fn merged_worktrees(
             Ok(Ok(maps)) => {
                 for (worktrees, map) in projects.values().zip(maps) {
                     for (path, names) in worktrees {
-                        let mrs: Vec<&(u64, String)> =
-                            names.iter().filter_map(|n| map.get(n)).flatten().collect();
+                        // Nur MRs, deren Kopf die lokale Spitze enthält: ein
+                        // gleichnamiger, weiterbenutzter Branch (develop,
+                        // wiederverwendeter Name) ist nicht „gemergt“.
+                        // Unlesbare SHAs zählen nicht.
+                        let Ok(handle) = git2::Repository::open(path) else {
+                            continue;
+                        };
+                        let Some(tip) = handle.head().ok().and_then(|h| h.target()) else {
+                            continue;
+                        };
+                        let mrs: Vec<(u64, git2::Oid)> = names
+                            .iter()
+                            .filter_map(|n| map.get(n))
+                            .flatten()
+                            .filter_map(|(iid, sha)| Some((*iid, git2::Oid::from_str(sha).ok()?)))
+                            .filter(|(_, head)| git::tip_in_merged_heads(&handle, tip, &[*head]))
+                            .collect();
                         let Some(iid) = mrs.iter().map(|(iid, _)| *iid).max() else {
                             continue;
                         };
                         info.iids.insert(path.clone(), iid);
-                        // Unlesbare SHAs zählen nicht (Branch bleibt unsicher)
-                        let heads = mrs
-                            .iter()
-                            .filter_map(|(_, sha)| git2::Oid::from_str(sha).ok())
-                            .collect();
-                        info.heads.insert(path.clone(), heads);
+                        info.heads
+                            .insert(path.clone(), mrs.iter().map(|(_, h)| *h).collect());
                     }
                 }
             }
@@ -504,6 +515,15 @@ impl MyApp {
                     CleanupMsg::Scanned(found) => {
                         dialog.phase = CleanupPhase::Ready;
                         dialog.candidates = found.candidates;
+                        // Offene MRs und Claude Sessions kennt nur die UI
+                        for c in &mut dialog.candidates {
+                            if let CleanupTarget::Worktree { path, .. } = &c.target {
+                                let mr = self.repo_mrs.get(path).map(|b| b.iid);
+                                let claude =
+                                    repo_badges::claude_running_at(&self.claude.live, path);
+                                c.mark_in_use(mr, claude);
+                            }
+                        }
                         dialog.gitlab_unavailable = found.gitlab_unavailable;
                         dialog.scan_failed = found.failed;
                     }
@@ -633,6 +653,27 @@ fn show_candidates(ui: &mut egui::Ui, lang: crate::i18n::Language, dialog: &mut 
         });
 }
 
+/// Orange Warnungen eines Eintrags (Verlustgefahr, noch in Benutzung).
+fn candidate_warnings(lang: crate::i18n::Language, c: &CleanupCandidate) -> Vec<String> {
+    let mut out = Vec::new();
+    if c.dirty_files > 0 {
+        out.push(tr_fmt(lang, "cleanup_dirty", &[&c.dirty_files.to_string()]));
+    }
+    if c.ahead > 0 {
+        out.push(tr_fmt(lang, "cleanup_ahead", &[&c.ahead.to_string()]));
+    }
+    if c.head_unreachable {
+        out.push(tr(lang, "rm_wt_detached"));
+    }
+    if let Some(iid) = c.open_mr {
+        out.push(tr_fmt(lang, "cleanup_open_mr", &[&iid.to_string()]));
+    }
+    if c.claude_running {
+        out.push(tr(lang, "rm_wt_claude"));
+    }
+    out
+}
+
 fn show_candidate(ui: &mut egui::Ui, lang: crate::i18n::Language, c: &mut CleanupCandidate) {
     let (title, detail) = match &c.target {
         CleanupTarget::Worktree { path, branch, .. } => {
@@ -657,16 +698,8 @@ fn show_candidate(ui: &mut egui::Ui, lang: crate::i18n::Language, c: &mut Cleanu
         ui.label(RichText::new(detail).size(11.0).weak());
         let reasons: Vec<String> = c.reasons.iter().map(|r| reason_text(lang, r)).collect();
         ui.label(RichText::new(reasons.join(" · ")).size(11.0));
-        if c.dirty_files > 0 {
-            let n = c.dirty_files.to_string();
-            ui.label(RichText::new(tr_fmt(lang, "cleanup_dirty", &[&n])).color(ORANGE));
-        }
-        if c.ahead > 0 {
-            let n = c.ahead.to_string();
-            ui.label(RichText::new(tr_fmt(lang, "cleanup_ahead", &[&n])).color(ORANGE));
-        }
-        if c.head_unreachable {
-            ui.label(RichText::new(tr(lang, "rm_wt_detached")).color(ORANGE));
+        for w in candidate_warnings(lang, c) {
+            ui.label(RichText::new(w).color(ORANGE));
         }
         match &c.target {
             CleanupTarget::Branch { .. } if c.branch_safety.is_none() => {
@@ -1072,7 +1105,8 @@ mod tests {
             .find(|c| matches!(c.target, CleanupTarget::Worktree { .. }))
             .expect("Worktree angeboten")
             .clone();
-        assert!(c.mr_merged());
+        // Spitze liegt nicht im MR-Kopf: kein „MR gemergt“, nur „verwaist“
+        assert!(!c.mr_merged());
         assert_eq!(c.branch_safety, None);
         assert!(!c.can_delete_branch() && !c.delete_branch);
         assert_eq!(execute(&c), CleanupOutcome::Ok);
@@ -1086,6 +1120,118 @@ mod tests {
             git::branch_safety(&main, "feat", &c2.merged_heads),
             Some(git::BranchSafety::MrMerged)
         );
+    }
+
+    /// Review-Befund: langlebiger Branch (develop), dessen früherer MR
+    /// gemergt ist. Die Spitze liegt nicht im MR-Kopf: kein „MR gemergt“,
+    /// ohne anderen Grund also kein Kandidat.
+    #[test]
+    fn merged_mr_head_not_containing_tip_is_no_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, wt) = setup(tmp.path());
+        // Alter MR-Kopf = init; danach weitergearbeitet und gepusht
+        let old_head = rev(&main, "main");
+        git(&wt, &["commit", "-q", "--allow-empty", "-m", "weiter"]);
+        git(&wt, &["push", "-q", "-u", "origin", "feat"]);
+        git(&main, &["fetch", "-q", "--prune", "origin"]);
+        let mut repos = repos(&main, &wt);
+        repos[1].remotes = vec![RemoteInfo::new(
+            "origin",
+            "https://gitlab.example.com/acme/shop.git",
+        )];
+        let runner = GatedRunner::new(FakeGlab::new());
+        runner.inner().push(FakeReply::http(
+            200,
+            &format!(
+                r#"{{"data":{{"p0":{{"mergeRequests":{{"nodes":[{{"iid":"4","sourceBranch":"feat","diffHeadSha":"{old_head}"}}]}}}}}}}}"#
+            ),
+        ));
+        let scan = find_candidates(&repos, &gitlab_hosts(), Some(&runner));
+        assert_eq!(runner.inner().pending(), 0, "GitLab wurde gefragt");
+        assert!(!scan.gitlab_unavailable);
+        assert!(
+            scan.candidates
+                .iter()
+                .all(|c| !matches!(c.target, CleanupTarget::Worktree { .. })),
+            "{:?}",
+            scan.candidates
+        );
+    }
+
+    /// Sauberer, sicherer Worktree-Kandidat unter `/x/wt` (vorausgewählt,
+    /// Branch mitlöschen an).
+    fn clean_wt_candidate() -> CleanupCandidate {
+        let mut r = RepoInfo::new(PathBuf::from("/x/wt"), "f".into(), false, false);
+        r.is_linked_worktree = true;
+        let mut c = collect_candidates(
+            &[r],
+            &HashMap::from([(PathBuf::from("/x/wt"), vec!["f".to_string()])]),
+            &HashMap::new(),
+        )
+        .remove(0);
+        c.apply_checks(false, Some(git::BranchSafety::Pushed));
+        assert!(c.selected && c.delete_branch);
+        c
+    }
+
+    fn deliver_scan(app: &mut MyApp, c: CleanupCandidate) -> CleanupCandidate {
+        app.cleanup_ui.dialog = Some(CleanupDialog::scanning());
+        app.git_busy = GitBusy::Cleanup;
+        app.cleanup_ui
+            .tx
+            .send(CleanupMsg::Scanned(CleanupScan {
+                candidates: vec![c],
+                gitlab_unavailable: false,
+                failed: false,
+            }))
+            .unwrap();
+        app.poll_cleanup(&egui::Context::default());
+        app.cleanup_ui.dialog.as_ref().unwrap().candidates[0].clone()
+    }
+
+    #[test]
+    fn worktree_with_open_mr_is_not_preselected() {
+        let mut app = test_app();
+        let mr = crate::gitlab::model::MergeRequest {
+            iid: 12,
+            ..Default::default()
+        };
+        app.repo_mrs.insert(
+            PathBuf::from("/x/wt"),
+            super::super::repo_badges::MrBadge::from_mr(&mr, true),
+        );
+        let c = deliver_scan(&mut app, clean_wt_candidate());
+        assert!(!c.selected && !c.delete_branch, "{c:?}");
+        assert_eq!(c.open_mr, Some(12));
+        let de = candidate_warnings(crate::i18n::Language::De, &c);
+        assert!(de.contains(&"Offener MR !12".to_string()), "{de:?}");
+        let en = candidate_warnings(crate::i18n::Language::En, &c);
+        assert!(en.contains(&"Open MR !12".to_string()), "{en:?}");
+
+        // Ohne offenen MR bleibt die Vorauswahl
+        let mut app = test_app();
+        let c = deliver_scan(&mut app, clean_wt_candidate());
+        assert!(c.selected && c.delete_branch && c.open_mr.is_none());
+        assert!(candidate_warnings(crate::i18n::Language::De, &c).is_empty());
+    }
+
+    #[test]
+    fn worktree_with_running_claude_is_not_preselected() {
+        let mut app = test_app();
+        app.claude.live = vec![crate::claude_live::LiveSession {
+            pid: 1,
+            session_id: "s".into(),
+            cwd: "/x/wt".into(),
+            status: crate::claude_live::LiveStatus::Idle,
+            status_since_ms: 0,
+            name: None,
+            proc_start: None,
+        }];
+        let c = deliver_scan(&mut app, clean_wt_candidate());
+        assert!(!c.selected && !c.delete_branch, "{c:?}");
+        assert!(c.claude_running);
+        let lang = crate::i18n::Language::De;
+        assert!(candidate_warnings(lang, &c).contains(&tr(lang, "rm_wt_claude")));
     }
 
     #[test]

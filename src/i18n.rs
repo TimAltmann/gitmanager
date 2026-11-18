@@ -333,6 +333,8 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "cleanup_gitlab_unavailable") => "GitLab nicht verfügbar – gemergte Merge Requests wurden nicht geprüft".to_string(),
         (Language::En, "cleanup_reason_mr") => "MR !{} merged".to_string(),
         (Language::De, "cleanup_reason_mr") => "MR !{} gemergt".to_string(),
+        (Language::En, "cleanup_open_mr") => "Open MR !{}".to_string(),
+        (Language::De, "cleanup_open_mr") => "Offener MR !{}".to_string(),
         (Language::En, "cleanup_reason_gone") => "Remote branch deleted".to_string(),
         (Language::De, "cleanup_reason_gone") => "Remote-Branch gelöscht".to_string(),
         (Language::En, "cleanup_dirty") => "{} changes".to_string(),
