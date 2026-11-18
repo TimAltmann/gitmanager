@@ -505,6 +505,12 @@ impl MyApp {
                 self.claude.expanded.insert(id);
             }
         }
+        if let Some(id) = actions.toggle_favorite {
+            self.config.toggle_favorite_session(&id);
+            if let Err(e) = self.config.save() {
+                self.note_config_save_error(&e);
+            }
+        }
         if let Some((cwd, id)) = actions.resume {
             self.resume_claude_session(&cwd, &id);
         }

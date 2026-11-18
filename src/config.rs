@@ -1791,15 +1791,11 @@ impl AppConfig {
     }
 
     /// Ist die Claude Session (ID) als Favorit markiert?
-    // Wird erst von der UI (Repo-/Session-Karten) genutzt
-    #[allow(dead_code)]
     pub fn is_favorite_session(&self, id: &str) -> bool {
         self.favorite_sessions.iter().any(|s| s == id)
     }
 
     /// Favorit setzen bzw. entfernen.
-    // Wird erst von der UI (Repo-/Session-Karten) genutzt
-    #[allow(dead_code)]
     pub fn toggle_favorite_session(&mut self, id: &str) {
         if let Some(i) = self.favorite_sessions.iter().position(|s| s == id) {
             self.favorite_sessions.remove(i);

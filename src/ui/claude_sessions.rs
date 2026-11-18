@@ -12,6 +12,7 @@ use crate::ui::claude_anim::{
     status_color, verb,
 };
 use crate::ui::search_field::search_field;
+use crate::ui::theme::mr_palette;
 use egui::{FontId, RichText, Ui, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -23,6 +24,8 @@ const ICON_TERMINAL: egui::ImageSource = egui::include_image!("../../assets/icon
 const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
 const ICON_CHEVRON_DOWN: egui::ImageSource =
     egui::include_image!("../../assets/icons/chevron-down.svg");
+const ICON_STAR: egui::ImageSource = egui::include_image!("../../assets/icons/star.svg");
+const ICON_STAR_FILL: egui::ImageSource = egui::include_image!("../../assets/icons/star-fill.svg");
 const ICON_CHEVRON_UP: egui::ImageSource =
     egui::include_image!("../../assets/icons/chevron-up.svg");
 
@@ -41,6 +44,8 @@ pub struct ClaudeSessionActions {
     pub explorer_open: Option<PathBuf>,
     /// Vorschau der Session (ID) auf- bzw. zuklappen
     pub toggle_preview: Option<String>,
+    /// Favorit (Session-ID) setzen bzw. entfernen
+    pub toggle_favorite: Option<String>,
 }
 
 /// Sichtbare offene Sessions und übrige Sessions (ohne die offenen), jeweils
@@ -160,7 +165,7 @@ pub fn show_claude_sessions(
                         for e in &rest {
                             let preview = Preview::of(&e.session.id, expanded, previews);
                             culled(ui, card_id(e), |ui| {
-                                show_session_card(ui, e, lang, now_secs, preview, actions)
+                                show_session_card(ui, e, config, now_secs, preview, actions)
                             });
                             ui.add_space(6.0);
                         }
@@ -355,6 +360,45 @@ fn preview_toggle(
     }
 }
 
+/// Titelzeile ohne Mindesthöhe, damit der Stern sie nicht höher macht als
+/// den Titel.
+fn title_row(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = 0.0;
+        ui.horizontal(add);
+    });
+}
+
+/// Stern (☆/★) links in der Titelzeile; Klick setzt `toggle_favorite`.
+/// Gibt zurück, ob geklickt wurde (dann gilt der Klick nicht der Karte).
+fn favorite_star(
+    ui: &mut Ui,
+    id: &str,
+    config: &AppConfig,
+    actions: &mut ClaudeSessionActions,
+) -> bool {
+    ui.spacing_mut().button_padding = egui::Vec2::ZERO;
+    let (source, tint, key) = if config.is_favorite_session(id) {
+        let p = mr_palette(&config.theme, ui.visuals());
+        (ICON_STAR_FILL, p.warn_icon, "repo_fav_remove")
+    } else {
+        (ICON_STAR, ui.visuals().weak_text_color(), "repo_fav_add")
+    };
+    let label = tr(config.language, key);
+    let image = egui::Image::new(source)
+        .fit_to_exact_size(Vec2::splat(14.0))
+        .tint(tint);
+    let resp = ui
+        .add(egui::Button::image(image).frame(false))
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+    let clicked = resp.on_hover_text(&label).clicked();
+    if clicked {
+        actions.toggle_favorite = Some(id.to_string());
+    }
+    clicked
+}
+
 /// Letzte Nachrichten unter dem Karteninhalt.
 fn show_preview(ui: &mut Ui, preview: Preview, lang: Language) {
     let Preview::Expanded(items) = preview else {
@@ -409,15 +453,17 @@ fn show_preview(ui: &mut Ui, preview: Preview, lang: Language) {
 fn show_session_card(
     ui: &mut Ui,
     entry: &SessionEntry,
-    lang: Language,
+    config: &AppConfig,
     now_secs: i64,
     preview: Preview,
     actions: &mut ClaudeSessionActions,
 ) {
+    let lang = config.language;
     let session = &entry.session;
     let stroke = egui::Stroke::new(1.0_f32, ui.visuals().widgets.inactive.fg_stroke.color);
     let tooltip = format!("{}\n{}", session.cwd, session.id);
     let mut button_clicked = false;
+    let mut star_clicked = false;
     let card_clicked = clickable_card(
         ui,
         card_id(entry),
@@ -437,10 +483,13 @@ fn show_session_card(
                     preview_toggle(ui, &session.id, preview, lang, actions);
                     ui.add_space(8.0);
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                        ui.add(
-                            egui::Label::new(RichText::new(&session.title).size(13.0).strong())
-                                .truncate(),
-                        );
+                        title_row(ui, |ui| {
+                            star_clicked = favorite_star(ui, &session.id, config, actions);
+                            ui.add(
+                                egui::Label::new(RichText::new(&session.title).size(13.0).strong())
+                                    .truncate(),
+                            );
+                        });
                         if let Some(prompt) = &session.last_prompt {
                             ui.add(
                                 egui::Label::new(RichText::new(prompt).size(11.5).weak())
@@ -459,7 +508,7 @@ fn show_session_card(
         },
         |ui| show_preview(ui, preview, lang),
     );
-    if button_clicked || card_clicked {
+    if button_clicked || (card_clicked && !star_clicked) {
         actions.resume = Some((session.cwd.clone(), session.id.clone()));
     }
 }
@@ -570,6 +619,7 @@ fn show_open_card(
     let lang = config.language;
     let stroke = egui::Stroke::new(1.5_f32, status_color(o.live.status));
     let tooltip = format!("{}\n{}", tr(lang, "claude_focus_tt"), o.live.cwd);
+    let mut star_clicked = false;
     let clicked = clickable_card(
         ui,
         open_card_id(o),
@@ -583,10 +633,13 @@ fn show_open_card(
                     ui.add_space(8.0);
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         status_line(ui, o, lang, now_ms);
-                        ui.add(
-                            egui::Label::new(RichText::new(&o.title).size(13.0).strong())
-                                .truncate(),
-                        );
+                        title_row(ui, |ui| {
+                            star_clicked = favorite_star(ui, &o.live.session_id, config, actions);
+                            ui.add(
+                                egui::Label::new(RichText::new(&o.title).size(13.0).strong())
+                                    .truncate(),
+                            );
+                        });
                         if let Some(prompt) = &o.last_prompt {
                             ui.add(
                                 egui::Label::new(RichText::new(prompt).size(11.5).weak())
@@ -600,7 +653,7 @@ fn show_open_card(
         },
         |ui| show_preview(ui, preview, lang),
     );
-    if clicked {
+    if clicked && !star_clicked {
         actions.focus = Some(o.live.pid);
     }
 }
@@ -621,6 +674,13 @@ mod tests {
             last_prompt: None,
             git_branch: None,
             last_activity: 1,
+        }
+    }
+
+    fn de_config() -> AppConfig {
+        AppConfig {
+            language: Language::De,
+            ..AppConfig::default()
         }
     }
 
@@ -744,14 +804,14 @@ mod tests {
     }
 
     fn on_body(r: egui::Rect) -> egui::Pos2 {
-        egui::pos2(r.left() + 20.0, r.center().y)
+        egui::pos2(r.left() + 60.0, r.center().y)
     }
 
     #[test]
     fn resume_button_sits_above_card_click_area() {
         let e = entry("a1", "Titel");
         let draw = |ui: &mut Ui, a: &mut ClaudeSessionActions| {
-            show_session_card(ui, &e, Language::De, 10, Preview::Collapsed, a);
+            show_session_card(ui, &e, &de_config(), 10, Preview::Collapsed, a);
         };
         let (ctx, _) = run_ui(card_id(&e), on_button, false, draw);
         let card = ctx.read_response(card_id(&e)).expect("Karte");
@@ -764,11 +824,84 @@ mod tests {
         );
     }
 
+    /// Zeichnet `draw` mit AccessKit; klickt im 4. Frame auf das Element mit
+    /// dem Label `needle`. Liefert Aktionen und alle Labels des letzten Frames.
+    fn click_label(
+        needle: &str,
+        mut draw: impl FnMut(&mut Ui, &mut ClaudeSessionActions),
+    ) -> (ClaudeSessionActions, Vec<String>) {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        egui_extras::install_image_loaders(&ctx);
+        let mut target = None;
+        let mut actions = ClaudeSessionActions::default();
+        let mut labels = Vec::new();
+        for frame in 0..4 {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 400.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            if let (Some(pos), 3) = (target, frame) {
+                raw.events.push(egui::Event::PointerMoved(pos));
+                for pressed in [true, false] {
+                    raw.events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+            }
+            let output = ctx.run_ui(raw, |ui| draw(ui, &mut actions));
+            target = find_label(&output, needle);
+            labels = output
+                .platform_output
+                .accesskit_update
+                .iter()
+                .flat_map(|u| u.nodes.iter())
+                .filter_map(|(_, n)| n.label().map(str::to_string))
+                .collect();
+            output.drop_without_applying_deltas();
+        }
+        (actions, labels)
+    }
+
+    #[test]
+    fn star_click_toggles_favorite_without_resume() {
+        let e = entry("a1", "Titel");
+        let config = AppConfig::default();
+        let label = tr(config.language, "repo_fav_add");
+        let (actions, _) = click_label(&label, |ui, a| {
+            show_session_card(ui, &e, &config, 10, Preview::Collapsed, a);
+        });
+        assert_eq!(actions.toggle_favorite.as_deref(), Some("a1"));
+        assert_eq!(actions.resume, None);
+    }
+
+    #[test]
+    fn open_card_shows_filled_star_for_favorite() {
+        let o = open(3, "a1", "Titel", LiveStatus::Idle);
+        let mut config = AppConfig::default();
+        config.toggle_favorite_session("a1");
+        let remove = tr(config.language, "repo_fav_remove");
+        let add = tr(config.language, "repo_fav_add");
+        let (actions, labels) = click_label(&remove, |ui, a| {
+            show_open_card(ui, &o, &config, 0, Preview::Collapsed, a);
+        });
+        assert!(labels.contains(&remove), "{labels:?}");
+        assert!(!labels.contains(&add), "{labels:?}");
+        assert_eq!(actions.toggle_favorite.as_deref(), Some("a1"));
+        assert_eq!(actions.focus, None);
+    }
+
     #[test]
     fn click_on_card_body_resumes() {
         let e = entry("a1", "Titel");
         let (_, actions) = run_ui(card_id(&e), on_body, true, |ui, a| {
-            show_session_card(ui, &e, Language::De, 10, Preview::Collapsed, a);
+            show_session_card(ui, &e, &de_config(), 10, Preview::Collapsed, a);
         });
         assert_eq!(
             actions.resume,
@@ -783,7 +916,7 @@ mod tests {
         // Titelzeile: oben links in der Karte
         let on_title = |r: egui::Rect| egui::pos2(r.left() + 30.0, r.top() + 18.0);
         let (_, actions) = run_ui(card_id(&e), on_title, true, |ui, a| {
-            show_session_card(ui, &e, Language::De, 10, Preview::Collapsed, a);
+            show_session_card(ui, &e, &de_config(), 10, Preview::Collapsed, a);
         });
         assert_eq!(
             actions.resume,
@@ -890,7 +1023,7 @@ mod tests {
                 }
             }
             let output = ctx.run_ui(raw, |ui| {
-                show_session_card(ui, &e, Language::De, 10, Preview::Collapsed, &mut actions);
+                show_session_card(ui, &e, &de_config(), 10, Preview::Collapsed, &mut actions);
             });
             target = find_label(&output, "Letzte Nachrichten zeigen");
             output.drop_without_applying_deltas();
