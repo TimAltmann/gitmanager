@@ -168,10 +168,10 @@
   /// Aliase p0.., je Projekt mergeRequests(state: merged, sourceBranches: $b<i>, first: 100) { nodes { iid sourceBranch } }
   pub fn merged_by_branches(projects: &[(String, Vec<String>)]) -> Vec<Query>
   pub fn parse_merged_by_branches(data: &Value, count: usize) -> Vec<Vec<(u64, String)>>
-  /// Je Eingabeprojekt die gemergten Quell-Branches; Fehler → Err der ersten Abfrage
+  /// Je Eingabeprojekt: gemergter Quell-Branch → MR-iid; Fehler → Err der ersten Abfrage
   pub fn fetch_merged_branches(runner: &dyn GlabRunner, host: &str,
                                projects: &[(String, Vec<String>)])
-      -> Result<Vec<HashSet<String>>, GlabErrorKind>
+      -> Result<Vec<HashMap<String, u64>>, GlabErrorKind>
   ```
 
 - [ ] **Step 1: Failing tests** (Muster: Query-Text-Test ~Zeile 2397, Parser-Tests mit `serde_json::json!`):
@@ -193,7 +193,7 @@
 - Modify: `src/app.rs` (`mod repo_badges;`, Feld `repo_mrs: HashMap<PathBuf, MrBadge>`, Aufruf nach MR-Abruf in `src/app/merge_requests.rs` ~515 und nach jedem Scan neben `update_mr_clones`), `src/ui/merge_requests.rs` (`MrViewState` ~122 + `draw_row` ~1495)
 
 **Interfaces:**
-- Consumes: `MyApp::mr_checked_out_at(&MergeRequest) -> Option<PathBuf>` (`src/app/mr_checkout.rs:180`), `MrSnapshot { mine, others, uninvolved }`.
+- Consumes: `MyApp::mr_checked_out_at(&MergeRequest) -> Option<PathBuf>` (`src/app/mr_checkout.rs:180`, derzeit privat – auf `pub(super)` anheben), `MrSnapshot { mine, others, uninvolved }`.
 - Produces:
   ```rust
   #[derive(Debug, Clone, PartialEq, Eq)]
