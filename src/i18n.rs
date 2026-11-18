@@ -315,6 +315,8 @@ pub fn tr(lang: Language, key: &str) -> String {
         (Language::De, "rm_wt_claude") => "Eine Claude Session läuft in diesem Ordner".to_string(),
         (Language::En, "rm_wt_running") => "Removing worktree…".to_string(),
         (Language::De, "rm_wt_running") => "Worktree wird entfernt…".to_string(),
+        (Language::En, "rm_wt_changed") => "State has changed – please confirm again".to_string(),
+        (Language::De, "rm_wt_changed") => "Zustand hat sich geändert – bitte erneut bestätigen".to_string(),
         (Language::En, "rm_wt_done") => "Worktree {} removed".to_string(),
         (Language::De, "rm_wt_done") => "Worktree {} entfernt".to_string(),
         (Language::En, "rm_wt_failed") => "Removing worktree {} failed: {}".to_string(),

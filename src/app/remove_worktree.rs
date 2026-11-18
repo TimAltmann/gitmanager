@@ -95,7 +95,15 @@ impl RemoveDialog {
 
 impl MyApp {
     pub(super) fn open_remove_worktree(&mut self, path: &Path) {
-        let Some(repo) = self.repos.iter().find(|r| r.path == path) else {
+        // Läuft schon eine Entfernung, den laufenden Dialog nicht überschreiben
+        if self.remove_ui.dialog.as_ref().is_some_and(|d| d.running) {
+            return;
+        }
+        let Some(repo) = self
+            .repos
+            .iter()
+            .find(|r| r.path == path && r.is_linked_worktree)
+        else {
             return;
         };
         let claude = repo_badges::claude_running_at(&self.claude.live, path);
@@ -212,6 +220,22 @@ impl MyApp {
         if dialog.running {
             return;
         }
+        // Zustand zum Zeitpunkt der Bestätigung neu lesen: zwischen Öffnen
+        // und Klick kann sich der Ordner (z. B. durch Claude) geändert haben
+        if let Some(info) = git::get_repo_info(dialog.path.clone()) {
+            let mut fresh = RemoveDialog::new(&info, dialog.claude_running);
+            fresh.delete_branch = dialog.delete_branch && fresh.can_delete_branch();
+            if fresh.dirty_files != dialog.dirty_files
+                || fresh.ahead != dialog.ahead
+                || fresh.head_unreachable != dialog.head_unreachable
+                || fresh.safety != dialog.safety
+                || fresh.needs_force() != dialog.needs_force()
+            {
+                *dialog = fresh;
+                self.set_status(tr(lang, "rm_wt_changed"));
+                return;
+            }
+        }
         dialog.running = true;
         let path = dialog.path.clone();
         let main = dialog.main.clone();
@@ -219,17 +243,24 @@ impl MyApp {
         let branch = dialog
             .branch_to_delete()
             .map(|(b, force_delete)| (b.to_string(), force_delete));
+        let expected = dialog.safety;
         self.set_git_busy(GitBusy::Remove { path: path.clone() });
         let tx = self.remove_ui.tx.clone();
         std::thread::spawn(move || {
             // Panic vor dem Senden darf `git_busy` nicht hängen lassen
             let result = catch_unwind(AssertUnwindSafe(|| {
-                git::remove_worktree(
-                    &path,
-                    &main,
-                    force,
-                    branch.as_ref().map(|(b, f)| (b.as_str(), *f)),
-                )
+                git::remove_worktree(&path, &main, force, None)?;
+                // Branch erst löschen, wenn er noch genauso sicher ist wie angezeigt
+                if let Some((b, force_delete)) = &branch {
+                    if git::branch_safety(&main, b, false) != expected {
+                        anyhow::bail!(
+                            "branch '{b}' changed meanwhile and was not deleted; \
+                             the worktree itself was removed"
+                        );
+                    }
+                    git::delete_local_branch(&main, b, *force_delete)?;
+                }
+                Ok(())
             }))
             .unwrap_or_else(|_| {
                 eprintln!("Worktree-Entfernen-Thread abgestürzt");
@@ -246,7 +277,14 @@ impl MyApp {
             if matches!(&self.git_busy, GitBusy::Remove { path } if *path == done.path) {
                 self.set_git_busy(GitBusy::Idle);
             }
-            self.remove_ui.dialog = None;
+            if self
+                .remove_ui
+                .dialog
+                .as_ref()
+                .is_some_and(|d| d.path == done.path)
+            {
+                self.remove_ui.dialog = None;
+            }
             let shown = done.path.display().to_string();
             match &done.result {
                 Ok(()) => self.set_status(tr_fmt(lang, "rm_wt_done", &[&shown])),
@@ -357,5 +395,91 @@ mod tests {
         assert!(app.error.is_none(), "{:?}", app.error);
         assert!(app.remove_ui.dialog.is_none());
         assert_eq!(app.git_busy, GitBusy::Scan, "Rescan angestoßen");
+    }
+
+    fn setup(tmp: &Path) -> (MyApp, PathBuf, PathBuf) {
+        let main = tmp.join("main");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let wt = tmp.join("wt");
+        git(
+            &main,
+            &["worktree", "add", "-q", "-b", "feat", wt.to_str().unwrap()],
+        );
+        let mut app = test_app();
+        app.repos = vec![crate::git::get_repo_info(wt.clone()).unwrap()];
+        assert!(app.repos[0].is_linked_worktree);
+        (app, main, wt)
+    }
+
+    #[test]
+    fn confirm_rechecks_state_and_does_not_run_when_dirty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut app, _main, wt) = setup(tmp.path());
+        app.open_remove_worktree(&wt);
+        assert!(!app.remove_ui.dialog.as_ref().unwrap().needs_force());
+        std::fs::write(wt.join("neu.txt"), "x").unwrap();
+        app.confirm_remove_worktree();
+        assert_eq!(app.git_busy, GitBusy::Idle, "nichts gestartet");
+        assert!(wt.exists());
+        let d = app.remove_ui.dialog.as_ref().unwrap();
+        assert!(d.needs_force() && !d.running);
+        assert_eq!(
+            app.status_message,
+            Some(tr(app.config.language, "rm_wt_changed"))
+        );
+    }
+
+    #[test]
+    fn confirm_does_not_delete_branch_that_became_unsafe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut app, main, wt) = setup(tmp.path());
+        // Default-Branch des Remotes simulieren: feat ist darin enthalten
+        git(&main, &["update-ref", "refs/remotes/origin/main", "main"]);
+        app.open_remove_worktree(&wt);
+        {
+            let d = app.remove_ui.dialog.as_mut().unwrap();
+            assert_eq!(d.safety, Some(BranchSafety::MergedIntoDefault));
+            d.delete_branch = true;
+        }
+        git(&wt, &["commit", "-q", "--allow-empty", "-m", "neu"]);
+        app.confirm_remove_worktree();
+        assert_eq!(app.git_busy, GitBusy::Idle);
+        assert!(wt.exists());
+        let d = app.remove_ui.dialog.as_ref().unwrap();
+        assert!(!d.delete_branch);
+        git(&main, &["rev-parse", "--verify", "feat"]);
+    }
+
+    #[test]
+    fn open_ignored_while_running_and_for_non_linked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut app, main, wt) = setup(tmp.path());
+        app.repos
+            .push(crate::git::get_repo_info(main.clone()).unwrap());
+        app.open_remove_worktree(&main);
+        assert!(app.remove_ui.dialog.is_none(), "kein verknüpfter Worktree");
+        app.open_remove_worktree(&wt);
+        app.remove_ui.dialog.as_mut().unwrap().running = true;
+        app.repos.push(RepoInfo::new(
+            PathBuf::from("/x/other"),
+            "b".into(),
+            false,
+            false,
+        ));
+        app.repos[2].is_linked_worktree = true;
+        app.open_remove_worktree(Path::new("/x/other"));
+        assert_eq!(app.remove_ui.dialog.as_ref().unwrap().path, wt);
+        // Fremdes Ergebnis schließt den Dialog nicht
+        app.remove_ui
+            .tx
+            .send(RemoveDone {
+                path: PathBuf::from("/x/else"),
+                result: Ok(()),
+            })
+            .unwrap();
+        app.poll_remove_worktree(&egui::Context::default());
+        assert!(app.remove_ui.dialog.is_some());
     }
 }
