@@ -41,13 +41,20 @@ rec_start() {
 rec_stop() { sleep 0.8; kill -INT "$FFPID"; wait "$FFPID" || true; }
 
 # --- Szenen --------------------------------------------------------------------
-TAB_REPOS=(160 21) TAB_MRS=(260 21)
+TAB_REPOS=(160 21) TAB_MRS=(260 21) CLEANUP_CLOSE=(457 532)
 
 scene_shots() {
   move 900 760 1
   shot repo-list
-  click 255 427; sleep 0.8; click 315 455; type_slow "fe"; shot repo-branch-search
+  click 275 160; sleep 0.8; click 296 188; type_slow "fe"; shot repo-branch-search
   key Escape; sleep 0.5
+  # Worktree-Karte mit ⋯-Menü (Suche auf die Review-Worktrees eingeschränkt)
+  click 200 91; type_slow "review"; sleep 0.8
+  click 1241 214; sleep 0.8; shot repo-card-menu
+  key Escape; sleep 0.5; click 391 91; sleep 0.5
+  # Aufräumen: fetch --prune (ohne Netz schnell fehlgeschlagen), Kandidaten
+  click 1105 91; sleep 4; move 640 760; shot cleanup
+  click "${CLEANUP_CLOSE[@]}"; sleep 0.5
   click "${TAB_MRS[@]}"; sleep 3; move 640 760; shot merge-requests
   click 1217 310; sleep 1; move 1000 420; shot mr-checkout
   key Escape; sleep 0.5
@@ -60,14 +67,18 @@ scene_shots() {
 scene_repos() {
   move 640 400 1
   rec_start demo-repos
-  move 255 427; sleep 0.4; click 255 427; sleep 1
-  click 315 455; type_slow "fix"; sleep 1
-  click 245 511; sleep 2
-  move 265 587; sleep 0.3; click 265 587; sleep 1
-  click 315 615; type_slow "date"; sleep 0.8
-  click 255 671; sleep 1.5
-  move 657 145; sleep 1.4
-  click 572 145; sleep 1.2
+  # Favorit shop-backend (Klon mit MR !128): Branch suchen und wechseln
+  move 275 160; sleep 0.4; click 275 160; sleep 1
+  click 296 188; type_slow "fix"; sleep 1
+  click 245 244; sleep 2
+  # web-frontend hat Änderungen → Dialog Stash & Switch / Force Discard
+  move 240 265; sleep 0.3; click 240 265; sleep 1
+  click 296 293; type_slow "date"; sleep 0.8
+  click 240 349; sleep 1.5
+  move 370 529; sleep 1.4
+  click 273 529; sleep 1.5
+  # docs-site als Favorit markieren: rückt nach oben
+  move 33 369; sleep 0.5; click 33 369; sleep 1.5
   move 640 400; sleep 0.6
   rec_stop
 }

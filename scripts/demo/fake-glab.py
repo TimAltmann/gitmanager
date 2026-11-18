@@ -7,6 +7,7 @@ Zeitangaben sind relativ zu jetzt. Aufrufe landen in $FAKE_GLAB_LOG."""
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -27,6 +28,17 @@ NOW = datetime.now(timezone.utc)
 
 def ago(minutes):
     return (NOW - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def demo_sha(repo, branch):
+    """Commit des Demo-Branches (der gemergte Stand passt zum Worktree)."""
+    path = os.path.join(os.environ.get("DEMO_HOME", os.path.expanduser("~")), "Code", repo)
+    try:
+        out = subprocess.run(["git", "-C", path, "rev-parse", branch], capture_output=True,
+                             text=True, check=True)
+        return out.stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "0" * 40
 
 
 def user(username):
@@ -193,8 +205,9 @@ def graphql(request):
             } for p in paths]},
         }}
     if op == "GmMergedBranches":
+        # !125 ist gemerged, sein Worktree steht noch (Kandidat fürs Aufräumen)
         merged = {"acme/shop-backend": [
-            ("134", "feature/region-prices", "3f2a9c1d7e5b4a8f9c0d1e2f3a4b5c6d7e8f9a0b")]}
+            ("125", "feature/csv-export", demo_sha("shop-backend", "feature/csv-export"))]}
         data = {}
         for i in range(len(variables) // 2 + 1):
             path = variables.get(f"p{i}")

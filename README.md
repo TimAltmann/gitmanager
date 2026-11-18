@@ -12,9 +12,9 @@
 ## 🎬 Demo
 
 ![Repository list](assets/media/repo-list.png)
-*Repository list: two clones and a review worktree of the same project, branch and solution dropdowns, dirty and behind indicators, one-click buttons for Explorer, shell, IDEs and AI agents.*
+*Repository list: favorites pinned on top, branch and solution dropdowns, status chips (clean / changed / conflict, ↑ unpushed, ↓ behind with one-click fast-forward, the checked-out merge request with approvals and pipeline), the last commit, and one-click buttons for Explorer, shell, IDE and AI agents.*
 
-**Branches** — search, switch, and the `Stash & Switch` / `Force Discard` dialog when a repo has changes ([MP4](assets/media/demo-repos.mp4)):
+**Branches & favorites** — search, switch, the `Stash & Switch` / `Force Discard` dialog when a repo has changes, and pinning a repo as favorite ([MP4](assets/media/demo-repos.mp4)):
 
 ![Searching and switching branches](assets/media/demo-repos.gif)
 
@@ -24,6 +24,7 @@
 
 | | |
 |---|---|
+| ![Card menu](assets/media/repo-card-menu.png)<br>*`⋯` menu of a worktree card: other IDEs, profile, copy path/branch, open in browser, remove worktree* | ![Clean up](assets/media/cleanup.png)<br>*`Clean up …`: worktrees with a merged MR or a deleted remote branch, local branches whose upstream is gone* |
 | ![Merge Requests](assets/media/merge-requests.png)<br>*My merge requests and those from others* | ![Checkout menu](assets/media/mr-checkout.png)<br>*Checkout into a worktree, a new clone or an existing clone* |
 | ![Merged merge requests](assets/media/mr-merged.png)<br>*Merged MRs of the last 7/30/90 days* | ![Settings → Merge Requests](assets/media/settings-merge-requests.png)<br>*`Settings → Merge Requests`: glab, token, repositories* |
 
@@ -84,17 +85,20 @@ After building: double-click `gitmanager.exe`. On first launch go to `⚙ Settin
 |------|--------------|
 | **🔍 Fast scan** | Scans configurable root paths (1–10 depth) for Git repos. `WalkDir + rayon` → ~500 repos in <1s. |
 | **🌿 Branch management** | Dropdown with search + `↻` refresh (local + remote `origin/*`). `git fetch --all` via button. Switch only when clean; if dirty: dialog `Stash & Switch` / `Force Discard`; if in merge/rebase: error only. Switching to a remote branch fast-forwards a local branch that is behind and never resets one with own commits. |
-| **🔎 Search & worktrees** | Search field above the list (`Ctrl+F`, `Esc` clears) filters by name, branch, path and — for worktrees — the main repository; several words must all match. The list is split into *Repositories* and *Worktrees* (linked worktrees, labelled *worktree of {repo}*), both collapsible. `+ New worktree` (toolbar, or `+` on a repository card) creates a worktree from an existing local or remote branch (`origin/x` → local `x` with upstream) or from a new branch based on any branch; branches already checked out in a worktree are greyed out. The folder is suggested as `{default folder}\{repo}-{branch}` — default folder in `Settings → General → Default folder for new worktrees`, empty = next to the repository — and can be edited or picked with `Browse …`. |
-| **🔄 Fetch & behind indicator** | Background fetch of all repos every 10 min (`Settings → General → Auto-fetch interval`, 0 = off); worktrees of the same repository are fetched once. A ▲ next to the branch shows *Behind by n commit(s)*. SSH uses the ssh-agent / Pageant or your keys in `%USERPROFILE%\.ssh`, HTTPS the Git credential manager; if that fails, the system `git` takes over. |
+| **🔎 Search & worktrees** | Search field above the list (`Ctrl+F`, `Esc` clears) filters by name, branch, path and — for worktrees — the main repository; several words must all match. The list is split into *Repositories* and *Worktrees* (linked worktrees, labelled *worktree of {repo}*), both collapsible. `+ New worktree` (toolbar, or `⋯ → New worktree …` on a repository card) creates a worktree from an existing local or remote branch (`origin/x` → local `x` with upstream) or from a new branch based on any branch; branches already checked out in a worktree are greyed out. The folder is suggested as `{default folder}\{repo}-{branch}` — default folder in `Settings → General → Default folder for new worktrees`, empty = next to the repository — and can be edited or picked with `Browse …`. |
+| **🔄 Fetch & behind indicator** | Background fetch of all repos every 10 min (`Settings → General → Auto-fetch interval`, 0 = off); worktrees of the same repository are fetched once. The `↓n` chip on the card shows *n commit(s) behind*. SSH uses the ssh-agent / Pageant or your keys in `%USERPROFILE%\.ssh`, HTTPS the Git credential manager; if that fails, the system `git` takes over. |
 | **🔀 Merge Requests** | Second view next to the repo list (switch in the top bar, badge = reviews waiting for you): *My merge requests* (most approvals first, open or merged) and *From others* (chips `Reviewer` / `Mentioned` / `All open`) with approval bar, pipeline (click opens it in the browser), threads and review state, plus a search per column. Data comes from the GitLab CLI `glab`. Check out a MR branch into a new worktree, a new clone or an existing clone, then open an agent, shell, Explorer or IDE. See [Merge Requests](#-merge-requests). |
 | **🖥 Tray popup** | Left-click the tray icon: compact popup with your repos (most recently used first, `Settings → Tray Icons → Max repos`), branch dropdown with filter, fetch button and the IDE / agent / shell / Explorer icons. Footer: `Main window` · `Merge Requests` (with badge) · `Quit`. Icon order and visibility in `Settings → Tray Icons`, tray icon for dark or light taskbars, optional `Minimize to tray on close`. |
-| **● Dirty indicator** | `●` dirty / `○` clean (staged, unstaged, untracked — respects `.gitignore`). |
+| **🏷 Repo card & status chips** | Each card shows ☆ favorite, name (*worktree of {repo}* for linked worktrees), branch and solution dropdowns, then status chips: `✓ clean` / `• n changed` (staged, unstaged, untracked — respects `.gitignore`) / `Conflict` / `Merge in progress` (also rebase, cherry-pick, revert), `↑n` unpushed commits, `↓n` behind (click = fast-forward), the merge request checked out in this folder (`!iid · approvals · pipeline`, click jumps to it in the Merge Requests view) and `Claude waiting` / `Claude working` for an open Claude session (click brings its terminal to the front). Below: subject, author and age of the last commit. |
+| **⬇ Pull (fast-forward only)** | Click the `↓n` chip: fetches the upstream and fast-forwards the branch when the working tree is clean and there are no own commits. Otherwise nothing is changed and a message says why (*local changes – commit or stash first*, *branch has diverged (↑a ↓b)*, *no upstream branch configured*). Never merges, rebases or resets. |
+| **🧹 Clean up & remove worktree** | `⋯ → Remove worktree …` on a worktree card: a clean worktree is removed after a confirmation; uncommitted changes or unpushed commits are listed and need `Remove anyway`. `Delete local branch` is only offered when the branch is safe (fully pushed, merged into the default branch, or its MR is merged). `Clean up …` in the toolbar runs `fetch --prune` and lists worktrees whose MR was merged or whose remote branch was deleted, plus local branches whose upstream is gone — each with reason and checkbox, dirty or unpushed entries pre-deselected and marked; results per entry. |
+| **⭐ Favorites** | ☆/★ on repo and worktree cards and on Claude session cards. Favorites are pinned to the top of their section (*Repositories*, *Worktrees*, sessions) and keep the chosen sort order among themselves; favorite sessions are never hidden by the session limits. Stored in `config.json` (`favorite_repos`, `favorite_sessions`). |
 | **📄 Project files** | Per-repo solution/project files (e.g. `.sln` for .NET, `Cargo.toml` for Rust) — dropdown with search, depth 3, cap 20, per-repo profile override possible. |
-| **🚀 Open in IDE** | One-click open via official brand icons: **Visual Studio** (`devenv` via `vswhere`), **VS Code** (`code`), **Rider** (`rider`). Fully configurable per language profile (`program` + `args` with `{file}` `{dir}` `{repo}` placeholders). |
+| **🚀 Open in IDE** | One-click open via official brand icons: **Visual Studio** (`devenv` via `vswhere`), **VS Code** (`code`), **Rider** (`rider`). The card shows one IDE (the profile's default, or the one last picked); the others are in the card's `⋯` menu under *Open in*. Fully configurable per language profile (`program` + `args` with `{file}` `{dir}` `{repo}` placeholders). |
 | **🤖 AI agents** | Launch any CLI agent in a terminal (`wt` → `powershell` → `cmd` auto-detected, `cmd /K` keeps window open). Presets: Claude, Codex, Gemini, Copilot, Cursor, Aider — add your own. |
 | **📂 Explorer** | Icon button (`explorer` / `xdg-open`). |
 | **🔧 Config dropdowns** | Per-profile XML `key=value` switching (`App.config` `<add key="Database" value="...">`) – define `file`, `key`, options in `Settings → Languages/Profiles`, shown as dropdown per repo row. |
-| **⚙ Profiles** | Language profiles (e.g. `.NET` → `*.sln`, `Rust` → `Cargo.toml`) + agents + terminal preference. Stored as `config.json` v15. |
+| **⚙ Profiles** | Language profiles (e.g. `.NET` → `*.sln`, `Rust` → `Cargo.toml`) + agents + terminal preference; per-repo override in the card's `⋯` menu (*Profile*). Stored as `config.json` v15. |
 | **↕ Sorting** | Repo list sorted by last used (default) or by name — menu next to `Refresh` or `Settings → General → Sorting`. |
 | **🎨 Theming** | 5 themes: Light, Dark, Nord, Dracula, Solarized Light. Instant preview. |
 | **⏻ Autostart & updates** | Optional start with Windows (`Settings → General`, Registry Run key) and optional update check against GitHub Releases on startup (can be turned off for offline / corporate networks). |
@@ -267,14 +271,17 @@ src/
   git.rs        # RepoInfo, branches, checkout (safe/force/stash), fetch, launch_ide/agent, explorer
   scanner.rs    # WalkDir + rayon, scan_repos + scan_solutions_for_repo (depth 3, cap 20)
   gitlab/       # Merge Requests without UI: remotes/hosts, glab runner, GraphQL, model, service, checkout menu
-  app/          # MyApp parts for Merge Requests: view wiring, checkout, settings workers
+  cleanup.rs    # Clean-up candidates (merged MR, upstream gone) without UI
+  app/          # MyApp parts: Merge Requests view wiring, checkout, settings workers; pull.rs (fast-forward),
+                #   remove_worktree.rs, cleanup.rs (dialog + workers), repo_badges.rs (MR chip per folder)
   tray.rs / tray_service.rs  # Windows tray icon, menu and popup service
   autostart.rs  # Windows autostart (Registry Run key)
   updater.rs    # Update check against GitHub Releases
   ui/
     merge_requests.rs  # Merge Requests view (two columns, chips, checkout menu)
     settings/merge_requests.rs  # Settings tab "Merge Requests"
-    repo_list.rs  # Row: 📁 + dirty + branch combo (search+refresh) + solution combo + profile override + IDE/agent icons
+    repo_list.rs  # Repo card: ☆ + name + branch combo (search+refresh) + solution combo, last commit, Explorer/shell/IDE/agent icons, ⋯ menu
+    repo_card_chips.rs  # Status chips (state, ↑/↓, MR, Claude), favorite star, ⋯ menu
     settings.rs   # Tabbed window: General, Languages/Profiles, AI Agents, Terminal, Appearance, Language, Icons, Tray Icons
     tray_popup.rs # Tray popup (repo cards, branch filter, footer buttons)
     theme.rs      # Light/Dark/Nord/Dracula/Solarized themes
@@ -289,10 +296,10 @@ scripts/
 
 ### Screenshots & videos
 
-`scripts/demo/run.sh` regenerates everything in `assets/media/` (needs Docker, run from the repo root; optional scene names `shots`, `repos`, `mrs`):
+`scripts/demo/run.sh` regenerates everything in `assets/media/` (needs Docker, run from the repo root; optional scene names `shots`, `repos`, `mrs`, e.g. `scripts/demo/run.sh "shots repos"`):
 
 - builds the Linux release in the dev container and runs it on a virtual display (Xvfb) in a container **without network**;
-- creates invented demo repos (`make-demo-repos.sh`) and answers GitManager's `glab` calls with invented merge requests (`fake-glab.py`);
+- creates invented demo repos (`make-demo-repos.sh`: clones, worktrees, ahead/behind, changes, a merge conflict, deleted remote branches), starts with the demo config `config.json` (dark theme, two favorites) and answers GitManager's `glab` calls with invented merge requests (`fake-glab.py`);
 - drives the UI with `xdotool` (`record.sh`, one function per scene) and records with `ffmpeg` — PNG screenshots, MP4 videos and GIF loops for this README.
 
 ---
@@ -311,7 +318,7 @@ CI builds the GNU artifact on every push (see `.github/workflows/ci.yml`).
 
 This project bundles icons under `assets/icons/`:
 
-- **Phosphor Icons** (`folder.svg`; Merge Requests: `mr/*.svg`, e.g. `check-circle`, `x-circle`, `circle-notch`, `chat-circle-dots`, `git-pull-request`, `arrow-square-out`, `terminal-window`, `lock-simple` — full list in `THIRD_PARTY_LICENSES.md`; `mr/folder-arrow.svg` is Phosphor `folder` with an added arrow) — **MIT** — https://github.com/phosphor-icons/core/blob/main/LICENSE
+- **Phosphor Icons** (`folder.svg`; repo card: `star.svg`, `star-fill.svg`, `dots-three.svg`, `arrow-up.svg`, `arrow-down.svg`; Merge Requests: `mr/*.svg`, e.g. `check-circle`, `x-circle`, `circle-notch`, `chat-circle-dots`, `git-pull-request`, `arrow-square-out`, `terminal-window`, `lock-simple` — full list in `THIRD_PARTY_LICENSES.md`; `mr/folder-arrow.svg` is Phosphor `folder` with an added arrow) — **MIT** — https://github.com/phosphor-icons/core/blob/main/LICENSE
 - **Simple Icons** (`vscode.svg`, `visualstudio.svg`, `rider.svg`, `claude.svg`, `codex.svg`, `gemini.svg`, `copilot.svg`, `cursor.svg`, `aider.svg`) — **CC0 1.0 Universal** — https://github.com/simple-icons/simple-icons/blob/develop/LICENSE.md  
   The *collection* is CC0, but **individual brand icons are trademarks** of their owners:
   - Visual Studio Code / Visual Studio — Microsoft
