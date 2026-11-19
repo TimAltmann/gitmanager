@@ -1845,7 +1845,7 @@ mod tests {
 
     #[test]
     fn terminal_all_variants_exist() {
-        let variants = vec![
+        let variants = [
             TerminalPreference::Auto,
             TerminalPreference::WindowsTerminal,
             TerminalPreference::Cmd,
@@ -2452,10 +2452,11 @@ mod tests {
 
     #[test]
     fn repo_ui_state_fields_can_hold_values() {
-        let mut s = RepoUiState::default();
-        s.selected_solution = Some(PathBuf::from("/tmp/foo.sln"));
-        s.selected_ide = Some("vscode".to_string());
-        s.profile_override = Some("dotnet".to_string());
+        let s = RepoUiState {
+            selected_solution: Some(PathBuf::from("/tmp/foo.sln")),
+            selected_ide: Some("vscode".to_string()),
+            profile_override: Some("dotnet".to_string()),
+        };
         assert_eq!(s.selected_solution, Some(PathBuf::from("/tmp/foo.sln")));
         assert_eq!(s.selected_ide, Some("vscode".to_string()));
         assert_eq!(s.profile_override, Some("dotnet".to_string()));
@@ -2722,18 +2723,22 @@ mod tests {
     // --- Agents ---
     #[test]
     fn config_get_active_agent_prefers_ids() {
-        let mut cfg = AppConfig::default();
-        cfg.active_agent_ids = vec!["codex".to_string()];
-        cfg.active_agent_id = Some("claude".to_string());
+        let cfg = AppConfig {
+            active_agent_ids: vec!["codex".to_string()],
+            active_agent_id: Some("claude".to_string()),
+            ..Default::default()
+        };
         let agent = cfg.get_active_agent().unwrap();
         assert_eq!(agent.id, "codex");
     }
 
     #[test]
     fn config_get_active_agent_fallback_deprecated() {
-        let mut cfg = AppConfig::default();
-        cfg.active_agent_ids = vec![];
-        cfg.active_agent_id = Some("gemini".to_string());
+        let mut cfg = AppConfig {
+            active_agent_ids: vec![],
+            active_agent_id: Some("gemini".to_string()),
+            ..Default::default()
+        };
         let agent = cfg.get_active_agent().unwrap();
         assert_eq!(agent.id, "gemini");
         // both empty -> first
@@ -2745,12 +2750,14 @@ mod tests {
 
     #[test]
     fn config_get_active_agents_multiple() {
-        let mut cfg = AppConfig::default();
-        cfg.active_agent_ids = vec![
-            "claude".to_string(),
-            "codex".to_string(),
-            "invalid".to_string(),
-        ];
+        let mut cfg = AppConfig {
+            active_agent_ids: vec![
+                "claude".to_string(),
+                "codex".to_string(),
+                "invalid".to_string(),
+            ],
+            ..Default::default()
+        };
         let agents = cfg.get_active_agents();
         assert_eq!(agents.len(), 2);
         assert_eq!(agents[0].id, "claude");
@@ -2765,8 +2772,10 @@ mod tests {
 
     #[test]
     fn config_is_agent_active() {
-        let mut cfg = AppConfig::default();
-        cfg.active_agent_ids = vec!["claude".to_string()];
+        let mut cfg = AppConfig {
+            active_agent_ids: vec!["claude".to_string()],
+            ..Default::default()
+        };
         assert!(cfg.is_agent_active("claude"));
         assert!(!cfg.is_agent_active("codex"));
         cfg.active_agent_ids = vec![];
@@ -2779,8 +2788,10 @@ mod tests {
 
     #[test]
     fn config_toggle_agent_active_add_remove_sync() {
-        let mut cfg = AppConfig::default();
-        cfg.active_agent_ids = vec!["claude".to_string()];
+        let mut cfg = AppConfig {
+            active_agent_ids: vec!["claude".to_string()],
+            ..Default::default()
+        };
         cfg.toggle_agent_active("codex");
         assert!(cfg.active_agent_ids.contains(&"codex".to_string()));
         assert_eq!(cfg.active_agent_id, Some("claude".to_string()));
@@ -2864,8 +2875,10 @@ mod tests {
     #[test]
     fn config_migration_v3_to_v4_removes_auto_profiles() {
         // simulate v3 config with old auto ids
-        let mut cfg = AppConfig::default();
-        cfg.config_version = 3;
+        let mut cfg = AppConfig {
+            config_version: 3,
+            ..Default::default()
+        };
         // add old auto profiles
         for id in ["rust", "node", "python"] {
             cfg.profiles.push(LanguageProfile {
@@ -2886,15 +2899,13 @@ mod tests {
             });
         }
         // simulate v4 migration retain logic
-        let keep = vec!["dotnet"];
+        let keep = ["dotnet"];
         let old_auto = ["rust", "node", "python", "java", "go", "cpp"];
         cfg.profiles.retain(|p| {
             if keep.contains(&p.id.as_str()) {
                 true
-            } else if old_auto.contains(&p.id.as_str()) {
-                false
             } else {
-                true
+                !old_auto.contains(&p.id.as_str())
             }
         });
         assert!(cfg.profiles.iter().any(|p| p.id == "dotnet"));
@@ -3023,41 +3034,43 @@ mod tests {
 
     #[test]
     fn config_validation_profiles_dedup_last_wins() {
-        let mut cfg = AppConfig::default();
-        cfg.profiles = vec![
-            LanguageProfile {
-                id: "dotnet".to_string(),
-                display_name: "First".to_string(),
-                file_extension: ".sln".to_string(),
-                file_pattern: None,
-                max_scan_depth: 3,
-                ides: vec![],
-                default_ide_id: None,
-                ide_order: Vec::new(),
-                hidden_ide_ids: Vec::new(),
-                hidden_agent_ids: Vec::new(),
-                agent_order: Vec::new(),
-                show_shell: true,
-                show_explorer: true,
-                config_selectors: Vec::new(),
-            },
-            LanguageProfile {
-                id: "dotnet".to_string(),
-                display_name: "Second".to_string(),
-                file_extension: ".sln".to_string(),
-                file_pattern: None,
-                max_scan_depth: 3,
-                ides: vec![],
-                default_ide_id: None,
-                ide_order: Vec::new(),
-                hidden_ide_ids: Vec::new(),
-                hidden_agent_ids: Vec::new(),
-                agent_order: Vec::new(),
-                show_shell: true,
-                show_explorer: true,
-                config_selectors: Vec::new(),
-            },
-        ];
+        let mut cfg = AppConfig {
+            profiles: vec![
+                LanguageProfile {
+                    id: "dotnet".to_string(),
+                    display_name: "First".to_string(),
+                    file_extension: ".sln".to_string(),
+                    file_pattern: None,
+                    max_scan_depth: 3,
+                    ides: vec![],
+                    default_ide_id: None,
+                    ide_order: Vec::new(),
+                    hidden_ide_ids: Vec::new(),
+                    hidden_agent_ids: Vec::new(),
+                    agent_order: Vec::new(),
+                    show_shell: true,
+                    show_explorer: true,
+                    config_selectors: Vec::new(),
+                },
+                LanguageProfile {
+                    id: "dotnet".to_string(),
+                    display_name: "Second".to_string(),
+                    file_extension: ".sln".to_string(),
+                    file_pattern: None,
+                    max_scan_depth: 3,
+                    ides: vec![],
+                    default_ide_id: None,
+                    ide_order: Vec::new(),
+                    hidden_ide_ids: Vec::new(),
+                    hidden_agent_ids: Vec::new(),
+                    agent_order: Vec::new(),
+                    show_shell: true,
+                    show_explorer: true,
+                    config_selectors: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
         // dedup like try_load
         {
             let mut seen = std::collections::HashSet::new();
@@ -3076,8 +3089,10 @@ mod tests {
 
     #[test]
     fn config_validation_active_profile_corrected() {
-        let mut cfg = AppConfig::default();
-        cfg.active_profile_id = "invalid".to_string();
+        let mut cfg = AppConfig {
+            active_profile_id: "invalid".to_string(),
+            ..Default::default()
+        };
         if !cfg.profiles.iter().any(|p| p.id == cfg.active_profile_id) {
             cfg.active_profile_id = cfg.profiles.first().unwrap().id.clone();
         }
@@ -3086,8 +3101,10 @@ mod tests {
 
     #[test]
     fn config_validation_agents_filtered_and_fallback() {
-        let mut cfg = AppConfig::default();
-        cfg.active_agent_ids = vec!["invalid".to_string(), "claude".to_string()];
+        let mut cfg = AppConfig {
+            active_agent_ids: vec!["invalid".to_string(), "claude".to_string()],
+            ..Default::default()
+        };
         cfg.active_agent_ids
             .retain(|id| cfg.agents.iter().any(|a| &a.id == id));
         assert_eq!(cfg.active_agent_ids, vec!["claude".to_string()]);
@@ -3285,8 +3302,10 @@ mod tests {
         let cfg = AppConfig::default();
         assert_eq!(cfg.branch_display_limit, 200);
         // Clamp via try_load logic: simulate validation
-        let mut cfg2 = AppConfig::default();
-        cfg2.branch_display_limit = 10;
+        let mut cfg2 = AppConfig {
+            branch_display_limit: 10,
+            ..Default::default()
+        };
         if cfg2.branch_display_limit < 50 {
             cfg2.branch_display_limit = 50;
         }
@@ -3439,8 +3458,10 @@ mod tests {
         assert!(json.contains("autostart"));
         let de: AppConfig = serde_json::from_str(&json).unwrap();
         assert!(de.autostart);
-        let mut cfg2 = AppConfig::default();
-        cfg2.autostart = false;
+        let cfg2 = AppConfig {
+            autostart: false,
+            ..Default::default()
+        };
         let json2 = serde_json::to_string(&cfg2).unwrap();
         let de2: AppConfig = serde_json::from_str(&json2).unwrap();
         assert!(!de2.autostart);

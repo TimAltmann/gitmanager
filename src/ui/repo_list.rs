@@ -1155,8 +1155,8 @@ mod tests {
         let _ = ide_icon_for("unknown");
         let vscode = ide_icon_for("vscode");
         let unknown = ide_icon_for("unknown_id_xyz");
-        assert!(format!("{:?}", vscode).len() > 0);
-        assert!(format!("{:?}", unknown).len() > 0);
+        assert!(!format!("{:?}", vscode).is_empty());
+        assert!(!format!("{:?}", unknown).is_empty());
     }
 
     #[test]
@@ -1168,8 +1168,8 @@ mod tests {
         }
         let claude = agent_icon_for("claude");
         let unknown = agent_icon_for("unknown_xyz");
-        assert!(format!("{:?}", claude).len() > 0);
-        assert!(format!("{:?}", unknown).len() > 0);
+        assert!(!format!("{:?}", claude).is_empty());
+        assert!(!format!("{:?}", unknown).is_empty());
     }
 
     #[test]
@@ -1279,7 +1279,7 @@ mod tests {
             format!("Keine {}", profile.file_extension)
         };
         assert_eq!(text_no_selection, "first.sln");
-        let branches = vec!["main".to_string(), "feature/xyz".to_string()];
+        let branches = ["main".to_string(), "feature/xyz".to_string()];
         let filter = "feat".to_lowercase();
         let filtered: Vec<_> = branches
             .iter()

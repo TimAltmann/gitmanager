@@ -1517,7 +1517,7 @@ pub fn open_in_explorer(path: &Path) -> anyhow::Result<()> {
         // In tests: don't actually spawn file manager windows
         // Just verify path handling, return Ok to avoid stray windows staying open
         let _ = path;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(test))]
     {
@@ -3420,7 +3420,7 @@ pub fn launch_agent(
             &repo_str,
             &pref,
         );
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(test))]
@@ -3465,7 +3465,7 @@ pub fn open_shell(repo_path: &Path, terminal_pref: &TerminalPreference) -> anyho
     #[cfg(test)]
     {
         let _ = (repo_path, terminal_pref);
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(test))]
     {

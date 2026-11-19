@@ -2226,12 +2226,14 @@ pub(super) mod tests {
             // GitLab.com-SSH über Port 443: gitlab.com mit prüfen
             repo("f", "ssh://git@altssh.gitlab.com:443/group/f.git"),
         ];
-        let mut cfg = MrConfig::default();
-        cfg.extra_hosts = vec![" Git.Intern.Example ".to_string()];
-        cfg.host_aliases = vec![crate::config::HostAlias {
-            from: "ssh.example.com".to_string(),
-            to: "gitlab.example.com:8443".to_string(),
-        }];
+        let cfg = MrConfig {
+            extra_hosts: vec![" Git.Intern.Example ".to_string()],
+            host_aliases: vec![crate::config::HostAlias {
+                from: "ssh.example.com".to_string(),
+                to: "gitlab.example.com:8443".to_string(),
+            }],
+            ..Default::default()
+        };
         assert_eq!(
             discovery_candidates(&repos, &cfg),
             vec![
@@ -2342,7 +2344,7 @@ pub(super) mod tests {
                     let row = assert_top_bar_row_fits(&mut app, width, &case);
                     let caption = tr(lang, "profile_label");
                     assert_eq!(
-                        row.iter().any(|name| *name == caption),
+                        row.contains(&caption),
                         width >= TOP_BAR_CAPTIONS_WIDTH,
                         "{case}: Beschriftung {caption} {row:?}"
                     );
