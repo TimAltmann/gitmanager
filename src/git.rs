@@ -3038,42 +3038,60 @@ pub fn is_program_available(program: &str) -> bool {
     }
 }
 
+/// `devenv.exe`-Pfade aus der vswhere-Ausgabe (eine Instanz je Zeile, in
+/// Ausgabereihenfolge); SSMS und andere Produkte fallen weg. `install_dirs`:
+/// Zeilen sind Installationsordner statt Programmpfade.
+fn devenv_candidates(output: &str, install_dirs: bool) -> Vec<PathBuf> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|l| {
+            let lower = l.to_lowercase();
+            !lower.contains("sql server") && !lower.contains("ssms")
+        })
+        .map(|l| {
+            if install_dirs {
+                PathBuf::from(l)
+                    .join("Common7")
+                    .join("IDE")
+                    .join("devenv.exe")
+            } else {
+                PathBuf::from(l)
+            }
+        })
+        // Windows-Pfad auch unter Linux zerlegen (Tests): letzter Teil
+        .filter(|p| {
+            let s = p.to_string_lossy();
+            let name = s.rsplit(['\\', '/']).next().unwrap_or("");
+            name.eq_ignore_ascii_case("devenv.exe")
+        })
+        .collect()
+}
+
 fn resolve_vs_path_uncached() -> Option<PathBuf> {
     let vswhere =
         PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
     if vswhere.exists() {
-        if let Ok(out) = std::process::Command::new(&vswhere)
-            .args(["-latest", "-products", "*", "-property", "productPath"])
-            .output()
-        {
-            if out.status.success() {
-                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !p.is_empty()
-                    && !p.to_lowercase().contains("sql server")
-                    && !p.to_lowercase().contains("ssms")
-                {
-                    let pb = PathBuf::from(&p);
-                    if pb.exists() {
-                        return Some(pb);
-                    }
-                }
+        // Alle Instanzen, neueste zuerst: `-latest` kann SQL Server
+        // Management Studio liefern (nutzt denselben Installer), dann
+        // fände man Visual Studio nie
+        for property in ["productPath", "installationPath"] {
+            let mut cmd = std::process::Command::new(&vswhere);
+            cmd.args(["-products", "*", "-sort", "-format", "value", "-property"])
+                .arg(property);
+            set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
+            let out = cmd.output();
+            let Ok(out) = out else { continue };
+            if !out.status.success() {
+                continue;
             }
-        }
-        if let Ok(out) = std::process::Command::new(&vswhere)
-            .args(["-latest", "-products", "*", "-property", "installationPath"])
-            .output()
-        {
-            if out.status.success() {
-                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !p.is_empty() {
-                    let candidate = PathBuf::from(&p)
-                        .join("Common7")
-                        .join("IDE")
-                        .join("devenv.exe");
-                    if candidate.exists() {
-                        return Some(candidate);
-                    }
-                }
+            let text = String::from_utf8_lossy(&out.stdout);
+            let found = devenv_candidates(&text, property == "installationPath")
+                .into_iter()
+                .find(|p| p.exists());
+            if found.is_some() {
+                return found;
             }
         }
     }
@@ -6278,6 +6296,22 @@ mod tests {
         assert_eq!(quote_if_needed("a & b"), "\"a & b\"");
         // with quotes inside
         assert_eq!(quote_if_needed("a \"b\" c"), "\"a \\\"b\\\" c\"");
+    }
+
+    #[test]
+    fn devenv_candidates_skip_ssms() {
+        // Ausgabe bei installiertem SSMS 22 neben Visual Studio 18
+        let out = "C:\\Program Files\\Microsoft SQL Server Management Studio 22\\Release\\Common7\\IDE\\SSMS.exe\r\n\
+                   C:\\Program Files\\Microsoft Visual Studio\\18\\Professional\\Common7\\IDE\\devenv.exe\r\n";
+        let got = devenv_candidates(out, false);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].to_string_lossy().contains("Visual Studio\\18"));
+        let dirs = "C:\\Program Files\\Microsoft SQL Server Management Studio 22\\Release\n\
+                    C:\\VS\\18\n";
+        let got = devenv_candidates(dirs, true);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].ends_with("devenv.exe"));
+        assert!(devenv_candidates("C:\\X\\Blend.exe\n", false).is_empty());
     }
 
     #[test]

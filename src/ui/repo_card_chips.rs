@@ -133,6 +133,32 @@ pub fn card_ide<'a>(profile: &'a LanguageProfile, selected: Option<&str>) -> Opt
         .or_else(|| visible.first().copied())
 }
 
+/// IDEs als Icons auf der Karte, höchstens `max` (Platz): die der Karte
+/// ([`card_ide`]) immer, dann die übrigen sichtbaren; in Profil-Reihenfolge.
+pub fn card_ides<'a>(
+    profile: &'a LanguageProfile,
+    selected: Option<&str>,
+    max: usize,
+) -> Vec<&'a IdeConfig> {
+    let visible = profile.visible_ides();
+    let first = card_ide(profile, selected).map(|i| i.id.as_str());
+    let mut picked: Vec<&str> = first.into_iter().collect();
+    picked.extend(
+        visible
+            .iter()
+            .map(|i| i.id.as_str())
+            .filter(|id| Some(*id) != first),
+    );
+    picked.truncate(max.max(1));
+    visible
+        .into_iter()
+        .filter(|i| picked.contains(&i.id.as_str()))
+        .collect()
+}
+
+/// Mindestbreite für den letzten Commit, bevor IDEs ins `⋯`-Menü wandern.
+const MIN_COMMIT_WIDTH: f32 = 200.0;
+
 /// Web-Adresse des Remotes (`origin`, sonst des ersten) als
 /// `https://host/pfad`; SSH-Hosts laufen über `host_aliases`, der SSH-Port
 /// fällt weg. `None` bei lokalen Pfaden und unbekannten Schemata.
@@ -412,8 +438,8 @@ fn tool_button(ui: &mut Ui, image: Image<'static>, tooltip: &str) -> bool {
     resp.on_hover_text(tooltip).clicked()
 }
 
-/// Zeile 3: letzter Commit links; rechts Explorer, Shell, eine IDE, Agents
-/// und `⋯`.
+/// Zeile 3: letzter Commit links; rechts Explorer, Shell, die IDEs (so
+/// viele Platz haben), Agents und `⋯`.
 pub(crate) fn show_bottom_row(
     ui: &mut Ui,
     repo: &RepoInfo,
@@ -426,15 +452,12 @@ pub(crate) fn show_bottom_row(
     let selected = config
         .get_repo_state(&repo.path)
         .and_then(|s| s.selected_ide.as_deref());
-    let ide = card_ide(profile, selected);
     let file = repo
         .selected_solution
         .clone()
         .unwrap_or_else(|| repo.path.clone());
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            more_menu(ui, repo, config, ide.map(|i| i.id.as_str()), actions);
-
             // AI-Agents (Profil: ausgeblendet/Reihenfolge); ohne aktive
             // Agents der erste nicht ausgeblendete
             let agents = {
@@ -450,6 +473,18 @@ pub(crate) fn show_bottom_row(
                     filtered
                 }
             };
+            // IDEs nebeneinander, soweit Platz bleibt; der Rest im `⋯`-Menü
+            let slot = 18.0 + 2.0 * ui.spacing().button_padding.x + ui.spacing().item_spacing.x;
+            let fixed = 1
+                + agents.len()
+                + usize::from(profile.show_shell)
+                + usize::from(profile.show_explorer);
+            let free = ui.available_width() - fixed as f32 * slot - MIN_COMMIT_WIDTH;
+            let max_ides = (free / slot).floor().max(1.0) as usize;
+            let ides = card_ides(profile, selected, max_ides);
+            let shown: Vec<&str> = ides.iter().map(|i| i.id.as_str()).collect();
+            more_menu(ui, repo, config, &shown, actions);
+
             for agent in agents.iter().rev() {
                 let tooltip = tr(lang, "open_in_terminal").replace("{}", &agent.display_name);
                 if tool_button(ui, agent_image(agent), &tooltip) {
@@ -457,8 +492,8 @@ pub(crate) fn show_bottom_row(
                 }
             }
 
-            // Genau eine IDE; ohne IDEs im Profil VS Code als Text-Button
-            if let Some(ide) = ide {
+            // Ohne IDEs im Profil VS Code als Text-Button
+            for ide in ides.iter().rev() {
                 let tooltip = format!("{} {}", tr(lang, "open_in"), ide.display_name);
                 let resp = ui.add(Button::image(ide_image(ide)));
                 resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &tooltip));
@@ -473,7 +508,8 @@ pub(crate) fn show_bottom_row(
                 {
                     actions.ide_open = Some((repo.path.clone(), ide.id.clone(), file.clone()));
                 }
-            } else if profile.ides.is_empty() {
+            }
+            if ides.is_empty() && profile.ides.is_empty() {
                 let btn = Button::new(RichText::new("VS Code").size(11.0)).corner_radius(6);
                 if ui.add(btn).clicked() {
                     actions.ide_open =
@@ -562,12 +598,12 @@ fn menu_item(ui: &mut Ui, source: ImageSource<'static>, text: &str) -> bool {
         .clicked()
 }
 
-/// `⋯`-Menü: übrige IDEs, Profil, Worktree, Kopieren, Browser, Entfernen.
+/// `⋯`-Menü: IDEs, die nicht auf der Karte (`on_card`) passen, Profil, Worktree, Kopieren, Browser, Entfernen.
 fn more_menu(
     ui: &mut Ui,
     repo: &RepoInfo,
     config: &AppConfig,
-    card_ide_id: Option<&str>,
+    on_card: &[&str],
     actions: &mut RepoListActions,
 ) {
     let lang = config.language;
@@ -579,7 +615,7 @@ fn more_menu(
         let others: Vec<&IdeConfig> = profile
             .visible_ides()
             .into_iter()
-            .filter(|i| Some(i.id.as_str()) != card_ide_id)
+            .filter(|i| !on_card.contains(&i.id.as_str()))
             .collect();
         if !others.is_empty() {
             ui.label(
@@ -805,6 +841,25 @@ mod tests {
         // Keine sichtbare IDE
         let none = profile(None, &["vs", "rider", "vscode"]);
         assert!(card_ide(&none, Some("vs")).is_none());
+    }
+
+    #[test]
+    fn card_ides_keep_card_ide_and_profile_order() {
+        let p = profile(Some("rider"), &[]);
+        let ids = |v: Vec<&IdeConfig>| v.into_iter().map(|i| i.id.clone()).collect::<Vec<_>>();
+        let all = ids(p.visible_ides());
+        assert_eq!(
+            ids(card_ides(&p, None, 10)),
+            all,
+            "alle, Profil-Reihenfolge"
+        );
+        assert_eq!(ids(card_ides(&p, Some("vscode"), 1)), ["vscode"]);
+        assert_eq!(ids(card_ides(&p, None, 0)), ["rider"], "mindestens eine");
+        let two = ids(card_ides(&p, Some("vscode"), 2));
+        assert_eq!(two.len(), 2);
+        assert!(two.contains(&"vscode".to_string()));
+        let hidden = profile(Some("rider"), &["vscode"]);
+        assert!(!ids(card_ides(&hidden, None, 10)).contains(&"vscode".to_string()));
     }
 
     fn repo_with_remote(url: &str) -> RepoInfo {
