@@ -495,7 +495,13 @@ pub fn fetch_snapshot(
     result.me_per_host = result
         .raw
         .iter()
-        .filter_map(|raw| Some((raw.host_key.clone(), raw.status.user.clone()?)))
+        // Wie im Stand: ohne Host-Status-Benutzer der aus dem Dashboard,
+        // sonst gelten eigene Kommentare als fremde
+        .filter_map(|raw| {
+            let none = BTreeMap::new();
+            let user = crate::gitlab::model::host_user(raw, &none)?;
+            Some((raw.host_key.clone(), user.to_string()))
+        })
         .collect();
     result.snapshot = build_snapshot(&result.raw, locals, cfg, &result.me_per_host);
     result

@@ -882,7 +882,10 @@ fn classify_host(raw: &HostRaw, me: Option<&str>) -> HostGroups {
 
 /// Angemeldeter Benutzer eines Hosts: aus `me_per_host`, sonst aus dem
 /// Abruf selbst (Host-Status, `currentUser` im Dashboard).
-fn host_user<'a>(raw: &'a HostRaw, me_per_host: &'a BTreeMap<String, String>) -> Option<&'a str> {
+pub fn host_user<'a>(
+    raw: &'a HostRaw,
+    me_per_host: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
     let known = |user: Option<&'a str>| user.filter(|u| !u.is_empty());
     known(me_per_host.get(&raw.host_key).map(String::as_str))
         .or_else(|| known(raw.status.user.as_deref()))
