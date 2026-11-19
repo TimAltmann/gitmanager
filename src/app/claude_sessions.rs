@@ -544,11 +544,16 @@ impl MyApp {
         if let Some((cwd, id)) = actions.resume {
             self.resume_claude_session(&cwd, &id);
         }
-        if let Some((dir, ide_id, _)) = actions.ide_open {
-            // Wie „In IDE öffnen“ der MR-Ansicht: Solution des Repos bzw.
-            // bei einem Worktree außerhalb der Suchpfade die des Basis-Klons
-            let (profile, file) = ide_source(&self.config, &self.repos, &dir, None);
-            let file = file.unwrap_or_else(|| dir.clone());
+        if let Some((base, relative)) = actions.toggle_favorite_solution {
+            self.config.toggle_favorite_solution(&base, &relative);
+            if let Err(e) = self.config.save() {
+                self.note_config_save_error(&e);
+            }
+        }
+        if let Some((dir, ide_id, file)) = actions.ide_open {
+            // Datei kommt aus dem Solution-Menü der Ansicht; IDE aus dem
+            // Profil des Repos bzw. bei einem Worktree des Basis-Klons
+            let (profile, _) = ide_source(&self.config, &self.repos, &dir, None);
             self.open_ide_in(&dir, &profile, &ide_id, &file);
         }
         if let Some(path) = actions.shell_open {

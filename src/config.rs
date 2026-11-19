@@ -798,6 +798,10 @@ pub struct RepoUiState {
     pub selected_ide: Option<String>,
     #[serde(default)]
     pub profile_override: Option<String>,
+    /// Bevorzugte Solution (relativ zum Repo) beim Öffnen einer IDE aus
+    /// der Claude-Sessions-Ansicht; gilt auch für Worktrees des Repos
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorite_solution: Option<PathBuf>,
 }
 
 // --- AppConfig ---
@@ -1804,6 +1808,22 @@ impl AppConfig {
         }
     }
 
+    /// Bevorzugte Solution des Repos (relativer Pfad).
+    pub fn favorite_solution(&self, repo_path: &Path) -> Option<&Path> {
+        self.get_repo_state(repo_path)?.favorite_solution.as_deref()
+    }
+
+    /// `relative` als bevorzugte Solution setzen bzw. (schon gesetzt)
+    /// entfernen.
+    pub fn toggle_favorite_solution(&mut self, repo_path: &Path, relative: &Path) {
+        let state = self.get_repo_state_mut(repo_path);
+        if state.favorite_solution.as_deref() == Some(relative) {
+            state.favorite_solution = None;
+        } else {
+            state.favorite_solution = Some(relative.to_path_buf());
+        }
+    }
+
     pub fn get_repo_state(&self, repo_path: &Path) -> Option<&RepoUiState> {
         let key = Self::repo_state_key(repo_path);
         self.repo_state.get(&key)
@@ -2456,6 +2476,7 @@ mod tests {
             selected_solution: Some(PathBuf::from("/tmp/foo.sln")),
             selected_ide: Some("vscode".to_string()),
             profile_override: Some("dotnet".to_string()),
+            favorite_solution: None,
         };
         assert_eq!(s.selected_solution, Some(PathBuf::from("/tmp/foo.sln")));
         assert_eq!(s.selected_ide, Some("vscode".to_string()));
@@ -2468,10 +2489,12 @@ mod tests {
             selected_solution: Some(PathBuf::from("/a/b.sln")),
             selected_ide: Some("vs2022".to_string()),
             profile_override: Some("dotnet".to_string()),
+            favorite_solution: Some(PathBuf::from("src/b.sln")),
         };
         let json = serde_json::to_string(&s).unwrap();
         let de: RepoUiState = serde_json::from_str(&json).unwrap();
         assert_eq!(de.selected_solution, s.selected_solution);
+        assert_eq!(de.favorite_solution, s.favorite_solution);
         assert_eq!(de.profile_override, s.profile_override);
     }
 
@@ -2624,6 +2647,19 @@ mod tests {
         cfg.toggle_favorite_session("x");
         cfg.toggle_favorite_session("x");
         assert!(!cfg.is_favorite_session("x"));
+    }
+
+    #[test]
+    fn favorite_solution_toggles() {
+        let mut cfg = AppConfig::default();
+        let repo = Path::new("/tmp/repo");
+        assert_eq!(cfg.favorite_solution(repo), None);
+        cfg.toggle_favorite_solution(repo, Path::new("src/a.sln"));
+        assert_eq!(cfg.favorite_solution(repo), Some(Path::new("src/a.sln")));
+        cfg.toggle_favorite_solution(repo, Path::new("b.sln"));
+        assert_eq!(cfg.favorite_solution(repo), Some(Path::new("b.sln")));
+        cfg.toggle_favorite_solution(repo, Path::new("b.sln"));
+        assert_eq!(cfg.favorite_solution(repo), None);
     }
 
     #[test]
