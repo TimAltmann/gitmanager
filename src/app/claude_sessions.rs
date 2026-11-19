@@ -197,6 +197,36 @@ impl ClaudeViewState {
         self.scan.entries.len() + extra
     }
 
+    /// Offene Sessions mit ihrem Repo-Ordner als `cwd`: Claude kann z. B. in
+    /// `C:\Code\worktrees` starten und im Worktree weiterarbeiten. Der Scan
+    /// ordnet die Session dem Worktree zu, `live.cwd` bleibt der Startordner.
+    /// Ohne Zuordnung bleibt `cwd` unverändert.
+    pub(super) fn live_by_repo(&self) -> Vec<LiveSession> {
+        self.live
+            .iter()
+            .map(|l| {
+                let mut l = l.clone();
+                if let Some(e) = self
+                    .scan
+                    .entries
+                    .iter()
+                    .find(|e| e.session.id == l.session_id)
+                {
+                    l.cwd = e.repo_path.to_string_lossy().into_owned();
+                }
+                l
+            })
+            .collect()
+    }
+
+    /// Startordner und Repo-Ordner der offenen Sessions (für „läuft dort
+    /// eine Session?“ vor dem Entfernen eines Worktrees).
+    pub(super) fn live_any_place(&self) -> Vec<LiveSession> {
+        let mut all = self.live.clone();
+        all.extend(self.live_by_repo());
+        all
+    }
+
     /// Offene Sessions, die auf eine Antwort warten.
     pub(super) fn waiting_count(&self) -> usize {
         self.live
@@ -732,6 +762,7 @@ mod tests {
                 last_prompt: None,
                 git_branch: None,
                 last_activity: 1,
+                work_dirs: Vec::new(),
             },
             repo_path: PathBuf::from("C:\\a"),
             repo_name: "a".to_string(),
@@ -810,6 +841,39 @@ mod tests {
         app.claude.live = vec![live("a", LiveStatus::Busy), live("x", LiveStatus::Waiting)];
         assert_eq!(app.claude.session_count(), 3);
         assert_eq!(app.claude.waiting_count(), 1);
+    }
+
+    #[test]
+    fn live_sessions_follow_scan_into_worktree() {
+        let mut app = test_app();
+        // Gestartet in C:\worktrees, gearbeitet im Worktree C:\worktrees\wt
+        let mut e = entry("a");
+        e.session.cwd = "C:\\worktrees".into();
+        e.repo_path = PathBuf::from("C:\\worktrees\\wt");
+        app.apply_claude_result(SessionScan {
+            entries: vec![e],
+            ..SessionScan::default()
+        });
+        let mut a = live("a", LiveStatus::Waiting);
+        a.cwd = "C:\\worktrees".into();
+        app.claude.live = vec![a, live("x", LiveStatus::Busy)];
+
+        let cwds: Vec<String> = app
+            .claude
+            .live_by_repo()
+            .into_iter()
+            .map(|l| l.cwd)
+            .collect();
+        assert_eq!(cwds, ["C:\\worktrees\\wt", "C:\\a"]);
+        let wt = std::path::Path::new("C:\\worktrees\\wt");
+        assert!(crate::app::repo_badges::claude_running_at(
+            &app.claude.live_any_place(),
+            wt
+        ));
+        assert!(crate::app::repo_badges::claude_running_at(
+            &app.claude.live_any_place(),
+            std::path::Path::new("C:\\worktrees")
+        ));
     }
 
     #[test]

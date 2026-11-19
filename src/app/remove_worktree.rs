@@ -106,7 +106,7 @@ impl MyApp {
         else {
             return;
         };
-        let claude = repo_badges::claude_running_at(&self.claude.live, path);
+        let claude = repo_badges::claude_running_at(&self.claude.live_any_place(), path);
         self.remove_ui.dialog = Some(RemoveDialog::new(repo, claude));
     }
 

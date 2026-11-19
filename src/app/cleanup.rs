@@ -519,8 +519,10 @@ impl MyApp {
                         for c in &mut dialog.candidates {
                             if let CleanupTarget::Worktree { path, .. } = &c.target {
                                 let mr = self.repo_mrs.get(path).map(|b| b.iid);
-                                let claude =
-                                    repo_badges::claude_running_at(&self.claude.live, path);
+                                let claude = repo_badges::claude_running_at(
+                                    &self.claude.live_any_place(),
+                                    path,
+                                );
                                 c.mark_in_use(mr, claude);
                             }
                         }

@@ -27,8 +27,8 @@ use crate::ui::merge_requests::{show_merge_requests, MrViewActions, MrViewInput}
 use crate::ui::settings::SettingsState;
 use crate::ui::theme::mr_palette;
 use egui::{
-    vec2, Align2, Atom, Atoms, Button, FontId, Frame, Id, Image, ImageSource, Response, RichText,
-    Stroke, Ui, WidgetInfo, WidgetType,
+    vec2, Align2, Atom, Atoms, Button, Color32, FontId, Frame, Id, Image, ImageSource, Response,
+    RichText, Stroke, Ui, WidgetInfo, WidgetType,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -729,14 +729,21 @@ impl MyApp {
 
                 let claude_on = self.main_view == MainView::ClaudeSessions;
                 let mut atoms = Atoms::new(RichText::new(tr(lang, "view_claude")).size(12.0));
-                // Warten Sessions auf dich: „● n“ in Blau statt der Gesamtzahl
+                // Warten Sessions auf dich: blaues Badge wie bei den MRs statt
+                // der Gesamtzahl. Gemalt statt „● n“: ● zeichnet die
+                // egui-Standardschrift als Quadrat.
                 let waiting = self.claude.waiting_count();
-                if waiting > 0 {
-                    atoms.push_right(
-                        RichText::new(format!("● {waiting}"))
-                            .size(11.0)
-                            .color(crate::ui::claude_anim::COLOR_WAITING),
-                    );
+                let claude_badge_id = Id::new("claude_view_badge");
+                let waiting_galley = (waiting > 0).then(|| {
+                    ui.painter().layout_no_wrap(
+                        waiting.to_string(),
+                        FontId::proportional(10.0),
+                        Color32::WHITE,
+                    )
+                });
+                if let Some(galley) = &waiting_galley {
+                    let width = (galley.size().x + 10.0).max(18.0);
+                    atoms.push_right(Atom::custom(claude_badge_id, vec2(width, 16.0)));
                 } else if self.claude.scanned_once {
                     let mut count =
                         RichText::new(self.claude.session_count().to_string()).size(11.0);
@@ -745,7 +752,16 @@ impl MyApp {
                     }
                     atoms.push_right(count);
                 }
-                let response = ui.add(segment(claude_on, atoms));
+                let out = segment(claude_on, atoms).atom_ui(ui);
+                if let (Some(galley), Some(rect)) = (waiting_galley, out.rect(claude_badge_id)) {
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 8.0, crate::ui::claude_anim::COLOR_WAITING);
+                    let pos = Align2::CENTER_CENTER
+                        .anchor_size(rect.center(), galley.size())
+                        .min;
+                    painter.galley(pos, galley, Color32::WHITE);
+                }
+                let response = out.response;
                 let name = tr(lang, "view_claude");
                 response.widget_info(|| {
                     WidgetInfo::selected(WidgetType::Button, true, claude_on, &name)

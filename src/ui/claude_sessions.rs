@@ -678,6 +678,7 @@ mod tests {
             last_prompt: None,
             git_branch: None,
             last_activity: 1,
+            work_dirs: Vec::new(),
         }
     }
 
