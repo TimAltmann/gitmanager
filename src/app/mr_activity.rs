@@ -284,6 +284,13 @@ impl MyApp {
                     ctx.open_url(egui::OpenUrl::new_tab(&hit.url));
                     self.mark_mr_seen(&hit.host_key, &hit.id);
                 }
+                // „In GitManager anzeigen“: Zeile wie beim Sprung von der
+                // Repo-Karte einige Sekunden hervorheben; die Sammel-
+                // Benachrichtigung hat keinen MR
+                _ if !hit.id.is_empty() => {
+                    self.focus_mr(&hit.host_key, &hit.id);
+                    self.show_main_window(ctx);
+                }
                 _ => {
                     self.main_view = MainView::MergeRequests;
                     self.show_main_window(ctx);
@@ -333,6 +340,47 @@ mod tests {
             others,
             ..MrSnapshot::default()
         }));
+    }
+
+    fn hit(id: &str, click: ToastClick) -> ToastHit {
+        ToastHit {
+            host_key: "h".to_string(),
+            id: id.to_string(),
+            url: String::new(),
+            click,
+        }
+    }
+
+    #[test]
+    fn toast_show_focuses_mr_row() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.mr_view.mine_query = "alt".to_string();
+        app.mr_activity
+            .click_tx
+            .send(hit("a", ToastClick::Show))
+            .unwrap();
+        app.poll_mr_toasts(&ctx);
+        assert_eq!(app.main_view, MainView::MergeRequests);
+        let focus = app.mr_view.focus.as_ref().expect("Zeile hervorgehoben");
+        assert_eq!((focus.host_key.as_str(), focus.id.as_str()), ("h", "a"));
+        assert!(
+            app.mr_view.mine_query.is_empty(),
+            "Suche blendet die Zeile nicht aus"
+        );
+    }
+
+    #[test]
+    fn toast_show_without_mr_only_switches_view() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.mr_activity
+            .click_tx
+            .send(hit("", ToastClick::Show))
+            .unwrap();
+        app.poll_mr_toasts(&ctx);
+        assert_eq!(app.main_view, MainView::MergeRequests);
+        assert!(app.mr_view.focus.is_none());
     }
 
     #[test]

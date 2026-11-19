@@ -842,6 +842,11 @@ impl MyApp {
         }
         if let Some(focus) = self.mr_view.focus.as_mut() {
             if actions.focus_drawn {
+                if !focus.scrolled {
+                    // Hervorhebung ab dem ersten Zeichnen: kommt das Fenster
+                    // erst aus dem Tray, wäre sie sonst schon halb vorbei
+                    focus.since = Instant::now();
+                }
                 focus.scrolled = true;
             } else if !focus.scrolled {
                 // Zeile im ersten Frame nicht gezeichnet (gefiltert, nicht
@@ -857,6 +862,10 @@ impl MyApp {
         let Some(focus) = self.mr_view.focus.as_ref() else {
             return;
         };
+        // Noch nicht gezeichnet: die Zeit läuft erst ab dem ersten Zeichnen
+        if !focus.scrolled {
+            return;
+        }
         match super::mr_checkout::HIGHLIGHT_DURATION.checked_sub(focus.since.elapsed()) {
             Some(left) => ctx.request_repaint_after(left),
             None => self.mr_view.focus = None,
