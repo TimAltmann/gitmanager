@@ -1,7 +1,8 @@
 //! Logos für Windows-Benachrichtigungen. Claude Sessions: das
 //! GitManager-Icon, rund mit farbigem Statusring (fertig / wartet). Merge
 //! Requests: ein Personen-Avatar, weil dort ein anderer Mensch etwas getan
-//! hat. Beim ersten Gebrauch gerendert (Toasts brauchen Bilddateien).
+//! hat; mit bekanntem Autor wie in Teams seine Initialen auf einer Farbe
+//! je Name. Beim ersten Gebrauch gerendert (Toasts brauchen Bilddateien).
 
 // Nur die Windows-Benachrichtigung nutzt die Bilder (Tests überall)
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -85,6 +86,104 @@ fn person_png() -> Option<Vec<u8>> {
     pixmap.encode_png().ok()
 }
 
+/// Hintergründe der Initialen-Avatare (gedeckt, weiße Schrift lesbar)
+const AUTHOR_COLORS: [&str; 10] = [
+    "#C4314B", "#CA5010", "#986F0B", "#498205", "#038387", "#0078D4", "#4F6BED", "#8764B8",
+    "#C239B3", "#7A7574",
+];
+
+/// Initialen wie in Teams: erster Buchstabe von Vor- und Nachname
+/// („Muster, Anna“ → „AM“), bei einem Wort nur einer; leer ohne Buchstaben.
+pub fn initials(name: &str) -> String {
+    let ordered = match name.split_once(',') {
+        Some((last, first)) => format!("{first} {last}"),
+        None => name.to_string(),
+    };
+    // Zusätze in Klammern (z. B. „(Extern)“) zählen nicht
+    let words: Vec<&str> = ordered
+        .split_whitespace()
+        .filter(|w| !w.starts_with('('))
+        .filter(|w| w.chars().next().is_some_and(char::is_alphanumeric))
+        .collect();
+    let first_char = |w: &str| {
+        w.chars()
+            .next()
+            .map(|c| c.to_uppercase().collect::<String>())
+    };
+    match words.as_slice() {
+        [] => String::new(),
+        [one] => first_char(one).unwrap_or_default(),
+        [first, .., last] => {
+            first_char(first).unwrap_or_default() + &first_char(last).unwrap_or_default()
+        }
+    }
+}
+
+/// Feste Farbe je Name (gleicher Name, gleiche Farbe; FNV-1a).
+fn author_color(name: &str) -> &'static str {
+    let hash = name.to_lowercase().bytes().fold(0x811c_9dc5_u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    });
+    AUTHOR_COLORS[hash as usize % AUTHOR_COLORS.len()]
+}
+
+/// Systemschriften einmal laden (Windows: Segoe UI).
+fn fontdb() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
+    static DB: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
+        std::sync::OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = resvg::usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        std::sync::Arc::new(db)
+    })
+    .clone()
+}
+
+fn author_svg(initials: &str, color: &str) -> String {
+    // Zwei Buchstaben etwas kleiner; Grundlinie so, dass Großbuchstaben
+    // mittig stehen
+    let size = if initials.chars().count() > 1 {
+        104
+    } else {
+        120
+    };
+    let baseline = 128 + size * 36 / 100;
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{SIZE}" height="{SIZE}" viewBox="0 0 256 256">
+<rect width="256" height="256" fill="{color}"/>
+<text x="128" y="{baseline}" text-anchor="middle" font-family="Segoe UI, Ubuntu, DejaVu Sans, Arial, sans-serif" font-weight="600" font-size="{size}" fill="#FFFFFF">{initials}</text>
+</svg>"##
+    )
+}
+
+/// Initialen-Avatar als PNG; `None` ohne passende Schrift.
+fn author_png(initials: &str, color: &str) -> Option<Vec<u8>> {
+    use resvg::tiny_skia::{Pixmap, Transform};
+    let db = fontdb();
+    if db.is_empty() {
+        return None;
+    }
+    let options = resvg::usvg::Options {
+        fontdb: db,
+        ..resvg::usvg::Options::default()
+    };
+    let svg = author_svg(&xml_text(initials), color);
+    let tree = resvg::usvg::Tree::from_str(&svg, &options).ok()?;
+    // Ohne gefundene Glyphen bliebe nur die Farbfläche
+    if !tree.root().has_children() || tree.root().children().len() < 2 {
+        return None;
+    }
+    let mut pixmap = Pixmap::new(SIZE, SIZE)?;
+    resvg::render(&tree, Transform::default(), &mut pixmap.as_mut());
+    pixmap.encode_png().ok()
+}
+
+fn xml_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// `dir/<name>_v<ART_VERSION>.png`, beim ersten Mal mit `render` erzeugt.
 fn cached_png(dir: &Path, name: &str, render: impl FnOnce() -> Option<Vec<u8>>) -> Option<PathBuf> {
     let name = format!("{name}_v{ART_VERSION}.png");
@@ -114,6 +213,26 @@ pub fn person_logo(dir: &Path) -> Option<PathBuf> {
     cached_png(dir, "toast_person", person_png)
 }
 
+/// Avatar mit den Initialen von `author` (MR-Benachrichtigungen); ohne
+/// Namen oder Schrift der allgemeine Personen-Avatar.
+pub fn author_logo(dir: &Path, author: &str) -> Option<PathBuf> {
+    let letters = initials(author);
+    if !letters.is_empty() {
+        let color = author_color(author);
+        // Name aus Buchstaben und Farbe: gleiche Bilder teilen sich die Datei
+        let hex: String = letters
+            .chars()
+            .map(|c| format!("{:x}", u32::from(c)))
+            .collect::<Vec<_>>()
+            .join("-");
+        let name = format!("toast_author_{hex}_{}", color.trim_start_matches('#'));
+        if let Some(path) = cached_png(dir, &name, || author_png(&letters, color)) {
+            return Some(path);
+        }
+    }
+    person_logo(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +251,54 @@ mod tests {
         }
         let files = std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(files, 2, "je Art ein Logo, keine Reste");
+    }
+
+    #[test]
+    fn initials_like_teams() {
+        assert_eq!(initials("Anna Muster"), "AM");
+        assert_eq!(initials("anna maria muster"), "AM");
+        assert_eq!(initials("Muster, Anna"), "AM");
+        assert_eq!(initials("Anna Muster (Extern)"), "AM");
+        assert_eq!(initials("SonarQube"), "S");
+        assert_eq!(initials("Ömer Çelik"), "ÖÇ");
+        assert_eq!(initials("  "), "");
+        assert_eq!(initials("- ."), "");
+    }
+
+    #[test]
+    fn author_color_is_stable_per_name() {
+        assert_eq!(author_color("Anna Muster"), author_color("anna muster"));
+        let colors: std::collections::HashSet<_> = ["Anna", "Bert", "Carla", "Dieter", "Eva"]
+            .iter()
+            .map(|n| author_color(n))
+            .collect();
+        assert!(colors.len() > 1, "nicht alle gleich");
+    }
+
+    #[test]
+    fn author_logo_draws_initials_or_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let logo = author_logo(dir.path(), "Anna Muster").expect("Logo");
+        assert_eq!(
+            author_logo(dir.path(), "Anna Muster"),
+            Some(logo.clone()),
+            "gecacht"
+        );
+        if fontdb().is_empty() {
+            // Ohne Systemschrift: Personen-Avatar
+            assert_eq!(person_logo(dir.path()), Some(logo));
+            return;
+        }
+        let img = image::open(&logo).unwrap().to_rgba8();
+        let bg = img.get_pixel(10, 10).0;
+        let white = img.pixels().filter(|p| p.0 == [255, 255, 255, 255]).count();
+        assert_ne!(bg, [255, 255, 255, 255]);
+        assert!(white > 2000, "Initialen fehlen: {white} weiße Pixel");
+        // Ohne Namen: Personen-Avatar
+        assert_eq!(author_logo(dir.path(), ""), person_logo(dir.path()));
+        if let Ok(out) = std::env::var("TOAST_ART_OUT") {
+            std::fs::copy(&logo, Path::new(&out).join(logo.file_name().unwrap())).unwrap();
+        }
     }
 
     #[test]

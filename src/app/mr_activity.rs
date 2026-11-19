@@ -171,6 +171,12 @@ impl MyApp {
             if others.is_empty() && !notes.is_empty() && trigger.is_none() {
                 continue;
             }
+            // Bild der Benachrichtigung: wer zuletzt kommentiert hat (nicht
+            // der MR-Autor); unbekannt → allgemeiner Avatar
+            event.author = others
+                .last()
+                .map(|n| n.author_name.clone())
+                .unwrap_or_default();
             let line = match others.as_slice() {
                 [] => None,
                 [one] => Some(format!(
@@ -220,6 +226,7 @@ impl MyApp {
                     attribution: String::new(),
                     button_open: tr(lang, "mr_notify_btn_show"),
                     button_show: tr(lang, "mr_notify_btn_show"),
+                    author: String::new(),
                 };
                 self.show_mr_toast(toast, String::new(), String::new(), String::new());
                 break;
@@ -254,6 +261,7 @@ impl MyApp {
                 attribution: format!("{} !{}", event.project_path, event.iid),
                 button_open: tr(lang, "mr_notify_btn_open"),
                 button_show: tr(lang, "mr_notify_btn_show"),
+                author: event.author.clone(),
             };
             self.show_mr_toast(toast, event.host_key, event.id, event.web_url);
         }

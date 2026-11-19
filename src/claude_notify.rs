@@ -166,6 +166,8 @@ pub struct SimpleToast {
     pub attribution: String,
     pub button_open: String,
     pub button_show: String,
+    /// Wer etwas getan hat: Initialen als Bild; leer = Personen-Avatar
+    pub author: String,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -303,9 +305,9 @@ mod win {
 
     pub fn show_simple(toast: super::SimpleToast, on_click: impl Fn(ToastClick) + Send + 'static) {
         std::thread::spawn(move || {
-            // Personen-Avatar statt App-Icon: hier hat ein Mensch etwas getan
+            // Avatar statt App-Icon: hier hat ein Mensch etwas getan
             let logo = data_dir()
-                .and_then(|d| crate::claude_toast_art::person_logo(&d.join("toast")))
+                .and_then(|d| crate::claude_toast_art::author_logo(&d.join("toast"), &toast.author))
                 .or_else(icon_path);
             let xml = super::simple_toast_xml(&toast, logo.as_deref());
             if let Err(e) = show_xml(&xml, on_click) {
@@ -451,6 +453,7 @@ mod tests {
             attribution: "group/app !7".into(),
             button_open: "Im Browser".into(),
             button_show: "Anzeigen".into(),
+            author: "Anna Muster".into(),
         };
         let xml = simple_toast_xml(&toast, None);
         assert!(xml.contains(r#"<header id="merge-requests" title="Merge Requests""#));
