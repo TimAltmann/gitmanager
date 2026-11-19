@@ -20,7 +20,7 @@ use super::model::{
 };
 use super::remote::{norm_host, strip_port, GlabHost, HostMap, LocalProject};
 use super::secret::SecretString;
-use super::time::{format_rfc3339, now_unix, parse_date};
+use super::time::{format_rfc3339, now_unix, parse_date, parse_rfc3339};
 use crate::config::MrConfig;
 use crate::i18n::{tr, tr_fmt, Language};
 use semver::Version;
@@ -779,7 +779,77 @@ pub fn fetch_recent_notes(
         }
     }
     store_schema(host, schema);
+    // Ohne Nutzer-Kommentar (fein granulierter Token ohne „Work Item:
+    // Read“: GraphQL liefert sie leer, ohne Fehler) über REST-Diskussionen,
+    // die solche Tokens lesen dürfen; sonst bliebe der Autor unbekannt
+    for (notes, (path, iid)) in out.iter_mut().zip(mrs) {
+        if notes.iter().all(|n| n.system) {
+            if let Some(rest) = rest_discussion_notes(runner, host, path, *iid) {
+                *notes = rest;
+            }
+        }
+    }
     out
+}
+
+/// Seiten der REST-Diskussionen höchstens (je 100)
+const DISCUSSION_PAGES: u32 = 10;
+
+/// Alle Kommentare eines MRs über REST `…/discussions` (älteste zuerst);
+/// `None` bei Fehlern.
+fn rest_discussion_notes(
+    runner: &dyn GlabRunner,
+    host: &str,
+    path: &str,
+    iid: u64,
+) -> Option<Vec<NoteInfo>> {
+    let mut notes = Vec::new();
+    for page in 1..=DISCUSSION_PAGES {
+        let endpoint = format!(
+            "projects/{}/merge_requests/{iid}/discussions?per_page=100&page={page}",
+            encode_path(path)
+        );
+        let out = runner.run(GlabRequest::api(host, [endpoint])).ok()?;
+        if out.http.as_ref().map(|h| h.code) != Some(200) {
+            return None;
+        }
+        let json = out.json()?;
+        let discussions = json.as_array()?;
+        notes.extend(discussion_notes(discussions));
+        if discussions.len() < 100 {
+            break;
+        }
+    }
+    Some(notes)
+}
+
+/// Kommentare aus REST-Diskussionen nach Erstellzeit, älteste zuerst (eine
+/// neue Antwort auf einen alten Thread steht sonst mittendrin).
+fn discussion_notes(discussions: &[Value]) -> Vec<NoteInfo> {
+    let text = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut notes: Vec<(i64, NoteInfo)> = discussions
+        .iter()
+        .filter_map(|d| d.get("notes")?.as_array())
+        .flatten()
+        .map(|n| {
+            let author = n.get("author").unwrap_or(&Value::Null);
+            let created = parse_rfc3339(&text(n, "created_at")).unwrap_or(0);
+            let note = NoteInfo {
+                author_username: text(author, "username"),
+                author_name: text(author, "name"),
+                body: text(n, "body"),
+                system: n.get("system").and_then(Value::as_bool).unwrap_or(false),
+            };
+            (created, note)
+        })
+        .collect();
+    notes.sort_by_key(|(created, _)| *created);
+    notes.into_iter().map(|(_, n)| n).collect()
 }
 
 /// Quell-Branch → gemergte MRs `(iid, kopf-sha)` eines Projekts.
@@ -1876,6 +1946,44 @@ mod tests {
             })
             .collect();
         json!({ "hosts": entries })
+    }
+
+    #[test]
+    fn recent_notes_fall_back_to_rest_discussions() {
+        // GraphQL liefert die Kommentare leer (Token-Rechte), REST nicht
+        let runner = gated();
+        let fake = runner.inner();
+        fake.push(FakeReply::http(
+            200,
+            &json!({"data": {"m0": {"mergeRequest": {"notes": {"nodes": []}}}}}).to_string(),
+        ));
+        // Antwort im ersten Thread ist der neueste Kommentar
+        let discussions = json!([
+            {"notes": [
+                {"system": false, "body": "Frage", "created_at": "2026-11-18T09:00:00.000Z",
+                 "author": {"username": "anna", "name": "Anna"}},
+                {"system": false, "body": "Antwort", "created_at": "2026-11-18T11:00:00.000Z",
+                 "author": {"username": "twolber", "name": "Tim"}}
+            ]},
+            {"notes": [{"system": true, "body": "added 1 commit", "created_at": "2026-11-18T10:00:00.000Z",
+                        "author": {"username": "bot", "name": "Bot"}}]}
+        ]);
+        fake.push(FakeReply::http(200, &discussions.to_string()));
+        let got = fetch_recent_notes(&runner, HOST, &[("g/p".to_string(), 7)]);
+        let calls = fake.take_calls();
+        assert!(
+            calls[1]
+                .request
+                .args
+                .iter()
+                .any(|a| a.starts_with("projects/g%2Fp/merge_requests/7/discussions")),
+            "{:?}",
+            calls[1].request.args
+        );
+        assert_eq!(got.len(), 1);
+        let users: Vec<&str> = got[0].iter().map(|n| n.author_username.as_str()).collect();
+        assert_eq!(users, ["anna", "bot", "twolber"]);
+        assert_eq!(got[0][2].body, "Antwort");
     }
 
     /// ACCESS nur mit `currentUser` (ohne Projekte).
