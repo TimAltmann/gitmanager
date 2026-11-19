@@ -115,7 +115,7 @@ The `Merge Requests` view shows the open merge requests of the GitLab projects b
 
 - **glab ≥ 1.111** in `PATH`, or set the full path in `Settings → Merge Requests → glab program`. Install with `winget install GLab.GLab`; older versions show *glab … is too old* (`winget upgrade GLab.GLab`). After installing, restart GitManager (or set the full path to `glab.exe` and use `Check again`).
 - glab signed in to your GitLab host — either `glab auth login` in a terminal or `Settings → Merge Requests → Add token …`.
-- **Token scope:** `read_api` is enough for GitManager. glab's own write commands (`glab mr approve/merge/note/create`) need **`api` + `write_repository`** (glab's recommendation); with `read_api` only, the settings show *glab: read-only*. A token with only `read_user` shows *Missing rights*. An OAuth login via glab (`glab auth login --web`) always has full rights.
+- **Token scope:** `read_api` is enough for GitManager. glab's own write commands (`glab mr approve/merge/note/create`) need **`api` + `write_repository`** (glab's recommendation); with `read_api` only, the settings show *glab: read-only*. A token with only `read_user` shows *Missing rights*. A **fine-grained** token additionally needs the project permission **Work Item: Read**: without it GitLab returns comments empty, GitManager cannot tell who wrote them and therefore sends no comment notifications (review requests and mentions still arrive). An OAuth login via glab (`glab auth login --web`) always has full rights.
 
 ### Token handling
 
