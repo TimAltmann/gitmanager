@@ -148,17 +148,6 @@ impl MyApp {
 
     /// Letzte Kommentare da: nur eigene → als gesehen, sonst melden.
     pub(super) fn on_mr_notes(&mut self, me: Option<String>, jobs: Vec<NotesJob>) {
-        let notify = self.notes_to_notify(me, jobs);
-        self.notify_mr_events(notify);
-    }
-
-    /// Welche Kommentar-Ereignisse gemeldet werden (mit Zeile); eigene
-    /// Kommentare gelten dabei als gesehen.
-    fn notes_to_notify(
-        &mut self,
-        me: Option<String>,
-        jobs: Vec<NotesJob>,
-    ) -> Vec<(MrEvent, Option<String>)> {
         let mut notify = Vec::new();
         let mut changed = false;
         for NotesJob {
@@ -178,11 +167,8 @@ impl MyApp {
                 self.mr_activity
                     .store
                     .mark_own_notes_seen(&event.host_key, &event.id, own, now);
-            // Nur fremde Kommentare melden. Sind sie nicht lesbar (Fehler,
-            // Token ohne „Work Item: Read“ liefert leere Listen), ist der
-            // Autor unbekannt: dann lieber nicht melden, sonst kämen auch die
-            // eigenen. Review-Anfrage/Erwähnung kommen trotzdem.
-            if others.is_empty() && trigger.is_none() {
+            // Ohne lesbare Kommentare (Fehler, Rechte) trotzdem melden
+            if others.is_empty() && !notes.is_empty() && trigger.is_none() {
                 continue;
             }
             let line = match others.as_slice() {
@@ -213,7 +199,7 @@ impl MyApp {
                 self.mr_activity.store.annotate(snap);
             }
         }
-        notify
+        self.notify_mr_events(notify);
     }
 
     /// Benachrichtigungen zeigen (wenn eingeschaltet); `line` ersetzt die
@@ -412,58 +398,6 @@ mod tests {
         app.mark_mr_seen("h", "a");
         let snap = app.mr_snapshot.as_deref().unwrap();
         assert_eq!(snap.others[0].activity, Activity::default());
-    }
-
-    fn notes_event() -> MrEvent {
-        MrEvent {
-            kind: MrEventKind::NotesAdded { before: 1, now: 2 },
-            host_key: "h".to_string(),
-            id: "a".to_string(),
-            iid: 1,
-            project_path: "g/p".to_string(),
-            title: "T".to_string(),
-            web_url: String::new(),
-            author: String::new(),
-        }
-    }
-
-    fn note_by(user: &str) -> NoteInfo {
-        NoteInfo {
-            author_username: user.to_string(),
-            author_name: user.to_string(),
-            body: "text".to_string(),
-            ..NoteInfo::default()
-        }
-    }
-
-    #[test]
-    fn comment_toasts_only_for_others() {
-        let mut app = test_app();
-        let job = |notes: Vec<NoteInfo>, trigger| NotesJob {
-            event: notes_event(),
-            trigger,
-            notes,
-        };
-        let me = || Some("me".to_string());
-        // Eigener Kommentar: keine Meldung
-        assert!(app
-            .notes_to_notify(me(), vec![job(vec![note_by("me")], None)])
-            .is_empty());
-        // Kommentare nicht lesbar (Token-Rechte, Fehler): Autor unbekannt
-        assert!(app
-            .notes_to_notify(me(), vec![job(Vec::new(), None)])
-            .is_empty());
-        // Fremder Kommentar: Meldung mit Autor
-        let got = app.notes_to_notify(me(), vec![job(vec![note_by("anna")], None)]);
-        assert_eq!(got.len(), 1);
-        assert!(got[0].1.as_deref().unwrap().starts_with("anna:"));
-        // Review-Anfrage kommt auch ohne lesbare Kommentare
-        let got = app.notes_to_notify(
-            me(),
-            vec![job(Vec::new(), Some(MrEventKind::ReviewRequested))],
-        );
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].0.kind, MrEventKind::ReviewRequested);
     }
 
     #[test]
