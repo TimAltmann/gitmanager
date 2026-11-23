@@ -1256,7 +1256,7 @@ impl MyApp {
             self.focus_mr(&host_key, &id);
         }
         if let Some(path) = actions.focus_claude.take() {
-            if let Some(pid) = repo_badges::claude_pid_for(&self.claude.live, &path) {
+            if let Some(pid) = repo_badges::claude_pid_for(&self.claude.live_by_repo(), &path) {
                 self.apply_claude_actions(crate::ui::claude_sessions::ClaudeSessionActions {
                     focus: Some(pid),
                     ..Default::default()
@@ -2842,7 +2842,8 @@ impl eframe::App for MyApp {
                 // K1: „In Repo-Liste zeigen“ hebt eine Karte kurz hervor
                 let highlight = self.repo_highlight_frame(&ctx);
                 // Claude-Chip: Live-Status je Repo-Ordner (leer ohne Abfrage)
-                let claude = repo_badges::claude_card_status(&self.claude.live, &self.repos);
+                let claude =
+                    repo_badges::claude_card_status(&self.claude.live_by_repo(), &self.repos);
                 let card_ctx = RepoListContext {
                     mrs: &self.repo_mrs,
                     claude: &claude,

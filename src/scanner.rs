@@ -848,9 +848,11 @@ mod tests {
             r#"<configuration><appSettings><add key="Database" value="dev"/></appSettings></configuration>"#,
         )
         .unwrap();
-        let mut cfg = AppConfig::default();
-        cfg.roots = vec![root.to_path_buf()];
-        cfg.max_depth = 1;
+        let mut cfg = AppConfig {
+            roots: vec![root.to_path_buf()],
+            max_depth: 1,
+            ..Default::default()
+        };
         cfg.profiles[0].config_selectors.push(ConfigSelector {
             id: "db".to_string(),
             display_name: "DB".to_string(),
@@ -881,9 +883,11 @@ mod tests {
             r#"<configuration><appSettings><add key="Database" value="dev"/></appSettings></configuration>"#,
         )
         .unwrap();
-        let mut cfg = AppConfig::default();
-        cfg.roots = vec![root.to_path_buf()];
-        cfg.max_depth = 1;
+        let mut cfg = AppConfig {
+            roots: vec![root.to_path_buf()],
+            max_depth: 1,
+            ..Default::default()
+        };
         cfg.profiles[0].config_selectors.push(ConfigSelector {
             id: "db".to_string(),
             display_name: "DB".to_string(),
@@ -931,7 +935,7 @@ mod tests {
             without.custom_errors
         );
         assert!(
-            without.custom_values.get("db").is_none(),
+            !without.custom_values.contains_key("db"),
             "without repo should have no custom_values for db"
         );
     }

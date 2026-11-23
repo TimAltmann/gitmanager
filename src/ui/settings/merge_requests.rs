@@ -2507,9 +2507,11 @@ mod tests {
     /// liegt der Review-Ordner im Suchpfad.
     #[test]
     fn add_review_root_as_search_path_extends_draft() {
-        let mut draft = AppConfig::default();
-        draft.roots = roots(&["C:\\Dev"]);
-        draft.max_depth = 1;
+        let mut draft = AppConfig {
+            roots: roots(&["C:\\Dev"]),
+            max_depth: 1,
+            ..Default::default()
+        };
         draft.merge_requests.review_root = Some(" D:\\Reviews ".to_string());
         let review = draft.merge_requests.review_root.clone().unwrap_or_default();
         assert_eq!(

@@ -633,6 +633,7 @@ mod tests {
             last_prompt: Some("letzter".to_string()),
             git_branch: Some("main".to_string()),
             last_activity: 1,
+            work_dirs: Vec::new(),
         }
     }
 

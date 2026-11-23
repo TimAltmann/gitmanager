@@ -6,7 +6,7 @@ use super::merge_requests::MrResult;
 use super::{MainView, MyApp};
 use crate::claude_notify::{show_simple_notification, SimpleToast, ToastClick};
 use crate::gitlab::activity::{
-    note_snippet, others_notes, MrActivityStore, MrEvent, MrEventKind, NoteInfo,
+    note_snippet, others_notes, own_notes, MrActivityStore, MrEvent, MrEventKind, NoteInfo,
 };
 use crate::gitlab::service::fetch_recent_notes;
 use crate::gitlab::time::now_unix;
@@ -161,14 +161,22 @@ impl MyApp {
             };
             let added = now.saturating_sub(before);
             let others = others_notes(&notes, added, me.as_deref());
+            // Eigene Kommentare zählen nicht als neu (auch neben fremden)
+            let own = own_notes(&notes, added, me.as_deref());
+            changed |=
+                self.mr_activity
+                    .store
+                    .mark_own_notes_seen(&event.host_key, &event.id, own, now);
             // Ohne lesbare Kommentare (Fehler, Rechte) trotzdem melden
             if others.is_empty() && !notes.is_empty() && trigger.is_none() {
-                changed |= self
-                    .mr_activity
-                    .store
-                    .mark_notes_seen(&event.host_key, &event.id, now);
                 continue;
             }
+            // Bild der Benachrichtigung: wer zuletzt kommentiert hat (nicht
+            // der MR-Autor); unbekannt → allgemeiner Avatar
+            event.author = others
+                .last()
+                .map(|n| n.author_name.clone())
+                .unwrap_or_default();
             let line = match others.as_slice() {
                 [] => None,
                 [one] => Some(format!(
@@ -218,6 +226,7 @@ impl MyApp {
                     attribution: String::new(),
                     button_open: tr(lang, "mr_notify_btn_show"),
                     button_show: tr(lang, "mr_notify_btn_show"),
+                    author: String::new(),
                 };
                 self.show_mr_toast(toast, String::new(), String::new(), String::new());
                 break;
@@ -252,6 +261,7 @@ impl MyApp {
                 attribution: format!("{} !{}", event.project_path, event.iid),
                 button_open: tr(lang, "mr_notify_btn_open"),
                 button_show: tr(lang, "mr_notify_btn_show"),
+                author: event.author.clone(),
             };
             self.show_mr_toast(toast, event.host_key, event.id, event.web_url);
         }
@@ -283,6 +293,13 @@ impl MyApp {
                 ToastClick::Terminal if !hit.url.is_empty() => {
                     ctx.open_url(egui::OpenUrl::new_tab(&hit.url));
                     self.mark_mr_seen(&hit.host_key, &hit.id);
+                }
+                // „In GitManager anzeigen“: Zeile wie beim Sprung von der
+                // Repo-Karte einige Sekunden hervorheben; die Sammel-
+                // Benachrichtigung hat keinen MR
+                _ if !hit.id.is_empty() => {
+                    self.focus_mr(&hit.host_key, &hit.id);
+                    self.show_main_window(ctx);
                 }
                 _ => {
                     self.main_view = MainView::MergeRequests;
@@ -335,6 +352,47 @@ mod tests {
         }));
     }
 
+    fn hit(id: &str, click: ToastClick) -> ToastHit {
+        ToastHit {
+            host_key: "h".to_string(),
+            id: id.to_string(),
+            url: String::new(),
+            click,
+        }
+    }
+
+    #[test]
+    fn toast_show_focuses_mr_row() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.mr_view.mine_query = "alt".to_string();
+        app.mr_activity
+            .click_tx
+            .send(hit("a", ToastClick::Show))
+            .unwrap();
+        app.poll_mr_toasts(&ctx);
+        assert_eq!(app.main_view, MainView::MergeRequests);
+        let focus = app.mr_view.focus.as_ref().expect("Zeile hervorgehoben");
+        assert_eq!((focus.host_key.as_str(), focus.id.as_str()), ("h", "a"));
+        assert!(
+            app.mr_view.mine_query.is_empty(),
+            "Suche blendet die Zeile nicht aus"
+        );
+    }
+
+    #[test]
+    fn toast_show_without_mr_only_switches_view() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.mr_activity
+            .click_tx
+            .send(hit("", ToastClick::Show))
+            .unwrap();
+        app.poll_mr_toasts(&ctx);
+        assert_eq!(app.main_view, MainView::MergeRequests);
+        assert!(app.mr_view.focus.is_none());
+    }
+
     #[test]
     fn opening_marks_seen_and_clears_badge() {
         let mut app = test_app();
@@ -384,5 +442,46 @@ mod tests {
         );
         let snap = app.mr_snapshot.as_deref().unwrap();
         assert_eq!(snap.others[0].activity.new_notes, 0);
+    }
+
+    #[test]
+    fn own_comments_beside_others_are_not_new() {
+        let mut app = test_app();
+        set_snapshot(&mut app, vec![mr("a", 1)]);
+        app.on_mr_activity(&BTreeMap::new());
+        set_snapshot(&mut app, vec![mr("a", 3)]);
+        // Abruf der Kommentare nicht abwarten: Ergebnis direkt einspielen
+        let store = &mut app.mr_activity.store;
+        store.observe(app.mr_snapshot.as_deref().unwrap(), now_unix());
+        let event = MrEvent {
+            kind: MrEventKind::NotesAdded { before: 1, now: 3 },
+            host_key: "h".to_string(),
+            id: "a".to_string(),
+            iid: 1,
+            project_path: "g/p".to_string(),
+            title: "T".to_string(),
+            web_url: String::new(),
+            author: String::new(),
+        };
+        let mine = NoteInfo {
+            author_username: "me".to_string(),
+            body: "erledigt".to_string(),
+            ..NoteInfo::default()
+        };
+        let other = NoteInfo {
+            author_username: "anna".to_string(),
+            body: "bitte prüfen".to_string(),
+            ..NoteInfo::default()
+        };
+        app.on_mr_notes(
+            Some("me".to_string()),
+            vec![NotesJob {
+                event,
+                trigger: None,
+                notes: vec![mine, other],
+            }],
+        );
+        let snap = app.mr_snapshot.as_deref().unwrap();
+        assert_eq!(snap.others[0].activity.new_notes, 1, "nur der fremde");
     }
 }

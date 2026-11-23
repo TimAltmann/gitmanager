@@ -5,17 +5,19 @@ use crate::claude_live::{open_matches_search, LiveStatus, OpenSession};
 use crate::claude_preview::{PreviewItem, PreviewRole};
 use crate::claude_sessions::{claude_projects_dir, session_matches_search, SessionEntry};
 use crate::config::AppConfig;
+use crate::git::SolutionFile;
 use crate::gitlab::time::relative_time;
 use crate::i18n::{tr, tr_fmt, Language};
+use crate::scanner::scan_solutions_for_repo;
 use crate::ui::claude_anim::{
     brighten, format_elapsed, paint_check, paint_pulse_dot, paint_star, seed_of, shimmer_job,
     status_color, verb,
 };
 use crate::ui::search_field::search_field;
 use crate::ui::theme::mr_palette;
-use egui::{FontId, RichText, Ui, Vec2};
+use egui::{FontId, Popup, PopupCloseBehavior, RichText, Ui, Vec2};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
 const ICON_GIT_BRANCH: egui::ImageSource =
@@ -46,6 +48,8 @@ pub struct ClaudeSessionActions {
     pub toggle_preview: Option<String>,
     /// Favorit (Session-ID) setzen bzw. entfernen
     pub toggle_favorite: Option<String>,
+    /// (Repo des Profils, Solution relativ) bevorzugen bzw. nicht mehr
+    pub toggle_favorite_solution: Option<(PathBuf, PathBuf)>,
 }
 
 /// Sichtbare offene Sessions und übrige Sessions (ohne die offenen), jeweils
@@ -598,12 +602,150 @@ fn open_buttons(
     if profile.show_shell && icon_button(ui, icon(ICON_TERMINAL), &tr(lang, "open_in_shell")) {
         actions.shell_open = Some(cwd.clone());
     }
+    let base = o.profile_path.clone().unwrap_or_else(|| repo.clone());
     for ide in profile.visible_ides().iter().take(4).rev() {
         let tooltip = format!("{} {}", tr(lang, "open_in"), ide.display_name);
-        if icon_button(ui, crate::ui::repo_list::ide_image(ide), &tooltip) {
-            actions.ide_open = Some((repo.clone(), ide.id.clone(), repo.clone()));
+        let resp = ui
+            .add(egui::Button::image(crate::ui::repo_list::ide_image(ide)))
+            .on_hover_text(&tooltip);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &tooltip));
+        hover_frame(ui, &resp);
+        let popup_id = Popup::default_response_id(&resp);
+        if resp.clicked() && !Popup::is_id_open(ui.ctx(), popup_id) {
+            // Solutions beim Öffnen einmal suchen (Worktrees scannt der
+            // Repo-Scan nicht)
+            let solutions = if ide.no_args {
+                Vec::new()
+            } else {
+                scan_solutions_for_repo(&repo, profile)
+            };
+            if solutions.is_empty() {
+                actions.ide_open = Some((repo.clone(), ide.id.clone(), repo.clone()));
+                ui.ctx().data_mut(|d| d.remove::<SlnMenu>(popup_id));
+            } else {
+                let menu = SlnMenu::new(solutions, config, &base);
+                ui.ctx().data_mut(|d| d.insert_temp(popup_id, menu));
+            }
+        }
+        let Some(menu) = ui.ctx().data(|d| d.get_temp::<SlnMenu>(popup_id)) else {
+            continue;
+        };
+        Popup::from_toggle_button_response(&resp)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .align(egui::RectAlign::BOTTOM_END)
+            .width(SLN_MENU_WIDTH)
+            .show(|ui| {
+                if let Some(file) = sln_menu_ui(ui, &menu, config, &base, &repo, actions) {
+                    actions.ide_open = Some((repo.clone(), ide.id.clone(), file));
+                    ui.close();
+                }
+            });
+    }
+}
+
+const SLN_MENU_WIDTH: f32 = 320.0;
+
+/// Solutions einer Menüöffnung; `preselected` = Index der vorausgewählten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlnMenu {
+    solutions: Vec<SolutionFile>,
+    preselected: usize,
+}
+
+impl SlnMenu {
+    /// Bevorzugte (Favorit des Repos `base`) zuerst, sonst die auf der
+    /// Repo-Karte gewählte, sonst die erste.
+    fn new(solutions: Vec<SolutionFile>, config: &AppConfig, base: &Path) -> Self {
+        let favorite = config.favorite_solution(base);
+        let selected = config
+            .get_repo_state(base)
+            .and_then(|s| s.selected_solution.as_deref())
+            .and_then(|p| p.strip_prefix(base).ok());
+        let preselected = preselect_solution(&solutions, favorite, selected);
+        Self {
+            solutions,
+            preselected,
         }
     }
+}
+
+/// Index der vorausgewählten Solution: Favorit, sonst `selected` (beide
+/// relativ), sonst die erste.
+fn preselect_solution(
+    solutions: &[SolutionFile],
+    favorite: Option<&Path>,
+    selected: Option<&Path>,
+) -> usize {
+    let find = |rel: Option<&Path>| {
+        let rel = rel?;
+        solutions.iter().position(|s| Path::new(&s.relative) == rel)
+    };
+    find(favorite).or_else(|| find(selected)).unwrap_or(0)
+}
+
+/// Inhalt des Solution-Menüs: je Solution Stern (bevorzugen) und Name,
+/// darunter „Nur Ordner“ (`folder`). Liefert die zu öffnende Datei (Enter:
+/// die vorausgewählte).
+fn sln_menu_ui(
+    ui: &mut Ui,
+    menu: &SlnMenu,
+    config: &AppConfig,
+    base: &Path,
+    folder: &Path,
+    actions: &mut ClaudeSessionActions,
+) -> Option<PathBuf> {
+    let lang = config.language;
+    let favorite = config.favorite_solution(base);
+    let mut chosen = None;
+    egui::ScrollArea::vertical()
+        .max_height(260.0)
+        .show(ui, |ui| {
+            for (i, sln) in menu.solutions.iter().enumerate() {
+                let rel = Path::new(&sln.relative);
+                ui.horizontal(|ui| {
+                    let is_fav = favorite == Some(rel);
+                    let (source, tint, key) = if is_fav {
+                        let p = mr_palette(&config.theme, ui.visuals());
+                        (ICON_STAR_FILL, p.warn_icon, "claude_sln_fav_remove")
+                    } else {
+                        (
+                            ICON_STAR,
+                            ui.visuals().weak_text_color(),
+                            "claude_sln_fav_add",
+                        )
+                    };
+                    let star = egui::Image::new(source)
+                        .fit_to_exact_size(Vec2::splat(14.0))
+                        .tint(tint);
+                    let label = tr(lang, key);
+                    let star = ui
+                        .add(egui::Button::image(star).frame(false))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    star.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label)
+                    });
+                    if star.on_hover_text(&label).clicked() {
+                        actions.toggle_favorite_solution =
+                            Some((base.to_path_buf(), rel.to_path_buf()));
+                    }
+                    let label = ui.selectable_label(i == menu.preselected, &sln.relative);
+                    if label.clicked() {
+                        chosen = Some(sln.path.clone());
+                    }
+                });
+            }
+        });
+    ui.separator();
+    if ui
+        .selectable_label(false, RichText::new(tr(lang, "claude_sln_folder")).weak())
+        .clicked()
+    {
+        chosen = Some(folder.to_path_buf());
+    }
+    if chosen.is_none() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        chosen = menu.solutions.get(menu.preselected).map(|s| s.path.clone());
+    }
+    chosen
 }
 
 /// Offene Session: Rahmen in Statusfarbe, Klick holt das Terminal nach vorne;
@@ -678,6 +820,7 @@ mod tests {
             last_prompt: None,
             git_branch: None,
             last_activity: 1,
+            work_dirs: Vec::new(),
         }
     }
 
@@ -989,6 +1132,106 @@ mod tests {
         });
         assert_eq!(actions.explorer_open, Some(PathBuf::from("C:\\a1")));
         assert_eq!(actions.focus, None);
+    }
+
+    fn sln(rel: &str) -> SolutionFile {
+        SolutionFile {
+            path: PathBuf::from("/r").join(rel),
+            relative: rel.to_string(),
+        }
+    }
+
+    #[test]
+    fn preselect_prefers_favorite_then_card_choice_then_first() {
+        let list = [sln("a.sln"), sln("sub/b.sln"), sln("c.sln")];
+        let b = Path::new("sub/b.sln");
+        let c = Path::new("c.sln");
+        assert_eq!(preselect_solution(&list, Some(b), Some(c)), 1);
+        assert_eq!(preselect_solution(&list, None, Some(c)), 2);
+        // Favorit nicht (mehr) vorhanden: nächste Stufe
+        let gone = Path::new("weg.sln");
+        assert_eq!(preselect_solution(&list, Some(gone), Some(c)), 2);
+        assert_eq!(preselect_solution(&list, Some(gone), None), 0);
+    }
+
+    #[test]
+    fn sln_menu_uses_favorite_of_base_repo() {
+        let mut config = AppConfig::default();
+        let base = Path::new("/r");
+        config.get_repo_state_mut(base).selected_solution = Some(PathBuf::from("/r/a.sln"));
+        let list = vec![sln("a.sln"), sln("sub/b.sln")];
+        assert_eq!(SlnMenu::new(list.clone(), &config, base).preselected, 0);
+        config.toggle_favorite_solution(base, Path::new("sub/b.sln"));
+        assert_eq!(SlnMenu::new(list, &config, base).preselected, 1);
+    }
+
+    fn ide_tooltip(config: &AppConfig) -> (String, String) {
+        let ide = &config.get_active_profile().visible_ides()[0];
+        let tooltip = format!("{} {}", tr(config.language, "open_in"), ide.display_name);
+        (tooltip, ide.id.clone())
+    }
+
+    #[test]
+    fn ide_button_opens_solution_menu_instead_of_ide() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.sln"), "").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("b.sln"), "").unwrap();
+        let mut o = open(3, "a1", "Titel", LiveStatus::Idle);
+        o.repo_path = Some(dir.path().to_path_buf());
+        let config = AppConfig::default();
+        let (tooltip, _) = ide_tooltip(&config);
+        let (actions, labels) = click_label(&tooltip, |ui, a| {
+            show_open_card(ui, &o, &config, 0, Preview::Collapsed, a);
+        });
+        assert_eq!(actions.ide_open, None, "erst wählen");
+        assert_eq!(actions.focus, None);
+        let b = PathBuf::from("sub").join("b.sln").display().to_string();
+        assert!(labels.contains(&"a.sln".to_string()), "{labels:?}");
+        assert!(labels.contains(&b), "{labels:?}");
+    }
+
+    #[test]
+    fn ide_button_without_solutions_opens_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = open(3, "a1", "Titel", LiveStatus::Idle);
+        o.repo_path = Some(dir.path().to_path_buf());
+        let config = AppConfig::default();
+        let (tooltip, ide_id) = ide_tooltip(&config);
+        let (actions, _) = click_label(&tooltip, |ui, a| {
+            show_open_card(ui, &o, &config, 0, Preview::Collapsed, a);
+        });
+        let repo = dir.path().to_path_buf();
+        assert_eq!(actions.ide_open, Some((repo.clone(), ide_id, repo)));
+    }
+
+    #[test]
+    fn sln_menu_click_opens_file_and_star_marks_favorite() {
+        let config = AppConfig::default();
+        let menu = SlnMenu {
+            solutions: vec![sln("a.sln"), sln("b.sln")],
+            preselected: 0,
+        };
+        let base = Path::new("/r");
+        let folder = Path::new("/r/wt");
+        let pick = |needle: &str| {
+            let mut chosen = None;
+            let (actions, _) = click_label(needle, |ui, a| {
+                if let Some(f) = sln_menu_ui(ui, &menu, &config, base, folder, a) {
+                    chosen = Some(f);
+                }
+            });
+            (chosen, actions)
+        };
+        assert_eq!(pick("b.sln").0, Some(PathBuf::from("/r/b.sln")));
+        let (chosen, actions) = pick(&tr(config.language, "claude_sln_fav_add"));
+        assert_eq!(chosen, None);
+        assert_eq!(
+            actions.toggle_favorite_solution,
+            Some((base.to_path_buf(), PathBuf::from("a.sln")))
+        );
+        let folder_only = tr(config.language, "claude_sln_folder");
+        assert_eq!(pick(&folder_only).0, Some(folder.to_path_buf()));
     }
 
     #[test]

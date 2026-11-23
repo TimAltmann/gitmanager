@@ -25,8 +25,14 @@ const TAIL_BYTES: u64 = 64 * 1024;
 pub struct ClaudeSession {
     /// Dateiname ohne `.jsonl` (= Session-ID für `claude --resume`)
     pub id: String,
-    /// Arbeitsordner; Git-Bash-Form (`/c/x`) als Windows-Pfad
+    /// Startordner (erstes `cwd`); nur hier findet `claude --resume` die
+    /// Session. Git-Bash-Form (`/c/x`) als Windows-Pfad
     pub cwd: String,
+    /// Alle Arbeitsordner der Session, zuletzt benutzter zuerst (ohne
+    /// Doppelte). Claude kann die Session in einem Ordner starten und dann in
+    /// einen Worktree wechseln: zugeordnet wird nach diesen Ordnern, leer =
+    /// nur `cwd`.
+    pub work_dirs: Vec<String>,
     /// `custom-title` > `ai-title` > erste Frage > letzter Prompt
     pub title: String,
     pub last_prompt: Option<String>,
@@ -174,7 +180,9 @@ pub(crate) fn parse_session_bytes(
     let tail = String::from_utf8_lossy(tail);
     let tail_lines = tail.split('\n').skip(1);
 
-    let mut cwd = None;
+    let mut cwd: Option<String> = None;
+    // Älteste zuerst, am Ende umgedreht
+    let mut work_dirs: Vec<String> = Vec::new();
     let mut branch = None;
     let mut custom_title = None;
     let mut ai_title = None;
@@ -189,8 +197,14 @@ pub(crate) fn parse_session_bytes(
         let Ok(v) = serde_json::from_str::<Value>(raw) else {
             continue;
         };
-        if cwd.is_none() {
-            cwd = non_empty(&v, "cwd");
+        if let Some(dir) = non_empty(&v, "cwd") {
+            let dir = display_cwd(&dir);
+            if cwd.is_none() {
+                cwd = Some(dir.clone());
+            }
+            let key = path_key(&dir);
+            work_dirs.retain(|d: &String| path_key(d) != key);
+            work_dirs.push(dir);
         }
         if let Some(b) = non_empty(&v, "gitBranch") {
             branch = Some(b);
@@ -217,9 +231,11 @@ pub(crate) fn parse_session_bytes(
         .or(ai_title)
         .or(first_question)
         .or_else(|| last_prompt.clone())?;
+    work_dirs.reverse();
     Some(ClaudeSession {
         id: id.to_string(),
-        cwd: display_cwd(&cwd?),
+        cwd: cwd?,
+        work_dirs,
         title,
         last_prompt,
         git_branch: branch,
@@ -247,10 +263,21 @@ pub struct SessionScan {
     pub all: HashMap<String, ClaudeSession>,
 }
 
-/// Ergebnisse je Datei, gültig solange Änderungszeit und Größe gleich sind.
+/// Ergebnis je Datei, gültig solange Änderungszeit und Größe gleich sind.
+#[derive(Debug)]
+struct CachedFile {
+    mtime: i64,
+    len: u64,
+    session: Option<ClaudeSession>,
+    /// Arbeitsordner aus der ganzen Datei (erst gelesen, wenn Kopf und
+    /// Ende keinen Repo-Ordner enthalten)
+    full_work_dirs: Option<Vec<String>>,
+}
+
+/// Ergebnisse je Datei.
 #[derive(Debug, Default)]
 pub struct SessionCache {
-    entries: HashMap<PathBuf, (i64, u64, Option<ClaudeSession>)>,
+    entries: HashMap<PathBuf, CachedFile>,
 }
 
 impl SessionCache {
@@ -274,27 +301,92 @@ pub fn claude_projects_dir() -> Option<PathBuf> {
     projects.is_dir().then_some(projects)
 }
 
-/// Ordnet jede Session dem Repo/Worktree mit dem längsten passenden Pfad zu
-/// (ganze Pfadkomponenten). Sessions ohne Treffer oder mit fehlendem Ordner
-/// (`exists`) fallen weg. Neueste zuerst.
+impl ClaudeSession {
+    /// Arbeitsordner für die Zuordnung (`work_dirs`, sonst der Startordner).
+    fn dirs(&self) -> &[String] {
+        if self.work_dirs.is_empty() {
+            std::slice::from_ref(&self.cwd)
+        } else {
+            &self.work_dirs
+        }
+    }
+}
+
+/// Findet zu einem Ordner das Repo mit dem längsten passenden Pfad (ganze
+/// Pfadkomponenten).
+struct RepoMatcher {
+    keys: Vec<String>,
+}
+
+impl RepoMatcher {
+    fn new(repos: &[RepoInfo]) -> Self {
+        Self {
+            keys: repos
+                .iter()
+                .map(|r| path_key(&r.path.to_string_lossy()))
+                .collect(),
+        }
+    }
+
+    /// Index in `repos`
+    fn repo_for(&self, dir: &str) -> Option<usize> {
+        let key = path_key(dir);
+        self.keys
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| key == **k || key.starts_with(&format!("{k}/")))
+            .max_by_key(|(_, k)| k.len())
+            .map(|(i, _)| i)
+    }
+}
+
+/// Alle `cwd`-Werte der ganzen Datei, zuletzt benutzter zuerst, ohne
+/// Doppelte. Sucht nur nach `"cwd":"` statt jede Zeile zu parsen.
+fn read_work_dirs(path: &Path) -> Option<Vec<String>> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(work_dirs_in(&bytes))
+}
+
+pub(crate) fn work_dirs_in(bytes: &[u8]) -> Vec<String> {
+    const NEEDLE: &[u8] = b"\"cwd\":";
+    let mut dirs: Vec<String> = Vec::new();
+    let mut pos = 0;
+    while let Some(off) = bytes[pos..].windows(NEEDLE.len()).position(|w| w == NEEDLE) {
+        let start = pos + off + NEEDLE.len();
+        pos = start;
+        let value = serde_json::Deserializer::from_slice(&bytes[start..])
+            .into_iter::<String>()
+            .next()
+            .and_then(Result::ok);
+        let Some(dir) = value.map(|v| one_line(&v)).filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        let dir = display_cwd(&dir);
+        let key = path_key(&dir);
+        dirs.retain(|d| path_key(d) != key);
+        dirs.push(dir);
+    }
+    dirs.reverse();
+    dirs
+}
+
+/// Ordnet jede Session dem Repo/Worktree zu: der zuletzt benutzte
+/// Arbeitsordner (`work_dirs`), der in einem Repo liegt und noch existiert;
+/// je Ordner gewinnt der längste passende Repo-Pfad (ganze
+/// Pfadkomponenten). Sessions ohne Treffer oder ohne Startordner (`exists`,
+/// nötig für `--resume`) fallen weg. Neueste zuerst.
 pub fn assign_to_repos(
     sessions: Vec<ClaudeSession>,
     repos: &[RepoInfo],
     exists: impl Fn(&str) -> bool,
 ) -> Vec<SessionEntry> {
-    let keys: Vec<String> = repos
-        .iter()
-        .map(|r| path_key(&r.path.to_string_lossy()))
-        .collect();
+    let matcher = RepoMatcher::new(repos);
     let mut entries = Vec::new();
     for session in sessions {
-        let key = path_key(&session.cwd);
-        let best = keys
+        let best = session
+            .dirs()
             .iter()
-            .enumerate()
-            .filter(|(_, k)| key == **k || key.starts_with(&format!("{k}/")))
-            .max_by_key(|(_, k)| k.len())
-            .map(|(i, _)| i);
+            .find_map(|d| matcher.repo_for(d).filter(|_| exists(d)));
         let Some(i) = best else { continue };
         if !exists(&session.cwd) {
             continue;
@@ -350,6 +442,8 @@ pub fn scan_sessions(
 ) -> SessionScan {
     let mut seen = HashSet::new();
     let mut sessions = Vec::new();
+    let targets = session_targets(repos);
+    let matcher = RepoMatcher::new(&targets);
     let project_dirs = std::fs::read_dir(projects_dir)
         .into_iter()
         .flatten()
@@ -375,21 +469,42 @@ pub fn scan_sessions(
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_secs() as i64);
             let len = meta.len();
-            let parsed = match cache.entries.get(&path) {
-                Some((m, l, s)) if *m == mtime && *l == len => s.clone(),
-                _ => {
-                    let s = parse_session(&path);
-                    cache.entries.insert(path.clone(), (mtime, len, s.clone()));
-                    s
-                }
+            let fresh = cache
+                .entries
+                .get(&path)
+                .is_some_and(|c| c.mtime == mtime && c.len == len);
+            if !fresh {
+                let file = CachedFile {
+                    mtime,
+                    len,
+                    session: parse_session(&path),
+                    full_work_dirs: None,
+                };
+                cache.entries.insert(path.clone(), file);
+            }
+            let Some(cached) = cache.entries.get_mut(&path) else {
+                continue;
             };
-            seen.insert(path);
-            sessions.extend(parsed);
+            seen.insert(path.clone());
+            let Some(mut session) = cached.session.clone() else {
+                continue;
+            };
+            // Kopf und Ende liegen außerhalb aller Repos (z. B. gestartet in
+            // `C:\Code\worktrees`, gearbeitet im Worktree): die ganze Datei
+            // nach Arbeitsordnern durchsuchen
+            if !session.dirs().iter().any(|d| matcher.repo_for(d).is_some()) {
+                let full = cached
+                    .full_work_dirs
+                    .get_or_insert_with(|| read_work_dirs(&path).unwrap_or_default());
+                if !full.is_empty() {
+                    session.work_dirs = full.clone();
+                }
+            }
+            sessions.push(session);
         }
     }
     cache.entries.retain(|p, _| seen.contains(p));
     let all = sessions.iter().map(|s| (s.id.clone(), s.clone())).collect();
-    let targets = session_targets(repos);
     let entries = assign_to_repos(sessions, &targets, |p| Path::new(p).exists());
     SessionScan { entries, all }
 }
@@ -620,6 +735,7 @@ mod tests {
             last_prompt: None,
             git_branch: None,
             last_activity: t,
+            work_dirs: Vec::new(),
         }
     }
 
@@ -698,6 +814,125 @@ mod tests {
         );
         let ids: Vec<&str> = entries.iter().map(|e| e.session.id.as_str()).collect();
         assert_eq!(ids, ["b1", "a2", "a1"]);
+    }
+
+    #[test]
+    fn parse_collects_work_dirs_newest_first() {
+        // Gestartet im Worktree-Ordner, dann in den Worktree gewechselt und
+        // am Ende wieder zurück (wie Claudes eigener Worktree-Ablauf)
+        let text = user("C:\\Code\\worktrees", "Worktree für SW-1 anlegen")
+            + &line(json!({"type":"assistant","cwd":"C:\\Code\\worktrees\\app-SW-1"}))
+            + &line(json!({"type":"assistant","cwd":"/c/Code/worktrees/app-SW-1/lib"}))
+            + &line(json!({"type":"assistant","cwd":"C:\\Code\\worktrees\\app-SW-1"}))
+            + &line(json!({"type":"assistant","cwd":"C:\\Code\\worktrees"}));
+        let s = parse(&text).unwrap();
+        assert_eq!(
+            s.cwd, "C:\\Code\\worktrees",
+            "Startordner bleibt für --resume"
+        );
+        let expected_lib = display_cwd("/c/Code/worktrees/app-SW-1/lib");
+        assert_eq!(
+            s.work_dirs,
+            [
+                "C:\\Code\\worktrees",
+                "C:\\Code\\worktrees\\app-SW-1",
+                expected_lib.as_str(),
+            ]
+        );
+    }
+
+    #[test]
+    fn assign_uses_newest_work_dir_inside_a_repo() {
+        let mut s = session("a", "C:\\Code\\worktrees", 1);
+        s.work_dirs = vec![
+            "C:\\Code\\worktrees".to_string(),
+            "C:\\Code\\worktrees\\app-SW-1\\lib".to_string(),
+            "C:\\Code\\worktrees\\app-SW-2".to_string(),
+        ];
+        let entries = assign_to_repos(
+            vec![s],
+            &[
+                repo("C:\\Code\\worktrees\\app-SW-1", "app-SW-1", true),
+                repo("C:\\Code\\worktrees\\app-SW-2", "app-SW-2", true),
+            ],
+            all,
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].repo_name, "app-SW-1");
+        assert_eq!(
+            entries[0].session.cwd, "C:\\Code\\worktrees",
+            "Fortsetzen weiter im Startordner"
+        );
+    }
+
+    #[test]
+    fn assign_skips_missing_work_dirs_and_needs_launch_dir() {
+        let mut s = session("a", "C:\\Code\\worktrees", 1);
+        s.work_dirs = vec![
+            "C:\\Code\\worktrees\\weg".to_string(),
+            "C:\\Code\\worktrees\\da".to_string(),
+        ];
+        let repos = [
+            repo("C:\\Code\\worktrees\\weg", "weg", true),
+            repo("C:\\Code\\worktrees\\da", "da", true),
+        ];
+        let entries = assign_to_repos(vec![s.clone()], &repos, |p| !p.ends_with("weg"));
+        assert_eq!(entries[0].repo_name, "da");
+        // Ohne Startordner lässt sich nichts fortsetzen
+        let entries = assign_to_repos(vec![s], &repos, |p| p != "C:\\Code\\worktrees");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn work_dirs_in_finds_all_cwds_newest_first() {
+        let text = user("C:\\Code\\worktrees", "x")
+            + &line(json!({"type":"assistant","cwd":"C:\\Code\\worktrees\\app \"q\""}))
+            + &line(json!({"type":"assistant","cwd":""}))
+            + &line(json!({"type":"assistant","cwd":"C:\\Code\\worktrees"}))
+            + "{\"cwd\":\"abgeschnit";
+        assert_eq!(
+            work_dirs_in(text.as_bytes()),
+            ["C:\\Code\\worktrees", "C:\\Code\\worktrees\\app \"q\""]
+        );
+    }
+
+    /// Wie „SW-7561 journale“: Start und Ende im Worktree-Ordner, der
+    /// Worktree steht nur in der Mitte der großen Datei.
+    #[test]
+    fn scan_reads_whole_file_when_head_and_tail_miss_repos() {
+        let projects = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let wt = base.path().join("app-SW-1");
+        std::fs::create_dir(&wt).unwrap();
+        let base_s = base.path().to_string_lossy().into_owned();
+        let filler = line(json!({"type":"assistant","cwd":base_s,
+            "message":{"content":"x".repeat(1000)}}));
+        let mut text = user(&base_s, "Worktree anlegen");
+        while text.len() < 400 * 1024 {
+            text.push_str(&filler);
+        }
+        text.push_str(&line(
+            json!({"type":"assistant","cwd":wt.to_string_lossy()}),
+        ));
+        while text.len() < 800 * 1024 {
+            text.push_str(&filler);
+        }
+        let dir = projects.path().join("C--base");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("s1.jsonl"), text).unwrap();
+        let repos = [repo(&wt.to_string_lossy(), "app-SW-1", true)];
+        let mut cache = SessionCache::default();
+
+        let scan = scan_sessions(projects.path(), &repos, &mut cache);
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].repo_name, "app-SW-1");
+        assert_eq!(
+            scan.entries[0].session.cwd, base_s,
+            "Fortsetzen im Startordner"
+        );
+        // Zweiter Scan aus dem Cache: gleiches Ergebnis
+        let again = scan_sessions(projects.path(), &repos, &mut cache);
+        assert_eq!(again.entries, scan.entries);
     }
 
     fn write_session(dir: &Path, rel: &str, cwd: &Path) {

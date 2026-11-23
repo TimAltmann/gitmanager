@@ -3373,9 +3373,11 @@ mod tests {
 
     #[test]
     fn settings_state_empty_profiles_agents() {
-        let mut cfg = AppConfig::default();
-        cfg.profiles = vec![];
-        cfg.agents = vec![];
+        let cfg = AppConfig {
+            profiles: vec![],
+            agents: vec![],
+            ..Default::default()
+        };
         let state = SettingsState::from_config(&cfg);
         assert_eq!(state.selected_profile_idx, None);
         assert_eq!(state.selected_agent_idx, None);
@@ -3487,8 +3489,10 @@ mod tests {
 
     #[test]
     fn settings_validation_empty_profiles_error() {
-        let mut cfg = AppConfig::default();
-        cfg.profiles = vec![];
+        let cfg = AppConfig {
+            profiles: vec![],
+            ..Default::default()
+        };
         let mut state = SettingsState::from_config(&cfg);
         state.draft.profiles = vec![];
         if state.draft.profiles.is_empty() {
@@ -3802,7 +3806,7 @@ mod tests {
         let cfg = AppConfig::default();
         let mut state = SettingsState::from_config(&cfg);
         let profile = &mut state.draft.profiles[0];
-        assert!(profile.ides.len() >= 1);
+        assert!(!profile.ides.is_empty());
         let before = profile.ides.len();
         profile.ides.push(IdeConfig {
             id: "newide".to_string(),

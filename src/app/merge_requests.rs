@@ -27,8 +27,8 @@ use crate::ui::merge_requests::{show_merge_requests, MrViewActions, MrViewInput}
 use crate::ui::settings::SettingsState;
 use crate::ui::theme::mr_palette;
 use egui::{
-    vec2, Align2, Atom, Atoms, Button, FontId, Frame, Id, Image, ImageSource, Response, RichText,
-    Stroke, Ui, WidgetInfo, WidgetType,
+    vec2, Align2, Atom, Atoms, Button, Color32, FontId, Frame, Id, Image, ImageSource, Response,
+    RichText, Stroke, Ui, WidgetInfo, WidgetType,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -729,14 +729,21 @@ impl MyApp {
 
                 let claude_on = self.main_view == MainView::ClaudeSessions;
                 let mut atoms = Atoms::new(RichText::new(tr(lang, "view_claude")).size(12.0));
-                // Warten Sessions auf dich: „● n“ in Blau statt der Gesamtzahl
+                // Warten Sessions auf dich: blaues Badge wie bei den MRs statt
+                // der Gesamtzahl. Gemalt statt „● n“: ● zeichnet die
+                // egui-Standardschrift als Quadrat.
                 let waiting = self.claude.waiting_count();
-                if waiting > 0 {
-                    atoms.push_right(
-                        RichText::new(format!("● {waiting}"))
-                            .size(11.0)
-                            .color(crate::ui::claude_anim::COLOR_WAITING),
-                    );
+                let claude_badge_id = Id::new("claude_view_badge");
+                let waiting_galley = (waiting > 0).then(|| {
+                    ui.painter().layout_no_wrap(
+                        waiting.to_string(),
+                        FontId::proportional(10.0),
+                        Color32::WHITE,
+                    )
+                });
+                if let Some(galley) = &waiting_galley {
+                    let width = (galley.size().x + 10.0).max(18.0);
+                    atoms.push_right(Atom::custom(claude_badge_id, vec2(width, 16.0)));
                 } else if self.claude.scanned_once {
                     let mut count =
                         RichText::new(self.claude.session_count().to_string()).size(11.0);
@@ -745,7 +752,16 @@ impl MyApp {
                     }
                     atoms.push_right(count);
                 }
-                let response = ui.add(segment(claude_on, atoms));
+                let out = segment(claude_on, atoms).atom_ui(ui);
+                if let (Some(galley), Some(rect)) = (waiting_galley, out.rect(claude_badge_id)) {
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 8.0, crate::ui::claude_anim::COLOR_WAITING);
+                    let pos = Align2::CENTER_CENTER
+                        .anchor_size(rect.center(), galley.size())
+                        .min;
+                    painter.galley(pos, galley, Color32::WHITE);
+                }
+                let response = out.response;
                 let name = tr(lang, "view_claude");
                 response.widget_info(|| {
                     WidgetInfo::selected(WidgetType::Button, true, claude_on, &name)
@@ -826,6 +842,11 @@ impl MyApp {
         }
         if let Some(focus) = self.mr_view.focus.as_mut() {
             if actions.focus_drawn {
+                if !focus.scrolled {
+                    // Hervorhebung ab dem ersten Zeichnen: kommt das Fenster
+                    // erst aus dem Tray, wäre sie sonst schon halb vorbei
+                    focus.since = Instant::now();
+                }
                 focus.scrolled = true;
             } else if !focus.scrolled {
                 // Zeile im ersten Frame nicht gezeichnet (gefiltert, nicht
@@ -841,6 +862,10 @@ impl MyApp {
         let Some(focus) = self.mr_view.focus.as_ref() else {
             return;
         };
+        // Noch nicht gezeichnet: die Zeit läuft erst ab dem ersten Zeichnen
+        if !focus.scrolled {
+            return;
+        }
         match super::mr_checkout::HIGHLIGHT_DURATION.checked_sub(focus.since.elapsed()) {
             Some(left) => ctx.request_repaint_after(left),
             None => self.mr_view.focus = None,
@@ -2226,12 +2251,14 @@ pub(super) mod tests {
             // GitLab.com-SSH über Port 443: gitlab.com mit prüfen
             repo("f", "ssh://git@altssh.gitlab.com:443/group/f.git"),
         ];
-        let mut cfg = MrConfig::default();
-        cfg.extra_hosts = vec![" Git.Intern.Example ".to_string()];
-        cfg.host_aliases = vec![crate::config::HostAlias {
-            from: "ssh.example.com".to_string(),
-            to: "gitlab.example.com:8443".to_string(),
-        }];
+        let cfg = MrConfig {
+            extra_hosts: vec![" Git.Intern.Example ".to_string()],
+            host_aliases: vec![crate::config::HostAlias {
+                from: "ssh.example.com".to_string(),
+                to: "gitlab.example.com:8443".to_string(),
+            }],
+            ..Default::default()
+        };
         assert_eq!(
             discovery_candidates(&repos, &cfg),
             vec![
@@ -2342,7 +2369,7 @@ pub(super) mod tests {
                     let row = assert_top_bar_row_fits(&mut app, width, &case);
                     let caption = tr(lang, "profile_label");
                     assert_eq!(
-                        row.iter().any(|name| *name == caption),
+                        row.contains(&caption),
                         width >= TOP_BAR_CAPTIONS_WIDTH,
                         "{case}: Beschriftung {caption} {row:?}"
                     );

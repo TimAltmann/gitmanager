@@ -346,6 +346,19 @@ mod tests {
         app
     }
 
+    /// Aus dem Tray: zwischen Klick und erstem Zeichnen kann Zeit vergehen
+    #[test]
+    fn focus_highlight_starts_when_first_drawn() {
+        let mut app = app_with_mr_snapshot();
+        let ctx = egui::Context::default();
+        app.focus_mr(HOST, "gid://gitlab/MergeRequest/1");
+        let past = std::time::Instant::now() - crate::app::mr_checkout::HIGHLIGHT_DURATION;
+        app.mr_view.focus.as_mut().expect("focus").since = past;
+        render(&mut app, &ctx);
+        let focus = app.mr_view.focus.as_ref().expect("noch hervorgehoben");
+        assert!(focus.since > past);
+    }
+
     #[test]
     fn focus_survives_frames_then_expires() {
         let mut app = app_with_mr_snapshot();

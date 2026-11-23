@@ -1155,8 +1155,8 @@ mod tests {
         let _ = ide_icon_for("unknown");
         let vscode = ide_icon_for("vscode");
         let unknown = ide_icon_for("unknown_id_xyz");
-        assert!(format!("{:?}", vscode).len() > 0);
-        assert!(format!("{:?}", unknown).len() > 0);
+        assert!(!format!("{:?}", vscode).is_empty());
+        assert!(!format!("{:?}", unknown).is_empty());
     }
 
     #[test]
@@ -1168,8 +1168,8 @@ mod tests {
         }
         let claude = agent_icon_for("claude");
         let unknown = agent_icon_for("unknown_xyz");
-        assert!(format!("{:?}", claude).len() > 0);
-        assert!(format!("{:?}", unknown).len() > 0);
+        assert!(!format!("{:?}", claude).is_empty());
+        assert!(!format!("{:?}", unknown).is_empty());
     }
 
     #[test]
@@ -1279,7 +1279,7 @@ mod tests {
             format!("Keine {}", profile.file_extension)
         };
         assert_eq!(text_no_selection, "first.sln");
-        let branches = vec!["main".to_string(), "feature/xyz".to_string()];
+        let branches = ["main".to_string(), "feature/xyz".to_string()];
         let filter = "feat".to_lowercase();
         let filtered: Vec<_> = branches
             .iter()
@@ -1829,9 +1829,20 @@ mod tests {
         cx: &RepoListContext,
         clicks: &[&str],
     ) -> (Vec<RepoListActions>, Vec<String>) {
+        drive_width(1400.0, repos, config, cx, clicks)
+    }
+
+    /// Wie [`drive`] mit Fensterbreite `width`.
+    fn drive_width(
+        width: f32,
+        repos: &mut [RepoInfo],
+        config: &AppConfig,
+        cx: &RepoListContext,
+        clicks: &[&str],
+    ) -> (Vec<RepoListActions>, Vec<String>) {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
-        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 700.0));
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 700.0));
         let mut pending: std::collections::VecDeque<&str> = clicks.iter().copied().collect();
         let mut target: Option<egui::Pos2> = None;
         // Erst klicken, wenn der Knoten zwei Frames an derselben Stelle
@@ -2008,28 +2019,54 @@ mod tests {
     }
 
     #[test]
-    fn only_one_ide_button_visible() {
+    fn ide_buttons_side_by_side_and_into_menu_when_narrow() {
         let mut config = card_config();
         let mut repos = one_repo();
-        let open_in = tr(config.language, "open_in");
-        let ide_labels: Vec<String> = config.profiles[0]
-            .ides
+        let lang = config.language;
+        let open_in = tr(lang, "open_in");
+        let names: Vec<String> = config.profiles[0]
+            .visible_ides()
             .iter()
-            .map(|i| format!("{open_in} {}", i.display_name))
+            .map(|i| i.display_name.clone())
             .collect();
-        let count = |labels: &[String]| -> Vec<String> {
-            labels
+        let on_card = |labels: &[String]| -> Vec<String> {
+            names
                 .iter()
-                .filter(|l| ide_labels.contains(l))
+                .filter(|n| labels.contains(&format!("{open_in} {n}")))
                 .cloned()
                 .collect()
         };
+        // Breites Fenster: alle IDEs als Icons, Klick öffnet
         let (_, labels) = drive(&mut repos, &config, &RepoListContext::empty(), &[]);
-        assert_eq!(count(&labels), [format!("{open_in} Visual Studio")]);
-        // Gemerkte Wahl gewinnt
+        assert_eq!(on_card(&labels), names, "{labels:?}");
+        let vs = format!("{open_in} Visual Studio");
+        let (all, _) = drive(&mut repos, &config, &RepoListContext::empty(), &[&vs]);
+        assert!(all
+            .iter()
+            .any(|a| matches!(&a.ide_open, Some((_, id, _)) if id == "vs2022")));
+
+        // Schmales Fenster: nur die gemerkte IDE, der Rest im Menü
         config.get_repo_state_mut(&repos[0].path).selected_ide = Some("rider".into());
-        let (_, labels) = drive(&mut repos, &config, &RepoListContext::empty(), &[]);
-        assert_eq!(count(&labels), [format!("{open_in} Rider")]);
+        let more = tr(lang, "repo_more");
+        let (_, labels) = drive_width(
+            420.0,
+            &mut repos,
+            &config,
+            &RepoListContext::empty(),
+            &[&more],
+        );
+        assert_eq!(on_card(&labels), ["Rider"], "{labels:?}");
+        assert!(labels.contains(&"Visual Studio".to_string()), "{labels:?}");
+        let (all, _) = drive_width(
+            420.0,
+            &mut repos,
+            &config,
+            &RepoListContext::empty(),
+            &[&more, "Visual Studio"],
+        );
+        assert!(all
+            .iter()
+            .any(|a| matches!(&a.ide_open, Some((_, id, _)) if id == "vs2022")));
     }
 
     #[test]

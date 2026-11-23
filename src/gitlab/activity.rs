@@ -199,11 +199,12 @@ impl MrActivityStore {
         *mark != before
     }
 
-    /// Kommentare bis `count` als gesehen (alle neuen sind meine eigenen).
-    pub fn mark_notes_seen(&mut self, host_key: &str, id: &str, count: u32) -> bool {
+    /// `own` neue Kommentare sind meine eigenen: sie zählen nicht als neu.
+    /// Höchstens bis `count` (Stand des Abrufs).
+    pub fn mark_own_notes_seen(&mut self, host_key: &str, id: &str, own: u32, count: u32) -> bool {
         match self.marks.get_mut(&mr_key(host_key, id)) {
-            Some(mark) if mark.seen_notes < count => {
-                mark.seen_notes = count;
+            Some(mark) if own > 0 && mark.seen_notes < count => {
+                mark.seen_notes = (mark.seen_notes + own).min(count);
                 true
             }
             _ => false,
@@ -318,6 +319,21 @@ pub fn others_notes<'a>(notes: &'a [NoteInfo], added: u32, me: Option<&str>) -> 
         .skip(skip)
         .filter(|n| me.is_none_or(|me| !n.author_username.eq_ignore_ascii_case(me)))
         .collect()
+}
+
+/// Wie viele der `added` neuesten Nutzer-Kommentare von `me` stammen
+/// (ohne bekannten Benutzer: keiner).
+pub fn own_notes(notes: &[NoteInfo], added: u32, me: Option<&str>) -> u32 {
+    let Some(me) = me.filter(|m| !m.is_empty()) else {
+        return 0;
+    };
+    let user_notes: Vec<&NoteInfo> = notes.iter().filter(|n| !n.system).collect();
+    let skip = user_notes.len().saturating_sub(added as usize);
+    user_notes
+        .into_iter()
+        .skip(skip)
+        .filter(|n| n.author_username.eq_ignore_ascii_case(me))
+        .count() as u32
 }
 
 /// Kommentar einzeilig und gekürzt für die Benachrichtigung.
@@ -488,13 +504,16 @@ mod tests {
     }
 
     #[test]
-    fn mark_notes_seen_only_raises() {
+    fn own_notes_seen_skips_mine_and_caps() {
         let mut store = MrActivityStore::default();
         store.observe(&snap(vec![mr("a", 1, 1, "x")], vec![]), 100);
-        store.observe(&snap(vec![mr("a", 3, 1, "x")], vec![]), 200);
-        assert!(store.mark_notes_seen("gitlab.example.com", "a", 3));
-        assert!(!store.mark_notes_seen("gitlab.example.com", "a", 2));
-        assert_eq!(store.activity(&mr("a", 3, 1, "x")).new_notes, 0);
+        store.observe(&snap(vec![mr("a", 4, 1, "x")], vec![]), 200);
+        // 3 neu, davon 1 meiner: 2 bleiben neu
+        assert!(store.mark_own_notes_seen("gitlab.example.com", "a", 1, 4));
+        assert_eq!(store.activity(&mr("a", 4, 1, "x")).new_notes, 2);
+        assert!(!store.mark_own_notes_seen("gitlab.example.com", "a", 0, 4));
+        assert!(store.mark_own_notes_seen("gitlab.example.com", "a", 9, 4));
+        assert_eq!(store.activity(&mr("a", 4, 1, "x")).new_notes, 0);
     }
 
     #[test]
@@ -530,6 +549,19 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].body, "bitte prüfen");
         assert!(others_notes(&notes[..3], 1, Some("me")).is_empty());
+    }
+
+    #[test]
+    fn own_notes_counts_mine_among_new() {
+        let notes = [
+            note("me", "alt", false),
+            note("me", "meins", false),
+            note("bot", "added 1 commit", true),
+            note("anna", "bitte prüfen", false),
+        ];
+        assert_eq!(own_notes(&notes, 2, Some("ME")), 1);
+        assert_eq!(own_notes(&notes, 3, Some("me")), 2);
+        assert_eq!(own_notes(&notes, 2, None), 0);
     }
 
     #[test]

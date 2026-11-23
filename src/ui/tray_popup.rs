@@ -1345,8 +1345,10 @@ mod tests {
             assert!(needs_root_repaint(&a), "Action {i}");
         }
         assert!(!needs_root_repaint(&TrayPopupActions::default()));
-        let mut a = TrayPopupActions::default();
-        a.close_popup = true;
+        let a = TrayPopupActions {
+            close_popup: true,
+            ..Default::default()
+        };
         assert!(!needs_root_repaint(&a));
     }
 
@@ -1360,41 +1362,55 @@ mod tests {
         a.branch_switch = Some((std::path::PathBuf::from("/tmp/r"), "main".into()));
         assert!(!should_close_tray_popup(&a));
 
-        let mut a = TrayPopupActions::default();
-        a.solution_select = Some((
-            std::path::PathBuf::from("/tmp/r"),
-            std::path::PathBuf::from("/tmp/r/a.sln"),
-        ));
+        let a = TrayPopupActions {
+            solution_select: Some((
+                std::path::PathBuf::from("/tmp/r"),
+                std::path::PathBuf::from("/tmp/r/a.sln"),
+            )),
+            ..Default::default()
+        };
         assert!(!should_close_tray_popup(&a));
 
-        let mut a = TrayPopupActions::default();
-        a.refresh = true;
+        let a = TrayPopupActions {
+            refresh: true,
+            ..Default::default()
+        };
         assert!(!should_close_tray_popup(&a));
 
         // Fetch im Tray: Popup bleibt offen (Branches danach wählen)
-        let mut a = TrayPopupActions::default();
-        a.fetch_repo = Some(std::path::PathBuf::from("/tmp/r"));
+        let a = TrayPopupActions {
+            fetch_repo: Some(std::path::PathBuf::from("/tmp/r")),
+            ..Default::default()
+        };
         assert!(!should_close_tray_popup(&a));
 
-        let mut a = TrayPopupActions::default();
-        a.close_popup = true;
+        let a = TrayPopupActions {
+            close_popup: true,
+            ..Default::default()
+        };
         assert!(should_close_tray_popup(&a));
 
-        let mut a = TrayPopupActions::default();
-        a.open_main = true;
+        let a = TrayPopupActions {
+            open_main: true,
+            ..Default::default()
+        };
         assert!(should_close_tray_popup(&a));
 
-        let mut a = TrayPopupActions::default();
-        a.ide_open = Some((
-            std::path::PathBuf::from("/tmp/r"),
-            "vscode".into(),
-            std::path::PathBuf::from("/tmp/r/a.sln"),
-        ));
+        let a = TrayPopupActions {
+            ide_open: Some((
+                std::path::PathBuf::from("/tmp/r"),
+                "vscode".into(),
+                std::path::PathBuf::from("/tmp/r/a.sln"),
+            )),
+            ..Default::default()
+        };
         assert!(should_close_tray_popup(&a));
 
         // E21: „Merge Requests“ öffnet das Hauptfenster → Popup schließt.
-        let mut a = TrayPopupActions::default();
-        a.open_mrs = true;
+        let a = TrayPopupActions {
+            open_mrs: true,
+            ..Default::default()
+        };
         assert!(should_close_tray_popup(&a));
     }
 
@@ -1487,8 +1503,10 @@ mod tests {
     ) -> Vec<(String, egui::Rect)> {
         use egui::accesskit::Role;
         let ctx = egui::Context::default();
-        let mut config = AppConfig::default();
-        config.language = lang;
+        let config = AppConfig {
+            language: lang,
+            ..Default::default()
+        };
         crate::ui::theme::apply_theme(&ctx, &config.theme);
         egui_extras::install_image_loaders(&ctx);
         ctx.enable_accesskit();
