@@ -1,50 +1,14 @@
 use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt, Language};
+use crate::ui::icons::{
+    agent_icon_for, ide_icon_for, ICON_CROSS, ICON_FOLDER, ICON_GEAR,
+    ICON_MR_PULL_REQUEST as ICON_PULL_REQUEST, ICON_REFRESH, ICON_TERMINAL,
+};
 use crate::ui::theme::mr_palette;
 use egui::{AtomLayoutResponse, Color32, RichText, Vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
-
-// Icons reused from repo_list
-const ICON_VSCODE: egui::ImageSource = egui::include_image!("../../assets/icons/vscode.svg");
-const ICON_VS: egui::ImageSource = egui::include_image!("../../assets/icons/visualstudio.svg");
-const ICON_RIDER: egui::ImageSource = egui::include_image!("../../assets/icons/rider.svg");
-const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
-const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
-const ICON_TERMINAL: egui::ImageSource = egui::include_image!("../../assets/icons/terminal.svg");
-const ICON_CODEX: egui::ImageSource = egui::include_image!("../../assets/icons/codex.svg");
-const ICON_GEMINI: egui::ImageSource = egui::include_image!("../../assets/icons/gemini.svg");
-const ICON_COPILOT: egui::ImageSource = egui::include_image!("../../assets/icons/copilot.svg");
-const ICON_CURSOR: egui::ImageSource = egui::include_image!("../../assets/icons/cursor.svg");
-const ICON_AIDER: egui::ImageSource = egui::include_image!("../../assets/icons/aider.svg");
-const ICON_REFRESH: egui::ImageSource = egui::include_image!("../../assets/icons/refresh.svg");
-const ICON_GEAR: egui::ImageSource = egui::include_image!("../../assets/icons/gear.svg");
-const ICON_CROSS: egui::ImageSource = egui::include_image!("../../assets/icons/cross.svg");
-// Phosphor Regular wie in der MR-Ansicht (weiß, `tint` färbt ein)
-const ICON_PULL_REQUEST: egui::ImageSource =
-    egui::include_image!("../../assets/icons/mr/git-pull-request.svg");
-
-fn ide_icon_for(ide_id: &str) -> egui::ImageSource<'static> {
-    match ide_id {
-        "vs2022" | "vs" | "visualstudio" => ICON_VS,
-        "rider" | "jetbrains" => ICON_RIDER,
-        "vscode" => ICON_VSCODE,
-        _ => ICON_VSCODE,
-    }
-}
-
-fn agent_icon_for(agent_id: &str) -> egui::ImageSource<'static> {
-    match agent_id {
-        "claude" => ICON_CLAUDE,
-        "codex" => ICON_CODEX,
-        "gemini" => ICON_GEMINI,
-        "copilot" => ICON_COPILOT,
-        "cursor" => ICON_CURSOR,
-        "aider" => ICON_AIDER,
-        _ => ICON_CLAUDE,
-    }
-}
 
 fn ide_image(ide: &crate::config::IdeConfig) -> egui::Image<'static> {
     if let Some(path) = &ide.icon {

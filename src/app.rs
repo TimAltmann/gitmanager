@@ -39,11 +39,9 @@ const _: () = assert!(DEFAULT_WINDOW_SIZE[0] >= TOP_BAR_COMPACT_WIDTH);
 /// Kleinste Fenstergröße (Punkte, also unabhängig von der Skalierung).
 pub const MIN_WINDOW_SIZE: [f32; 2] = [920.0, 560.0];
 
-const ICON_GEAR: egui::ImageSource = egui::include_image!("../assets/icons/gear.svg");
-const ICON_REFRESH: egui::ImageSource = egui::include_image!("../assets/icons/refresh.svg");
-const ICON_WARNING: egui::ImageSource = egui::include_image!("../assets/icons/warning.svg");
-const ICON_CROSS: egui::ImageSource = egui::include_image!("../assets/icons/cross.svg");
-const ICON_SORT: egui::ImageSource = egui::include_image!("../assets/icons/chevron-down.svg");
+use crate::ui::icons::{
+    ICON_CHEVRON_DOWN as ICON_SORT, ICON_CROSS, ICON_GEAR, ICON_REFRESH, ICON_WARNING,
+};
 
 enum ScanResult {
     Repos(Vec<RepoInfo>),

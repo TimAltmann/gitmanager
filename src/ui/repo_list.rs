@@ -4,33 +4,14 @@ use crate::claude_sessions::matches_words;
 use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt};
+use crate::ui::icons::{
+    agent_icon_for, ide_icon_for, ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CLAUDE, ICON_GIT_BRANCH,
+    ICON_GIT_COMMIT, ICON_PLUS, ICON_REFRESH, ICON_SEARCH, ICON_TRASH,
+};
 use crate::ui::repo_card_chips::{favorite_star, show_bottom_row, show_chip_row};
 use crate::ui::search_field::search_field;
 use egui::{Color32, RichText, Ui, Vec2};
 use std::collections::HashMap;
-
-// Icons via egui include_image! (Simple Icons CC0 + Phosphor for folder)
-const ICON_VSCODE: egui::ImageSource = egui::include_image!("../../assets/icons/vscode.svg");
-const ICON_VS: egui::ImageSource = egui::include_image!("../../assets/icons/visualstudio.svg");
-const ICON_RIDER: egui::ImageSource = egui::include_image!("../../assets/icons/rider.svg");
-const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
-const ICON_CODEX: egui::ImageSource = egui::include_image!("../../assets/icons/codex.svg");
-const ICON_GEMINI: egui::ImageSource = egui::include_image!("../../assets/icons/gemini.svg");
-const ICON_COPILOT: egui::ImageSource = egui::include_image!("../../assets/icons/copilot.svg");
-const ICON_CURSOR: egui::ImageSource = egui::include_image!("../../assets/icons/cursor.svg");
-const ICON_AIDER: egui::ImageSource = egui::include_image!("../../assets/icons/aider.svg");
-const ICON_CHEVRON_DOWN: egui::ImageSource =
-    egui::include_image!("../../assets/icons/chevron-down.svg");
-const ICON_CHEVRON_UP: egui::ImageSource =
-    egui::include_image!("../../assets/icons/chevron-up.svg");
-const ICON_GIT_BRANCH: egui::ImageSource =
-    egui::include_image!("../../assets/icons/git-branch.svg");
-const ICON_GIT_COMMIT: egui::ImageSource =
-    egui::include_image!("../../assets/icons/git-commit.svg");
-const ICON_SEARCH: egui::ImageSource = egui::include_image!("../../assets/icons/search.svg");
-const ICON_REFRESH: egui::ImageSource = egui::include_image!("../../assets/icons/refresh.svg");
-const ICON_TRASH: egui::ImageSource = egui::include_image!("../../assets/icons/trash.svg");
-const ICON_PLUS: egui::ImageSource = egui::include_image!("../../assets/icons/plus.svg");
 
 /// Tooltip-Text für den Branch-Button. Der Rückstand steht im ↓-Chip
 /// (`repo_card_chips::behind_tooltip`).
@@ -39,27 +20,6 @@ pub fn branch_button_tooltip(lang: crate::i18n::Language, branch: &str, detached
         format!("{}: {}", branch, tr(lang, "detached_tooltip"))
     } else {
         format!("{} – {}", branch, tr(lang, "branch_switch_tooltip"))
-    }
-}
-
-fn ide_icon_for(ide_id: &str) -> egui::ImageSource<'static> {
-    match ide_id {
-        "vs2022" | "vs" | "visualstudio" => ICON_VS,
-        "rider" | "jetbrains" => ICON_RIDER,
-        "vscode" => ICON_VSCODE,
-        _ => ICON_VSCODE,
-    }
-}
-
-fn agent_icon_for(agent_id: &str) -> egui::ImageSource<'static> {
-    match agent_id {
-        "claude" => ICON_CLAUDE,
-        "codex" => ICON_CODEX,
-        "gemini" => ICON_GEMINI,
-        "copilot" => ICON_COPILOT,
-        "cursor" => ICON_CURSOR,
-        "aider" => ICON_AIDER,
-        _ => ICON_CLAUDE,
     }
 }
 

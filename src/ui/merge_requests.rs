@@ -38,48 +38,23 @@ use std::path::{Path, PathBuf};
 
 // Icons: Phosphor Regular (MIT), mit `color="#FFFFFF"`, damit `tint` sie
 // einfärbt – resvg rendert `currentColor` sonst schwarz.
-const ICON_CHECK_CIRCLE: ImageSource =
-    egui::include_image!("../../assets/icons/mr/check-circle.svg");
-const ICON_X_CIRCLE: ImageSource = egui::include_image!("../../assets/icons/mr/x-circle.svg");
-const ICON_CIRCLE_NOTCH: ImageSource =
-    egui::include_image!("../../assets/icons/mr/circle-notch.svg");
-const ICON_CLOCK: ImageSource = egui::include_image!("../../assets/icons/mr/clock.svg");
-const ICON_MINUS_CIRCLE: ImageSource =
-    egui::include_image!("../../assets/icons/mr/minus-circle.svg");
-const ICON_PROHIBIT: ImageSource = egui::include_image!("../../assets/icons/mr/prohibit.svg");
-const ICON_SKIP_CIRCLE: ImageSource =
-    egui::include_image!("../../assets/icons/mr/skip-forward-circle.svg");
-const ICON_PLAY_CIRCLE: ImageSource = egui::include_image!("../../assets/icons/mr/play-circle.svg");
-const ICON_CHAT: ImageSource = egui::include_image!("../../assets/icons/mr/chat-circle.svg");
-const ICON_CHAT_DOTS: ImageSource =
-    egui::include_image!("../../assets/icons/mr/chat-circle-dots.svg");
-const ICON_CHAT_CHECK: ImageSource =
-    egui::include_image!("../../assets/icons/mr/chat-circle-check.svg");
-const ICON_CHECK: ImageSource = egui::include_image!("../../assets/icons/mr/check.svg");
-const ICON_ARROW_U: ImageSource = egui::include_image!("../../assets/icons/mr/arrow-u-up-left.svg");
-const ICON_USER: ImageSource = egui::include_image!("../../assets/icons/mr/user.svg");
-const ICON_SORT: ImageSource = egui::include_image!("../../assets/icons/mr/sort-descending.svg");
-const ICON_OPEN_EXTERNAL: ImageSource =
-    egui::include_image!("../../assets/icons/mr/arrow-square-out.svg");
-const ICON_PULL_REQUEST: ImageSource =
-    egui::include_image!("../../assets/icons/mr/git-pull-request.svg");
-const ICON_BRANCH: ImageSource = egui::include_image!("../../assets/icons/mr/git-branch.svg");
-const ICON_TERMINAL: ImageSource =
-    egui::include_image!("../../assets/icons/mr/terminal-window.svg");
-const ICON_LOCK: ImageSource = egui::include_image!("../../assets/icons/mr/lock-simple.svg");
-const ICON_COPY: ImageSource = egui::include_image!("../../assets/icons/mr/copy.svg");
-const ICON_FOLDER_PLUS: ImageSource = egui::include_image!("../../assets/icons/mr/folder-plus.svg");
-const ICON_DOWNLOAD: ImageSource =
-    egui::include_image!("../../assets/icons/mr/download-simple.svg");
-const ICON_DOTS: ImageSource = egui::include_image!("../../assets/icons/mr/dots-three.svg");
-const ICON_FOLDER: ImageSource = egui::include_image!("../../assets/icons/mr/folder.svg");
-const ICON_FOLDER_ARROW: ImageSource =
-    egui::include_image!("../../assets/icons/mr/folder-arrow.svg");
-const ICON_CODE: ImageSource = egui::include_image!("../../assets/icons/mr/code.svg");
-const ICON_SPARKLE: ImageSource = egui::include_image!("../../assets/icons/mr/sparkle.svg");
-const ICON_WARNING: ImageSource = egui::include_image!("../../assets/icons/mr/warning-circle.svg");
-const ICON_SEARCH: ImageSource = egui::include_image!("../../assets/icons/mr/magnifying-glass.svg");
-const ICON_CROSS: ImageSource = egui::include_image!("../../assets/icons/mr/x.svg");
+use crate::ui::icons::{
+    ICON_MR_ARROW_U as ICON_ARROW_U, ICON_MR_BRANCH as ICON_BRANCH,
+    ICON_MR_CHAT as ICON_CHAT, ICON_MR_CHAT_CHECK as ICON_CHAT_CHECK,
+    ICON_MR_CHAT_DOTS as ICON_CHAT_DOTS, ICON_MR_CHECK as ICON_CHECK,
+    ICON_MR_CHECK_CIRCLE as ICON_CHECK_CIRCLE, ICON_MR_CIRCLE_NOTCH as ICON_CIRCLE_NOTCH,
+    ICON_MR_CLOCK as ICON_CLOCK, ICON_MR_CODE as ICON_CODE, ICON_MR_COPY as ICON_COPY,
+    ICON_MR_CROSS as ICON_CROSS, ICON_MR_DOTS as ICON_DOTS,
+    ICON_MR_DOWNLOAD as ICON_DOWNLOAD, ICON_MR_FOLDER as ICON_FOLDER,
+    ICON_MR_FOLDER_ARROW as ICON_FOLDER_ARROW, ICON_MR_FOLDER_PLUS as ICON_FOLDER_PLUS,
+    ICON_MR_LOCK as ICON_LOCK, ICON_MR_MINUS_CIRCLE as ICON_MINUS_CIRCLE,
+    ICON_MR_OPEN_EXTERNAL as ICON_OPEN_EXTERNAL, ICON_MR_PLAY_CIRCLE as ICON_PLAY_CIRCLE,
+    ICON_MR_PROHIBIT as ICON_PROHIBIT, ICON_MR_PULL_REQUEST as ICON_PULL_REQUEST,
+    ICON_MR_SEARCH as ICON_SEARCH, ICON_MR_SKIP_CIRCLE as ICON_SKIP_CIRCLE,
+    ICON_MR_SORT as ICON_SORT, ICON_MR_SPARKLE as ICON_SPARKLE,
+    ICON_MR_TERMINAL as ICON_TERMINAL, ICON_MR_USER as ICON_USER,
+    ICON_MR_WARNING as ICON_WARNING, ICON_MR_X_CIRCLE as ICON_X_CIRCLE,
+};
 
 /// Mindestbreite einer Spalte: zwei Spalten ab 2 × 420 + 12 = 852 px
 /// Inhaltsbreite (E8), damit B beim Mindestfenster zweispaltig bleibt.

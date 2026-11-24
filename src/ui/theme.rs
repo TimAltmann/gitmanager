@@ -92,6 +92,8 @@ pub fn apply_theme(ctx: &egui::Context, theme: &Theme) {
 
 pub const COLOR_DIRTY: Color32 = Color32::from_rgb(220, 70, 40);
 pub const COLOR_CLEAN: Color32 = Color32::from_rgb(60, 160, 80);
+pub const COLOR_ORANGE: Color32 = Color32::from_rgb(220, 130, 40);
+pub const COLOR_RED: Color32 = Color32::from_rgb(200, 60, 60);
 
 /// Farben der Merge-Request-Ansicht (E14), je Theme eigene Werte. Text-
 /// varianten halten ≥ 4.5:1, Icon-Varianten ≥ 3:1 gegen

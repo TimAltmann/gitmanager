@@ -15,16 +15,13 @@ use crate::gitlab::glab::GlabRunner;
 use crate::gitlab::remote::HostMap;
 use crate::gitlab::service;
 use crate::i18n::{tr, tr_fmt};
-use egui::{Color32, RichText};
+use crate::ui::theme::{COLOR_CLEAN as GREEN, COLOR_ORANGE as ORANGE, COLOR_RED as RED};
+use egui::RichText;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-
-const ORANGE: Color32 = Color32::from_rgb(220, 130, 40);
-const RED: Color32 = Color32::from_rgb(200, 60, 60);
-const GREEN: Color32 = Color32::from_rgb(60, 160, 80);
 
 /// Offener Dialog und Kanal für die Ergebnisse der Worker.
 pub(super) struct CleanupUi {

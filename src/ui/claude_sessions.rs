@@ -13,23 +13,15 @@ use crate::ui::claude_anim::{
     brighten, format_elapsed, paint_check, paint_pulse_dot, paint_star, seed_of, shimmer_job,
     status_color, verb,
 };
+use crate::ui::icons::{
+    hover_frame, ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CLAUDE, ICON_FOLDER, ICON_GIT_BRANCH,
+    ICON_STAR, ICON_STAR_FILL, ICON_TERMINAL,
+};
 use crate::ui::search_field::search_field;
 use crate::ui::theme::mr_palette;
 use egui::{FontId, Popup, PopupCloseBehavior, RichText, Ui, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-
-const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
-const ICON_GIT_BRANCH: egui::ImageSource =
-    egui::include_image!("../../assets/icons/git-branch.svg");
-const ICON_TERMINAL: egui::ImageSource = egui::include_image!("../../assets/icons/terminal.svg");
-const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
-const ICON_CHEVRON_DOWN: egui::ImageSource =
-    egui::include_image!("../../assets/icons/chevron-down.svg");
-const ICON_STAR: egui::ImageSource = egui::include_image!("../../assets/icons/star.svg");
-const ICON_STAR_FILL: egui::ImageSource = egui::include_image!("../../assets/icons/star-fill.svg");
-const ICON_CHEVRON_UP: egui::ImageSource =
-    egui::include_image!("../../assets/icons/chevron-up.svg");
 
 /// Was der Nutzer in der Ansicht ausgelöst hat.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -564,18 +556,6 @@ fn icon_button(ui: &mut Ui, image: egui::Image<'static>, tooltip: &str) -> bool 
     let resp = ui.add(egui::Button::image(image)).on_hover_text(tooltip);
     hover_frame(ui, &resp);
     resp.clicked()
-}
-
-/// Rahmen um einen Icon-Button beim Überfahren.
-fn hover_frame(ui: &Ui, resp: &egui::Response) {
-    if resp.hovered() {
-        ui.painter().rect_stroke(
-            resp.rect,
-            egui::CornerRadius::same(4),
-            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 100, 100)),
-            egui::StrokeKind::Outside,
-        );
-    }
 }
 
 /// IDE-, Shell- und Explorer-Buttons (rechts, Reihenfolge wie in der

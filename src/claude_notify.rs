@@ -106,7 +106,7 @@ fn click_of(action: &str) -> ToastClick {
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
