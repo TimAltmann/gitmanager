@@ -1115,11 +1115,20 @@ fn show_repo_row(
                 }
             });
 
+            ui.add_space(2.0);
+            // Pfad-Zeile (dezente Farbe, bei schmalem Fenster gekürzt, voller Pfad im Tooltip)
+            let path_text = repo.path.display().to_string();
+            let path_color = crate::ui::theme::mr_palette(&config.theme, ui.visuals()).text2;
+            ui.add(
+                egui::Label::new(RichText::new(&path_text).size(11.0).color(path_color)).truncate(),
+            )
+            .on_hover_text(&path_text);
+
             ui.add_space(4.0);
-            // Zeile 2: Status-Chips
+            // Status-Chips
             show_chip_row(ui, repo, config, cx, actions);
             ui.add_space(2.0);
-            // Zeile 3: letzter Commit · Explorer, Shell, IDE, Agents, ⋯
+            // letzter Commit · Explorer, Shell, IDE, Agents, ⋯
             show_bottom_row(ui, repo, config, cx, actions);
         });
     });
@@ -2127,5 +2136,53 @@ mod tests {
         let label = tr(config.language, "repo_cleanup_button");
         let (all, _) = drive(&mut repos, &config, &RepoListContext::empty(), &[&label]);
         assert!(all.iter().any(|a| a.cleanup));
+    }
+
+    #[test]
+    fn repo_card_shows_path_between_header_and_chips() {
+        let config = card_config();
+        let mut repos = one_repo();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1400.0, 700.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let output = ctx.run_ui(raw, |ui| {
+            let mut actions = RepoListActions::default();
+            show_repo_list(
+                ui,
+                &mut repos,
+                &config,
+                &mut actions,
+                None,
+                &mut String::new(),
+                &RepoListContext::empty(),
+            );
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("AccessKit");
+        let y_of = |text: &str| {
+            update
+                .nodes
+                .iter()
+                .find(|(_, n)| n.label().or(n.value()) == Some(text))
+                .and_then(|(_, n)| n.bounds())
+                .map(|b| b.y0)
+        };
+        let header_y = y_of("app").expect("repo name");
+        let path_y = y_of("/tmp/gm-card/app").expect("repo path");
+        let chip_y = y_of(&tr(config.language, "repo_state_clean")).expect("clean chip");
+        assert!(
+            header_y < path_y && path_y < chip_y,
+            "expected header ({header_y}) < path ({path_y}) < chip ({chip_y})"
+        );
+        output.drop_without_applying_deltas();
     }
 }
