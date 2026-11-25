@@ -29,7 +29,7 @@ use crate::i18n::{count_text, tr, tr_fmt, Language};
 use crate::ui::theme::{mr_palette, MrPalette};
 use egui::text_edit::TextEditState;
 use egui::{
-    vec2, Align, Button, Color32, CursorIcon, FontId, Frame, Id, Image, ImageSource, Label, Layout,
+    vec2, Align, Button, Color32, CursorIcon, FontId, Frame, Id, ImageSource, Label, Layout,
     Margin, Response, RichText, Spinner, Stroke, TextEdit, Ui, WidgetInfo, WidgetType,
 };
 use semver::Version;
@@ -43,6 +43,7 @@ use crate::ui::icons::{
     ICON_MR_LOCK as ICON_LOCK, ICON_MR_MINUS_CIRCLE as ICON_MINUS_CIRCLE,
     ICON_MR_OPEN_EXTERNAL as ICON_OPEN_EXTERNAL, ICON_MR_WARNING as ICON_WARNING,
     ICON_MR_X_CIRCLE as ICON_X_CIRCLE, ICON_TRASH,
+    icon_image,
 };
 
 /// Warnung „Läuft in {n} Tagen ab“ ab so vielen Tagen vor dem Ablauf.
@@ -2127,12 +2128,6 @@ fn wrapped(ui: &mut Ui, text: &str, size: f32, color: Color32) {
 
 fn small(ui: &mut Ui, text: &str, color: Color32) -> Response {
     ui.label(RichText::new(text).size(11.0).color(color))
-}
-
-fn icon_image(icon: ImageSource<'static>, size: f32, tint: Color32) -> Image<'static> {
-    Image::new(icon)
-        .fit_to_exact_size(vec2(size, size))
-        .tint(tint)
 }
 
 /// Icon-Button 22 × 22 mit Tooltip und AccessKit-Namen.

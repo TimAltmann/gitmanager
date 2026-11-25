@@ -5,7 +5,7 @@ use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt};
 use crate::ui::icons::{
-    agent_icon_for, ide_icon_for, ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CLAUDE, ICON_GIT_BRANCH,
+    ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CLAUDE, ICON_GIT_BRANCH,
     ICON_GIT_COMMIT, ICON_PLUS, ICON_REFRESH, ICON_SEARCH, ICON_TRASH,
 };
 use crate::ui::repo_card_chips::{favorite_star, show_bottom_row, show_chip_row};
@@ -21,29 +21,6 @@ pub fn branch_button_tooltip(lang: crate::i18n::Language, branch: &str, detached
     } else {
         format!("{} – {}", branch, tr(lang, "branch_switch_tooltip"))
     }
-}
-
-pub(crate) fn ide_image(ide: &crate::config::IdeConfig) -> egui::Image<'static> {
-    if let Some(path) = &ide.icon {
-        let pb = std::path::PathBuf::from(path);
-        if pb.exists() {
-            // Nutze file:// URI – wird von egui_extras async geladen und gecached, kein blockierendes read() im UI-Thread
-            let uri = format!("file://{}", pb.display().to_string().replace('\\', "/"));
-            return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(18.0));
-        }
-    }
-    egui::Image::new(ide_icon_for(&ide.id)).fit_to_exact_size(Vec2::splat(18.0))
-}
-
-pub(crate) fn agent_image(agent: &crate::config::AgentProfile) -> egui::Image<'static> {
-    if let Some(path) = &agent.icon {
-        let pb = std::path::PathBuf::from(path);
-        if pb.exists() {
-            let uri = format!("file://{}", pb.display().to_string().replace('\\', "/"));
-            return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(18.0));
-        }
-    }
-    egui::Image::new(agent_icon_for(&agent.id)).fit_to_exact_size(Vec2::splat(18.0))
 }
 
 /// Helper: Dropdown-Button mit rechtsbündigem Chevron *innerhalb* des Buttons.
@@ -1110,6 +1087,7 @@ fn show_repo_row(
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+    use crate::ui::icons::{agent_icon_for, ide_icon_for};
 
     use std::path::{Path, PathBuf};
 

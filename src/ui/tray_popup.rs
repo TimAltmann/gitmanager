@@ -2,56 +2,14 @@ use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::ui::icons::{
-    agent_icon_for, ide_icon_for, ICON_CROSS, ICON_FOLDER, ICON_GEAR,
+    ICON_CROSS, ICON_FOLDER, ICON_GEAR,
     ICON_MR_PULL_REQUEST as ICON_PULL_REQUEST, ICON_REFRESH, ICON_TERMINAL,
+    agent_image_sized, ide_image_sized,
 };
 use crate::ui::theme::mr_palette;
 use egui::{AtomLayoutResponse, Color32, RichText, Vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
-
-fn ide_image(ide: &crate::config::IdeConfig) -> egui::Image<'static> {
-    if let Some(path) = &ide.icon {
-        // #6: Existenz nur einmal pro Pfad per stat prüfen (statt pro Repo pro
-        // Frame). Icons sind quasi-statisch; Dateiwechsel greift ab Neustart.
-        if icon_exists_cached(path) {
-            let uri = format!("file://{}", path.replace('\\', "/"));
-            return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(16.0));
-        }
-    }
-    egui::Image::new(ide_icon_for(&ide.id)).fit_to_exact_size(Vec2::splat(16.0))
-}
-
-fn agent_image(agent: &crate::config::AgentProfile) -> egui::Image<'static> {
-    if let Some(path) = &agent.icon {
-        // #6: siehe ide_image — gecachter stat statt Syscall pro Frame.
-        if icon_exists_cached(path) {
-            let uri = format!("file://{}", path.replace('\\', "/"));
-            return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(16.0));
-        }
-    }
-    egui::Image::new(agent_icon_for(&agent.id)).fit_to_exact_size(Vec2::splat(16.0))
-}
-
-/// #6: gecachter `Path.exists` für Icon-Dateien. Ein stat-Syscall pro Pfad
-/// pro Prozess statt pro Repo-Zeile pro Frame (~3000 stats/s bei 30fps).
-/// Der erste Aufruf prüft das FS, danach gilt der Cache (Icons ändern sich
-/// praktisch nie zur Laufzeit; Wechsel greift ab Neustart).
-pub fn icon_exists_cached(path: &str) -> bool {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(&hit) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(path) {
-        return hit;
-    }
-    let exists = std::path::Path::new(path).exists();
-    cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(path.to_string(), exists);
-    exists
-}
 
 /// #9: ROOT-DPI auflösen. Nur endliche positive Werte übernehmen — sonst
 /// neutral 1.0. Nie auf die DPI des off-screen Service-Viewports
@@ -901,7 +859,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                         .selected_solution
                         .clone()
                         .unwrap_or_else(|| repo.path.clone());
-                    let btn = egui::Button::image(ide_image(ide)).small();
+                    let btn = egui::Button::image(ide_image_sized(ide, 16.0)).small();
                     let resp = ui
                         .add(btn)
                         .on_hover_text(format!("In {} öffnen", ide.display_name));
@@ -998,7 +956,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                     ui.separator();
                 }
                 for agent in filtered.iter().take(2) {
-                    let btn = egui::Button::image(agent_image(agent)).small();
+                    let btn = egui::Button::image(agent_image_sized(agent, 16.0)).small();
                     let resp = ui
                         .add(btn)
                         .on_hover_text(format!("Agent {} starten", agent.display_name));
@@ -1011,7 +969,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                     let first = &active_agents[0];
                     if !tray_hidden.contains(&first.id)
                         && ui
-                            .add(egui::Button::image(agent_image(first)).small())
+                            .add(egui::Button::image(agent_image_sized(first, 16.0)).small())
                             .on_hover_text(format!("Agent {} starten", first.display_name))
                             .clicked()
                     {
@@ -1662,11 +1620,11 @@ mod tests {
         let present = dir.join("present_xyz123.png");
         std::fs::write(&present, b"x").unwrap();
         let missing = dir.join("missing_xyz123.png");
-        assert!(icon_exists_cached(present.to_str().unwrap()));
-        assert!(!icon_exists_cached(missing.to_str().unwrap()));
+        assert!(crate::ui::icons::icon_exists_cached(present.to_str().unwrap()));
+        assert!(!crate::ui::icons::icon_exists_cached(missing.to_str().unwrap()));
         // Gecacht: nach Löschen weiterhin true (kein erneuter stat).
         std::fs::remove_file(&present).unwrap();
-        assert!(icon_exists_cached(present.to_str().unwrap()));
+        assert!(crate::ui::icons::icon_exists_cached(present.to_str().unwrap()));
         let _ = std::fs::remove_dir(&dir);
     }
 

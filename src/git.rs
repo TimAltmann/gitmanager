@@ -2846,44 +2846,29 @@ fn quote_if_needed(s: &str) -> String {
     }
 }
 
-fn escape_for_powershell(s: &str) -> String {
-    let needs_quote = s.contains(' ')
-        || s.contains('\'')
-        || s.contains('"')
-        || s.contains('&')
-        || s.contains('|')
-        || s.contains(';')
-        || s.contains('>')
-        || s.contains('<')
-        || s.contains('^')
-        || s.contains('`')
-        || s.contains('$');
+/// Gemeinsame Shell-Escaping-Logik: `quote` umschließen wenn `meta`-Zeichen
+/// vorkommen (oder `force` ist wahr), innere `quote`-Zeichen mit `doubled`
+/// verdoppeln.
+fn shell_escape(s: &str, quote: char, doubled: &str, meta: &[char], force: bool) -> String {
+    let needs_quote = force || meta.iter().any(|c| s.contains(*c));
     if needs_quote {
-        format!("'{}'", s.replace('\'', "''"))
+        format!("{quote}{}{quote}", s.replace(quote, doubled))
     } else {
         s.to_string()
     }
+}
+
+fn escape_for_powershell(s: &str) -> String {
+    shell_escape(s, '\'', "''", &[' ', '\'', '"', '&', '|', ';', '>', '<', '^', '`', '$'], false)
 }
 
 #[cfg(not(test))]
 fn escape_for_powershell_force(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    shell_escape(s, '\'', "''", &[], true)
 }
 
 fn escape_for_cmd(s: &str) -> String {
-    // Für cmd /K: wrap in double quotes if contains space or shell meta, escape inner quotes
-    let needs_quote = s.contains(' ')
-        || s.contains('&')
-        || s.contains('|')
-        || s.contains('<')
-        || s.contains('>')
-        || s.contains('^')
-        || s.contains('"');
-    if needs_quote {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
+    shell_escape(s, '"', "\"\"", &[' ', '&', '|', '<', '>', '^', '"'], false)
 }
 
 fn has_placeholders(s: &str) -> bool {
@@ -3316,15 +3301,20 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
     }
 }
 
-#[cfg(not(test))]
+/// Gemeinsames Command-Finish für alle Spawn-Helfer: working-directory,
+/// Creation-Flags, spawn_locked und einheitliche Fehlermeldung.
+pub(crate) fn spawn_finish(cmd: &mut std::process::Command, repo_path: &Path, creation_flags: u32, what: &str) -> anyhow::Result<()> {
+    cmd.current_dir(repo_path);
+    set_creation_flags(cmd, creation_flags);
+    cmd.spawn_locked()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{what} starten fehlgeschlagen: {e}"))
+}
+
 fn spawn_wt(repo_str: &str, cmd_string: &str, repo_path: &Path) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new("wt");
     cmd.args(["-d", repo_str, "--", "cmd", "/k", cmd_string]);
-    cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, 0x00000010);
-    cmd.spawn_locked()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("Windows Terminal starten fehlgeschlagen: {e}"))
+    spawn_finish(&mut cmd, repo_path, 0x00000010, "Windows Terminal")
 }
 
 #[cfg(not(test))]
@@ -3346,11 +3336,7 @@ fn spawn_powershell(ps_script: &str, repo_path: &Path) -> anyhow::Result<()> {
         let full_script = format!("Set-Location {}; {}", repo_escaped, ps_script);
         cmd.args(["-NoLogo", "-NoExit", "-Command", &full_script]);
     }
-    cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, 0x00000010);
-    cmd.spawn_locked()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("Powershell starten fehlgeschlagen: {e}"))
+    spawn_finish(&mut cmd, repo_path, 0x00000010, "Powershell")
 }
 
 #[cfg(not(test))]
@@ -3376,11 +3362,7 @@ fn spawn_powershell_shell(repo_path: &Path) -> anyhow::Result<()> {
             ),
         ]);
     }
-    cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, 0x00000010);
-    cmd.spawn_locked()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("Powershell starten fehlgeschlagen: {e}"))
+    spawn_finish(&mut cmd, repo_path, 0x00000010, "Powershell")
 }
 
 #[cfg(not(test))]
@@ -3388,33 +3370,21 @@ fn spawn_wt_shell(repo_path: &Path) -> anyhow::Result<()> {
     let repo_str = repo_path.display().to_string();
     let mut cmd = std::process::Command::new("wt");
     cmd.args(["-d", &repo_str]);
-    cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, 0x00000010);
-    cmd.spawn_locked()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("Windows Terminal starten fehlgeschlagen: {e}"))
+    spawn_finish(&mut cmd, repo_path, 0x00000010, "Windows Terminal")
 }
 
 #[cfg(not(test))]
 fn spawn_cmd_shell(repo_str: &str, repo_path: &Path) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new("cmd");
     cmd.args(["/C", "start", "", "/D", repo_str, "cmd", "/K", ""]);
-    cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
-    cmd.spawn_locked()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("cmd starten fehlgeschlagen: {e}"))
+    spawn_finish(&mut cmd, repo_path, CREATE_NO_WINDOW, "cmd")
 }
 
 #[cfg(not(test))]
 fn spawn_cmd(agent_string: &str, repo_str: &str, repo_path: &Path) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new("cmd");
     cmd.args(["/C", "start", "", "/D", repo_str, "cmd", "/K", agent_string]);
-    cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
-    cmd.spawn_locked()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("cmd starten fehlgeschlagen: {e}"))
+    spawn_finish(&mut cmd, repo_path, CREATE_NO_WINDOW, "cmd")
 }
 
 /// Öffnet ein Terminal und startet einen Agenten darin

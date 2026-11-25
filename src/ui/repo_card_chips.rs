@@ -23,9 +23,10 @@ use crate::ui::icons::{
     ICON_MR_OPEN_EXTERNAL as ICON_BROWSER,
     ICON_MR_PULL_REQUEST as ICON_MR, ICON_MR_SPARKLE as ICON_SPARKLE,
     ICON_MR_WARNING as ICON_WARNING, ICON_STAR, ICON_STAR_FILL, ICON_TERMINAL, ICON_TRASH,
+    agent_image, ide_image,
 };
 use crate::ui::merge_requests::pipeline_icon;
-use crate::ui::repo_list::{agent_image, ide_image, RepoListActions, RepoListContext};
+use crate::ui::repo_list::{RepoListActions, RepoListContext};
 use crate::ui::theme::{mr_palette, MrPalette};
 
 /// Neue i18n-Schlüssel der Karte (Test: beide Sprachen vorhanden).

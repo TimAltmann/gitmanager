@@ -131,16 +131,59 @@ pub fn agent_icon_for(agent_id: &str) -> ImageSource<'static> {
     }
 }
 
+/// Gecachter `Path.exists` für Icon-Dateien. Ein stat-Syscall pro Pfad
+/// pro Prozess statt pro Repo-Zeile pro Frame.
+pub fn icon_exists_cached(path: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<String, bool>>> = Mutex::new(None);
+    let mut guard = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    if let Some(&exists) = map.get(path) {
+        return exists;
+    }
+    let exists = std::path::Path::new(path).exists();
+    map.insert(path.to_string(), exists);
+    exists
+}
+
 /// Erzeugt ein `egui::Image` für die übergebene IDE-Konfiguration in Standardgröße (18x18).
-#[allow(dead_code)]
 pub fn ide_image(ide: &crate::config::IdeConfig) -> Image<'static> {
-    Image::new(ide_icon_for(&ide.id)).fit_to_exact_size(Vec2::splat(18.0))
+    ide_image_sized(ide, 18.0)
+}
+
+/// Erzeugt ein `egui::Image` für die übergebene IDE-Konfiguration in Wunschgröße.
+pub fn ide_image_sized(ide: &crate::config::IdeConfig, size: f32) -> Image<'static> {
+    if let Some(path) = &ide.icon {
+        if icon_exists_cached(path) {
+            let uri = format!("file://{}", path.replace('\\', "/"));
+            return Image::new(uri).fit_to_exact_size(Vec2::splat(size));
+        }
+    }
+    Image::new(ide_icon_for(&ide.id)).fit_to_exact_size(Vec2::splat(size))
 }
 
 /// Erzeugt ein `egui::Image` für das übergebene Agent-Profil in Standardgröße (18x18).
-#[allow(dead_code)]
 pub fn agent_image(agent: &crate::config::AgentProfile) -> Image<'static> {
-    Image::new(agent_icon_for(&agent.id)).fit_to_exact_size(Vec2::splat(18.0))
+    agent_image_sized(agent, 18.0)
+}
+
+/// Erzeugt ein `egui::Image` für das übergebene Agent-Profil in Wunschgröße.
+pub fn agent_image_sized(agent: &crate::config::AgentProfile, size: f32) -> Image<'static> {
+    if let Some(path) = &agent.icon {
+        if icon_exists_cached(path) {
+            let uri = format!("file://{}", path.replace('\\', "/"));
+            return Image::new(uri).fit_to_exact_size(Vec2::splat(size));
+        }
+    }
+    Image::new(agent_icon_for(&agent.id)).fit_to_exact_size(Vec2::splat(size))
+}
+
+/// Erzeugt ein `egui::Image` mit gegebener quadratischer Kantenlänge und Einfärbung.
+pub fn icon_image(icon: ImageSource<'static>, size: f32, tint: egui::Color32) -> Image<'static> {
+    Image::new(icon)
+        .fit_to_exact_size(Vec2::splat(size))
+        .tint(tint)
 }
 
 /// Rahmen um einen Button beim Überfahren.

@@ -586,7 +586,7 @@ fn open_buttons(
     for ide in profile.visible_ides().iter().take(4).rev() {
         let tooltip = format!("{} {}", tr(lang, "open_in"), ide.display_name);
         let resp = ui
-            .add(egui::Button::image(crate::ui::repo_list::ide_image(ide)))
+            .add(egui::Button::image(crate::ui::icons::ide_image(ide)))
             .on_hover_text(&tooltip);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &tooltip));
         hover_frame(ui, &resp);

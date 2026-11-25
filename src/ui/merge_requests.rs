@@ -28,8 +28,7 @@ use crate::gitlab::time::{format_date, relative_time};
 use crate::i18n::{count_text, tr, tr_fmt, Language};
 use crate::ui::theme::{mr_palette, MrPalette};
 use egui::{
-    vec2, Align, Align2, Atoms, Button, Color32, ComboBox, CursorIcon, FontId, Frame, Id, Image,
-    ImageSource, Key, Label, Layout, Margin, Popup, PopupCloseBehavior, RectAlign, Response,
+    vec2, Align, Align2, Atoms, Button, Color32, ComboBox, CursorIcon, FontId, Frame, Id, ImageSource, Key, Label, Layout, Margin, Popup, PopupCloseBehavior, RectAlign, Response,
     RichText, ScrollArea, Sense, Spinner, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, WidgetInfo,
     WidgetType,
 };
@@ -54,6 +53,7 @@ use crate::ui::icons::{
     ICON_MR_SORT as ICON_SORT, ICON_MR_SPARKLE as ICON_SPARKLE,
     ICON_MR_TERMINAL as ICON_TERMINAL, ICON_MR_USER as ICON_USER,
     ICON_MR_WARNING as ICON_WARNING, ICON_MR_X_CIRCLE as ICON_X_CIRCLE,
+    icon_image,
 };
 
 /// Mindestbreite einer Spalte: zwei Spalten ab 2 × 420 + 12 = 852 px
@@ -2829,12 +2829,6 @@ pub(crate) fn pipeline_icon(
         PipelineState::Manual => (ICON_PLAY_CIRCLE, p.neutral_icon),
         PipelineState::NoPipeline => (ICON_MINUS_CIRCLE, p.neutral_icon),
     }
-}
-
-fn icon_image(icon: ImageSource<'static>, size: f32, tint: Color32) -> Image<'static> {
-    Image::new(icon)
-        .fit_to_exact_size(vec2(size, size))
-        .tint(tint)
 }
 
 /// 11 px Text, nicht umbrechend.
