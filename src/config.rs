@@ -45,13 +45,6 @@ pub enum TrayIconTheme {
     Light,
 }
 
-impl TrayIconTheme {
-    #[allow(dead_code)]
-    pub fn all() -> Vec<TrayIconTheme> {
-        vec![TrayIconTheme::Dark, TrayIconTheme::Light]
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrayIconConfig {
     /// Reihenfolge der Icons im Tray-Popup (IDs in Anzeigereihenfolge)
@@ -1165,6 +1158,17 @@ impl AppConfig {
         }
     }
 
+    /// Windows-Pfade sind case-insensitiv: Keys auf Kleinbuchstaben normalisieren,
+    /// damit dieselbe Repo nicht unter zwei Schlüsseln landet.
+    #[cfg(windows)]
+    fn lowercase_keys<T>(map: &mut HashMap<String, T>) {
+        let mut normalized: HashMap<String, T> = HashMap::new();
+        for (k, v) in map.drain() {
+            normalized.entry(k.to_lowercase()).or_insert(v);
+        }
+        *map = normalized;
+    }
+
     fn try_load() -> Result<Self> {
         let path = Self::config_path().context("Kein Config-Pfad ermittelbar")?;
         // Migration: if new path doesn't exist but legacy repomanager path does, import it
@@ -1306,20 +1310,7 @@ impl AppConfig {
             let _ = cfg.save();
         }
         if cfg.config_version < 7 {
-            for p in &mut cfg.profiles {
-                for sel in &mut p.config_selectors {
-                    sel.id = sel.id.trim().to_lowercase().replace(' ', "_");
-                    sel.file_path = sel.file_path.trim().to_string();
-                    sel.key = sel.key.trim().to_string();
-                    if sel.key_attribute.trim().is_empty() {
-                        sel.key_attribute = "key".to_string();
-                    }
-                    if sel.value_attribute.trim().is_empty() {
-                        sel.value_attribute = "value".to_string();
-                    }
-                    sel.options.retain(|o| !o.value.trim().is_empty());
-                }
-            }
+            // Config-Selectors werden unten bei der Profilvalidierung immer normalisiert.
             cfg.config_version = 7;
             let _ = cfg.save();
         }
@@ -1369,18 +1360,8 @@ impl AppConfig {
                 cfg.tray_icons.max_display = default_tray_max_display();
             }
             cfg.tray_icons.max_display = cfg.tray_icons.max_display.clamp(5, 50);
-            // hidden ids dedup/sort
-            cfg.tray_icons.hidden_icon_ids.sort();
-            cfg.tray_icons.hidden_icon_ids.dedup();
-            // filter hidden to valid ids only (keep custom hidden as is for forward compat? filter to known list)
-            // keep only known ids for migration, custom unknown kept as is (no filtering)
-            // icon_order dedup preserve order
-            {
-                let mut seen = std::collections::HashSet::new();
-                cfg.tray_icons
-                    .icon_order
-                    .retain(|id| seen.insert(id.clone()));
-            }
+            // Sortieren/Deduplizieren von hidden_icon_ids und icon_order läuft
+            // unten bei der immer ausgeführten Validierung (siehe dort).
             if cfg.tray_icons.icon_order.is_empty() {
                 cfg.tray_icons.icon_order =
                     DEFAULT_TRAY_ICONS.iter().map(|s| s.to_string()).collect();
@@ -1393,21 +1374,8 @@ impl AppConfig {
                 }
                 // also remove invalid? keep as is for forward compat, but ensure deduped above
             }
-            // RepoUsage introduced together with TrayIconConfig v10 (Task 5 MRU)
-            // Existing configs before v10 have no repo_usage; ensure initialized (empty map if missing)
-            if cfg.repo_usage.is_empty() {
-                cfg.repo_usage = HashMap::new();
-            }
-            // Windows key normalization for repo_usage (case-insensitive)
-            #[cfg(windows)]
-            {
-                let mut normalized: HashMap<String, RepoUsage> = HashMap::new();
-                for (k, v) in cfg.repo_usage.drain() {
-                    let nk = k.to_lowercase();
-                    normalized.entry(nk).or_insert(v);
-                }
-                cfg.repo_usage = normalized;
-            }
+            // repo_usage: Ein leeres HashMap neu zuzuweisen wäre ein No-op; die
+            // Windows-Key-Normalisierung läuft unten ohnehin für alle Configs.
             cfg.config_version = 10;
             let _ = cfg.save();
         }
@@ -1492,26 +1460,11 @@ impl AppConfig {
         cfg.roots.sort();
         cfg.roots.dedup();
 
-        // RepoState Keys auf Windows normalisieren (case-insensitiv) – verhindert doppelte Einträge
+        // Keys auf Windows normalisieren (case-insensitiv) – verhindert doppelte Einträge
         #[cfg(windows)]
-        {
-            let mut normalized: HashMap<String, RepoUiState> = HashMap::new();
-            for (k, v) in cfg.repo_state.drain() {
-                let nk = k.to_lowercase();
-                normalized.entry(nk).or_insert(v);
-            }
-            cfg.repo_state = normalized;
-        }
-        // RepoUsage keys similarly normalize on Windows
+        Self::lowercase_keys(&mut cfg.repo_state);
         #[cfg(windows)]
-        {
-            let mut normalized: HashMap<String, RepoUsage> = HashMap::new();
-            for (k, v) in cfg.repo_usage.drain() {
-                let nk = k.to_lowercase();
-                normalized.entry(nk).or_insert(v);
-            }
-            cfg.repo_usage = normalized;
-        }
+        Self::lowercase_keys(&mut cfg.repo_usage);
 
         // Profile validieren
         for p in &mut cfg.profiles {

@@ -4,7 +4,7 @@
 
 use super::merge_requests::MrResult;
 use super::{MainView, MyApp};
-use crate::claude_notify::{show_simple_notification, SimpleToast, ToastClick};
+use crate::claude_notify::{show_simple_notification, SimpleToast, ToastClick, SNIPPET_CHARS};
 use crate::gitlab::activity::{
     note_snippet, others_notes, own_notes, MrActivityStore, MrEvent, MrEventKind, NoteInfo,
 };
@@ -18,8 +18,6 @@ use std::sync::Arc;
 
 /// Kennung der Kopfzeile der MR-Benachrichtigungen
 const HEADER_ID: &str = "merge-requests";
-/// Zeichen des Kommentars in der Benachrichtigung
-const SNIPPET_CHARS: usize = 160;
 /// Höchstens so viele Benachrichtigungen je Abruf; der Rest als Sammelmeldung
 const MAX_TOASTS: usize = 4;
 

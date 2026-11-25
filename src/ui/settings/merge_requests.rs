@@ -20,6 +20,7 @@ use crate::gitlab::remote::{
     RemoteRef, RemoteScheme,
 };
 use crate::gitlab::secret::SecretString;
+use crate::gitlab::time::DAY;
 use crate::gitlab::service::{
     error_text, is_auth_error, login_key, token_create_url, AccessState, GitManagerRights,
     GlabRights, HostProbe, Protocol, SavedWhere, TokenCheck, TokenKind, TokenSource,
@@ -48,7 +49,6 @@ use crate::ui::icons::{
 
 /// Warnung „Läuft in {n} Tagen ab“ ab so vielen Tagen vor dem Ablauf.
 const EXPIRY_WARN_DAYS: i64 = 14;
-const DAY: i64 = 86_400;
 /// Ab dieser Höhe scrollt die Repo-Tabelle
 const REPO_LIST_MAX_HEIGHT: f32 = 260.0;
 /// Shell-Metazeichen, die ein bloßer Programmname nicht enthalten darf

@@ -3303,6 +3303,7 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
 
 /// Gemeinsames Command-Finish für alle Spawn-Helfer: working-directory,
 /// Creation-Flags, spawn_locked und einheitliche Fehlermeldung.
+#[cfg(not(test))]
 pub(crate) fn spawn_finish(cmd: &mut std::process::Command, repo_path: &Path, creation_flags: u32, what: &str) -> anyhow::Result<()> {
     cmd.current_dir(repo_path);
     set_creation_flags(cmd, creation_flags);
@@ -3311,6 +3312,7 @@ pub(crate) fn spawn_finish(cmd: &mut std::process::Command, repo_path: &Path, cr
         .map_err(|e| anyhow::anyhow!("{what} starten fehlgeschlagen: {e}"))
 }
 
+#[cfg(not(test))]
 fn spawn_wt(repo_str: &str, cmd_string: &str, repo_path: &Path) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new("wt");
     cmd.args(["-d", repo_str, "--", "cmd", "/k", cmd_string]);

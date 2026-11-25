@@ -51,21 +51,7 @@ fn dropdown_button(
 }
 
 pub fn filter_branches(branches: &[String], filter: &str, limit: usize) -> Vec<String> {
-    if limit == 0 {
-        return Vec::new();
-    }
-    let filter_lower = filter.to_lowercase();
-    let mut out = Vec::new();
-    for b in branches {
-        if !filter_lower.is_empty() && !b.to_lowercase().contains(&filter_lower) {
-            continue;
-        }
-        out.push(b.clone());
-        if out.len() >= limit {
-            break;
-        }
-    }
-    out
+    crate::ui::tray_popup::tray_branch_match_counts(branches, filter, limit).0
 }
 
 /// Task 4: Sortierung der Hauptliste im View (nicht im Scanner).

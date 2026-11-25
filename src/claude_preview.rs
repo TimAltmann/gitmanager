@@ -129,14 +129,10 @@ fn tool_text(p: &Value) -> String {
 
 /// Eine Zeile, höchstens `MAX_CHARS` Zeichen.
 fn item(role: PreviewRole, text: &str) -> PreviewItem {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let text = if flat.chars().count() > MAX_CHARS {
-        let cut: String = flat.chars().take(MAX_CHARS).collect();
-        format!("{}…", cut.trim_end())
-    } else {
-        flat
-    };
-    PreviewItem { role, text }
+    PreviewItem {
+        role,
+        text: crate::gitlab::activity::note_snippet(text, MAX_CHARS),
+    }
 }
 
 #[cfg(test)]

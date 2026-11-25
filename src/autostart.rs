@@ -10,11 +10,6 @@ const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 /// Schreibt (enabled) oder entfernt (!enabled) den Run-Key-Eintrag.
 pub fn apply_autostart(enabled: bool) -> Result<()> {
-    set_autostart(enabled)
-}
-
-/// Alias für `apply_autostart` — explizites Setzen.
-pub fn set_autostart(enabled: bool) -> Result<()> {
     imp::set(enabled)
 }
 

@@ -164,10 +164,12 @@ fn is_invalid_file_path(file_path: &str) -> bool {
     false
 }
 
-pub fn read_xml_value(
+/// Pfad prüfen, Datei lesen und XML-Wohlgeformtheit validieren – von Lese- und
+/// Schreibpfad identisch benötigt.
+fn load_validated_config(
     repo_path: &Path,
     selector: &ConfigSelector,
-) -> Result<Option<String>, String> {
+) -> Result<(PathBuf, String), String> {
     if is_invalid_file_path(&selector.file_path) {
         return Err(format!(
             "Ungültiger Dateipfad: '{}' darf nicht absolut sein oder .. enthalten",
@@ -177,9 +179,16 @@ pub fn read_xml_value(
     let file_path = repo_path.join(&selector.file_path);
     let content = std::fs::read_to_string(&file_path)
         .map_err(|e| format!("Konnte {} nicht lesen: {}", file_path.display(), e))?;
-    // validate XML is well-formed, map parse error to Err
     roxmltree::Document::parse(&content)
         .map_err(|e| format!("XML ungültig in {}: {}", file_path.display(), e))?;
+    Ok((file_path, content))
+}
+
+pub fn read_xml_value(
+    repo_path: &Path,
+    selector: &ConfigSelector,
+) -> Result<Option<String>, String> {
+    let (_, content) = load_validated_config(repo_path, selector)?;
     Ok(find_add_element_value(
         &content,
         &selector.key,
@@ -193,18 +202,7 @@ pub fn write_xml_value(
     selector: &ConfigSelector,
     new_value: &str,
 ) -> Result<(), String> {
-    if is_invalid_file_path(&selector.file_path) {
-        return Err(format!(
-            "Ungültiger Dateipfad: '{}' darf nicht absolut sein oder .. enthalten",
-            selector.file_path
-        ));
-    }
-    let file_path = repo_path.join(&selector.file_path);
-    let content = std::fs::read_to_string(&file_path)
-        .map_err(|e| format!("Konnte {} nicht lesen: {}", file_path.display(), e))?;
-    // validate XML
-    roxmltree::Document::parse(&content)
-        .map_err(|e| format!("XML ungültig in {}: {}", file_path.display(), e))?;
+    let (file_path, content) = load_validated_config(repo_path, selector)?;
     if find_add_element_value(
         &content,
         &selector.key,

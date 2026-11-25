@@ -64,31 +64,38 @@ pub struct SettingsState {
     mr: merge_requests::MrSettingsState,
 }
 
+/// Reihenfolge vervollständigen: entfernte IDs raus, fehlende hinten an,
+/// bekannte Reihenfolge erhalten. Bei `keep_unknown` bleiben unbekannte IDs
+/// (z. B. alte Tray-Icons) am Ende erhalten.
+fn normalize_icon_order(order: &[String], all: &[String], keep_unknown: bool) -> Vec<String> {
+    if order.is_empty() {
+        return all.to_vec();
+    }
+    let mut effective: Vec<String> = order
+        .iter()
+        .filter(|id| all.contains(id))
+        .cloned()
+        .collect();
+    for id in all {
+        if !effective.contains(id) {
+            effective.push(id.clone());
+        }
+    }
+    if keep_unknown {
+        for id in order {
+            if !all.contains(id) && !effective.contains(id) {
+                effective.push(id.clone());
+            }
+        }
+    }
+    effective
+}
+
 fn ensure_icon_orders(profile: &mut LanguageProfile, agents: &[AgentProfile]) {
-    // IDE order: fehlende ergänzen, entfernte entfernen, Reihenfolge behalten
     let all_ids: Vec<String> = profile.ides.iter().map(|i| i.id.clone()).collect();
-    if profile.ide_order.is_empty() && !all_ids.is_empty() {
-        profile.ide_order = all_ids.clone();
-    } else {
-        for id in &all_ids {
-            if !profile.ide_order.contains(id) {
-                profile.ide_order.push(id.clone());
-            }
-        }
-        profile.ide_order.retain(|id| all_ids.contains(id));
-    }
-    // Agent order: analog, basierend auf allen globalen Agents
+    profile.ide_order = normalize_icon_order(&profile.ide_order, &all_ids, false);
     let all_agent_ids: Vec<String> = agents.iter().map(|a| a.id.clone()).collect();
-    if profile.agent_order.is_empty() && !all_agent_ids.is_empty() {
-        profile.agent_order = all_agent_ids.clone();
-    } else {
-        for id in &all_agent_ids {
-            if !profile.agent_order.contains(id) {
-                profile.agent_order.push(id.clone());
-            }
-        }
-        profile.agent_order.retain(|id| all_agent_ids.contains(id));
-    }
+    profile.agent_order = normalize_icon_order(&profile.agent_order, &all_agent_ids, false);
 }
 
 impl SettingsState {
@@ -2716,30 +2723,9 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         // Effektive Orders berechnen ohne Draft jedes Frame zu mutieren (pure rendering)
         let all_ids: Vec<String> = profile.ides.iter().map(|i| i.id.clone()).collect();
         let all_agent_ids: Vec<String> = state.draft.agents.iter().map(|a| a.id.clone()).collect();
-        let effective_ide_order: Vec<String> = if profile.ide_order.is_empty() {
-            all_ids.clone()
-        } else {
-            let mut eff = profile.ide_order.clone();
-            eff.retain(|id| all_ids.contains(id));
-            for id in &all_ids {
-                if !eff.contains(id) {
-                    eff.push(id.clone());
-                }
-            }
-            eff
-        };
-        let effective_agent_order: Vec<String> = if profile.agent_order.is_empty() {
-            all_agent_ids.clone()
-        } else {
-            let mut eff = profile.agent_order.clone();
-            eff.retain(|id| all_agent_ids.contains(id));
-            for id in &all_agent_ids {
-                if !eff.contains(id) {
-                    eff.push(id.clone());
-                }
-            }
-            eff
-        };
+        let effective_ide_order = normalize_icon_order(&profile.ide_order, &all_ids, false);
+        let effective_agent_order =
+            normalize_icon_order(&profile.agent_order, &all_agent_ids, false);
 
         ui.label(
             RichText::new(format!(
@@ -3011,24 +2997,7 @@ fn effective_tray_order(draft: &AppConfig) -> Vec<String> {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    if draft.tray_icons.icon_order.is_empty() {
-        all
-    } else {
-        let mut eff = draft.tray_icons.icon_order.clone();
-        eff.retain(|id| all.contains(id));
-        for id in &all {
-            if !eff.contains(id) {
-                eff.push(id.clone());
-            }
-        }
-        // keep any custom unknown at end (already retained if not in all, but we removed them above; re-append unknowns)
-        for id in &draft.tray_icons.icon_order {
-            if !all.contains(id) && !eff.contains(id) {
-                eff.push(id.clone());
-            }
-        }
-        eff
-    }
+    normalize_icon_order(&draft.tray_icons.icon_order, &all, true)
 }
 
 fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {

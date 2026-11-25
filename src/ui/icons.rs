@@ -91,8 +91,7 @@ pub const ICON_MR_FOLDER_PLUS: ImageSource =
     egui::include_image!("../../assets/icons/mr/folder-plus.svg");
 pub const ICON_MR_DOWNLOAD: ImageSource =
     egui::include_image!("../../assets/icons/mr/download-simple.svg");
-pub const ICON_MR_DOTS: ImageSource =
-    egui::include_image!("../../assets/icons/mr/dots-three.svg");
+pub const ICON_MR_DOTS: ImageSource = egui::include_image!("../../assets/icons/dots-three.svg");
 pub const ICON_MR_FOLDER: ImageSource =
     egui::include_image!("../../assets/icons/mr/folder.svg");
 pub const ICON_MR_FOLDER_ARROW: ImageSource =

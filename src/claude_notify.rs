@@ -203,7 +203,7 @@ pub fn show_simple_notification(
 }
 
 /// Zeichen der Vorschau in der Benachrichtigung
-const SNIPPET_CHARS: usize = 160;
+pub(crate) const SNIPPET_CHARS: usize = 160;
 
 /// Letzte Antwort bzw. letzter Werkzeugaufruf von Claude, einzeilig und
 /// gekürzt; Markdown-Zeichen entfernt.
@@ -214,16 +214,8 @@ pub fn snippet_of(items: &[PreviewItem]) -> Option<String> {
         .chars()
         .filter(|c| !matches!(c, '`' | '*' | '#'))
         .collect();
-    let flat = plain.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.is_empty() {
-        return None;
-    }
-    Some(if flat.chars().count() > SNIPPET_CHARS {
-        let cut: String = flat.chars().take(SNIPPET_CHARS).collect();
-        format!("{}…", cut.trim_end())
-    } else {
-        flat
-    })
+    let snippet = crate::gitlab::activity::note_snippet(&plain, SNIPPET_CHARS);
+    (!snippet.is_empty()).then_some(snippet)
 }
 
 /// Zeigt eine Benachrichtigung; `on_click` läuft beim Klick darauf (in
