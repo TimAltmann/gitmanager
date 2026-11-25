@@ -309,14 +309,17 @@ pub struct NoteInfo {
     pub system: bool,
 }
 
+/// Die `added` neuesten Nutzer-Kommentare (`notes` älteste zuerst).
+fn recent_user_notes(notes: &[NoteInfo], added: u32) -> impl Iterator<Item = &NoteInfo> {
+    let user_notes: Vec<&NoteInfo> = notes.iter().filter(|n| !n.system).collect();
+    let skip = user_notes.len().saturating_sub(added as usize);
+    user_notes.into_iter().skip(skip)
+}
+
 /// Die `added` neuesten Nutzer-Kommentare (`notes` älteste zuerst), die
 /// nicht von `me` stammen.
 pub fn others_notes<'a>(notes: &'a [NoteInfo], added: u32, me: Option<&str>) -> Vec<&'a NoteInfo> {
-    let user_notes: Vec<&NoteInfo> = notes.iter().filter(|n| !n.system).collect();
-    let skip = user_notes.len().saturating_sub(added as usize);
-    user_notes
-        .into_iter()
-        .skip(skip)
+    recent_user_notes(notes, added)
         .filter(|n| me.is_none_or(|me| !n.author_username.eq_ignore_ascii_case(me)))
         .collect()
 }
@@ -327,11 +330,7 @@ pub fn own_notes(notes: &[NoteInfo], added: u32, me: Option<&str>) -> u32 {
     let Some(me) = me.filter(|m| !m.is_empty()) else {
         return 0;
     };
-    let user_notes: Vec<&NoteInfo> = notes.iter().filter(|n| !n.system).collect();
-    let skip = user_notes.len().saturating_sub(added as usize);
-    user_notes
-        .into_iter()
-        .skip(skip)
+    recent_user_notes(notes, added)
         .filter(|n| n.author_username.eq_ignore_ascii_case(me))
         .count() as u32
 }

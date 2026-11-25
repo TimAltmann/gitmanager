@@ -704,8 +704,7 @@ impl MyApp {
         // P2b: Intent merken statt verwerfen — FetchDone(is_auto) holt nach.
         if self.auto_fetching {
             self.pending_scan = true;
-            self.status_message = Some(tr(self.config.language, "auto_fetch_running"));
-            self.status_message_time = Some(std::time::Instant::now());
+            self.set_status(tr(self.config.language, "auto_fetch_running"));
             return;
         }
         self.set_git_busy(GitBusy::Scan);
@@ -800,8 +799,7 @@ impl MyApp {
                         // Fallback falls Key fehlt (sollte nicht passieren, i18n-Test sichert ab)
                         let msg = if msg == key { arg } else { msg };
                         self.error = Some(msg.clone());
-                        self.status_message = Some(msg);
-                        self.status_message_time = Some(std::time::Instant::now());
+                        self.set_status(msg);
                     } else {
                         self.error = None;
                     }
@@ -827,8 +825,7 @@ impl MyApp {
                         msg
                     };
                     self.error = Some(msg.clone());
-                    self.status_message = Some(msg);
-                    self.status_message_time = Some(std::time::Instant::now());
+                    self.set_status(msg);
                     self.mark_tray_dirty();
                     ctx.request_repaint();
                 }
@@ -871,8 +868,7 @@ impl MyApp {
                             self.settings_state = Some(SettingsState::from_config(&self.config));
                         }
                     }
-                    self.status_message = Some(tr(self.config.language, "saved_scan_restart"));
-                    self.status_message_time = Some(std::time::Instant::now());
+                    self.set_status(tr(self.config.language, "saved_scan_restart"));
                     ctx.request_repaint();
                 }
                 Err(err_msg) => {
@@ -901,10 +897,8 @@ impl MyApp {
                     // Anzeige in Settings (M2). Zusätzlich kurzer Status-Hinweis im
                     // Hauptfenster (F2-H4), damit Fehlschläge nicht unsichtbar bleiben.
                     // Kein roter Error-Block: bei Offline-Start wäre das Popup-Spam.
-                    self.status_message =
-                        Some(tr_fmt(self.config.language, "tray_update_error", &[&e]));
+                    self.set_status(tr_fmt(self.config.language, "tray_update_error", &[&e]));
                     self.update_error = Some(e);
-                    self.status_message_time = Some(std::time::Instant::now());
                     ctx.request_repaint();
                 }
             }
@@ -1475,12 +1469,11 @@ impl MyApp {
                         if let Some(repo) = self.repos.iter_mut().find(|r| r.path == repo_path) {
                             repo.selected_solution = Some(sln_path.clone());
                         }
-                        self.status_message = Some(crate::i18n::tr_fmt(
+                        self.set_status(crate::i18n::tr_fmt(
                             self.config.language,
                             "solution_selected",
                             &[&repo_path.display().to_string()],
                         ));
-                        self.status_message_time = Some(std::time::Instant::now());
                         self.mark_tray_dirty();
                         self.sync_tray_service();
                     }
@@ -1510,12 +1503,11 @@ impl MyApp {
                             .unwrap_or_else(|| path.display().to_string());
                         match launch_ide(ide, &path, file_opt) {
                             Ok(()) => {
-                                self.status_message = Some(crate::i18n::tr_fmt(
+                                self.set_status(crate::i18n::tr_fmt(
                                     self.config.language,
                                     "opening_with",
                                     &[&display, &ide.display_name],
                                 ));
-                                self.status_message_time = Some(std::time::Instant::now());
                             }
                             Err(e) => {
                                 self.error = Some(format!(
@@ -1558,24 +1550,22 @@ impl MyApp {
                                 ));
                             }
                         });
-                        self.status_message = Some(crate::i18n::tr_fmt(
+                        self.set_status(crate::i18n::tr_fmt(
                             self.config.language,
                             "starting_agent_in",
                             &[&agent.display_name, &path.display().to_string()],
                         ));
-                        self.status_message_time = Some(std::time::Instant::now());
                     }
                     self.record_usage(&path, UsageType::Open);
                 }
                 crate::tray_service::TrayAction::ExplorerOpen(path) => {
                     match crate::git::open_in_explorer(&path) {
                         Ok(()) => {
-                            self.status_message = Some(crate::i18n::tr_fmt(
+                            self.set_status(crate::i18n::tr_fmt(
                                 self.config.language,
                                 "explorer_opened",
                                 &[&path.display().to_string()],
                             ));
-                            self.status_message_time = Some(std::time::Instant::now());
                         }
                         Err(e) => {
                             self.error =
@@ -1597,12 +1587,11 @@ impl MyApp {
                                 err_tx.send(format!("Shell konnte nicht geöffnet werden: {e:#}"));
                         }
                     });
-                    self.status_message = Some(crate::i18n::tr_fmt(
+                    self.set_status(crate::i18n::tr_fmt(
                         self.config.language,
                         "shell_opened",
                         &[&path.display().to_string()],
                     ));
-                    self.status_message_time = Some(std::time::Instant::now());
                     self.record_usage(&path, UsageType::Open);
                 }
             }
@@ -1642,15 +1631,13 @@ impl MyApp {
         // L2: wie start_scan — kein manueller Fetch während
         // Auto-Fetch läuft (Ref-Race); Request verwerfen + Hinweis.
         if self.auto_fetching {
-            self.status_message = Some(tr(lang, "auto_fetch_running"));
-            self.status_message_time = Some(std::time::Instant::now());
+            self.set_status(tr(lang, "auto_fetch_running"));
             return;
         }
         // Ein Scan/Fetch/Checkout läuft schon (Tray-Stand kann veraltet sein):
         // kein zweiter Fetch auf dieselben Refs
         if self.git_busy.holds_refs() {
-            self.status_message = Some(tr(lang, "fetch_busy"));
-            self.status_message_time = Some(std::time::Instant::now());
+            self.set_status(tr(lang, "fetch_busy"));
             return;
         }
         let path_clone = repo_path.clone();
@@ -1659,12 +1646,11 @@ impl MyApp {
         // Manueller Fetch = frische Refs: Auto-Timer zurücksetzen,
         // damit der periodische Fetch nicht Sekunden später doppelt läuft.
         self.last_auto_fetch = Some(std::time::Instant::now());
-        self.status_message = Some(tr_fmt(
+        self.set_status(tr_fmt(
             lang,
             "fetching_branches",
             &[&repo_path.display().to_string()],
         ));
-        self.status_message_time = Some(std::time::Instant::now());
         std::thread::spawn(move || {
             // H3: Panic vor send darf `git_busy` nicht hängen
             // lassen — FetchAborted resettet Flags ohne Listen-Wipe.
@@ -1811,12 +1797,11 @@ impl MyApp {
                 .unwrap_or_else(|| path.display().to_string());
             match launch_ide(ide, path, file_opt) {
                 Ok(()) => {
-                    self.status_message = Some(tr_fmt(
+                    self.set_status(tr_fmt(
                         lang,
                         "opening_with",
                         &[&display_path, &ide.display_name],
                     ));
-                    self.status_message_time = Some(std::time::Instant::now());
                     started = true;
                 }
                 Err(e) => {
@@ -1859,12 +1844,11 @@ impl MyApp {
             let repo_clone = path.to_path_buf();
             let display_name = agent.display_name.clone();
             let err_tx = self.launch_err_tx.clone();
-            self.status_message = Some(tr_fmt(
+            self.set_status(tr_fmt(
                 lang,
                 "starting_agent_in",
                 &[&agent.display_name, &path.display().to_string()],
             ));
-            self.status_message_time = Some(std::time::Instant::now());
             std::thread::spawn(move || {
                 if let Err(e) = launch_agent(&agent, &repo_clone, &term_pref) {
                     let _ = err_tx.send(format!(
@@ -1886,12 +1870,11 @@ impl MyApp {
     fn open_explorer(&mut self, path: &Path) -> bool {
         let opened = match crate::git::open_in_explorer(path) {
             Ok(()) => {
-                self.status_message = Some(tr_fmt(
+                self.set_status(tr_fmt(
                     self.config.language,
                     "explorer_opened",
                     &[&path.display().to_string()],
                 ));
-                self.status_message_time = Some(std::time::Instant::now());
                 true
             }
             Err(e) => {
@@ -1914,12 +1897,11 @@ impl MyApp {
                 let _ = err_tx.send(format!("Shell konnte nicht geöffnet werden: {e:#}"));
             }
         });
-        self.status_message = Some(tr_fmt(
+        self.set_status(tr_fmt(
             self.config.language,
             "shell_opened",
             &[&path.display().to_string()],
         ));
-        self.status_message_time = Some(std::time::Instant::now());
         self.record_usage(path, UsageType::Open);
     }
 
@@ -2011,12 +1993,11 @@ impl MyApp {
                 self.mr_switch_succeeded(&repo_path, &target_branch);
             }
             Ok((outcome, None)) => {
-                self.status_message = Some(tr_fmt(
+                self.set_status(tr_fmt(
                     lang,
                     "branch_switched",
                     &[&target_branch, &repo_path.display().to_string()],
                 ));
-                self.status_message_time = Some(std::time::Instant::now());
                 self.error = None;
                 self.branch_dialog = None;
                 self.record_usage(&repo_path, UsageType::BranchSwitch);
@@ -2025,8 +2006,7 @@ impl MyApp {
                 // `start_scan` — während eines Auto-Fetch überschreibt der
                 // sonst „auto_fetch_running“ (Scan bleibt per pending_scan gemerkt).
                 if let Some(notice) = checkout_outcome_notice(lang, &outcome) {
-                    self.status_message = Some(notice);
-                    self.status_message_time = Some(std::time::Instant::now());
+                    self.set_status(notice);
                 }
                 // K1: Wechsel aus der MR-Ansicht → MR-Meldung, „Danach öffnen“
                 self.mr_switch_succeeded(&repo_path, &target_branch);
@@ -2105,12 +2085,11 @@ impl MyApp {
                         } else {
                             // Review-Fix: Profilwechsel betrifft Tray-Listen.
                             self.mark_tray_dirty();
-                            self.status_message = Some(tr_fmt(
+                            self.set_status(tr_fmt(
                                 lang,
                                 "profile_switched",
                                 &[&self.config.get_active_profile().display_name],
                             ));
-                            self.status_message_time = Some(std::time::Instant::now());
                             self.start_scan();
                         }
                     }
@@ -2894,8 +2873,7 @@ impl eframe::App for MyApp {
                                 } else {
                                     raw
                                 };
-                                self.status_message = Some(msg);
-                                self.status_message_time = Some(std::time::Instant::now());
+                                self.set_status(msg);
                                 if let Some(repo) =
                                     self.repos.iter_mut().find(|r| r.path == repo_path)
                                 {
@@ -2936,12 +2914,11 @@ impl eframe::App for MyApp {
                         if let Some(repo) = self.repos.iter_mut().find(|r| r.path == repo_path) {
                             repo.selected_solution = Some(sln_path);
                         }
-                        self.status_message = Some(tr_fmt(
+                        self.set_status(tr_fmt(
                             lang,
                             "solution_selected",
                             &[&repo_path.display().to_string()],
                         ));
-                        self.status_message_time = Some(std::time::Instant::now());
                     }
                 }
                 if let Some((repo_path, ide_id, file_path)) = actions.ide_open {
@@ -2956,12 +2933,11 @@ impl eframe::App for MyApp {
                     if let Err(e) = self.config.save() {
                         self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
                     } else {
-                        self.status_message = Some(tr_fmt(
+                        self.set_status(tr_fmt(
                             lang,
                             "profile_changed_for",
                             &[&repo_path.display().to_string()],
                         ));
-                        self.status_message_time = Some(std::time::Instant::now());
                         self.start_scan();
                     }
                 }
@@ -3051,8 +3027,7 @@ impl eframe::App for MyApp {
                         self.mark_tray_dirty();
                         self.settings_state = Some(SettingsState::from_config(&self.config));
                         self.show_settings = false;
-                        self.status_message = Some(tr(lang, "saved_scan_restart"));
-                        self.status_message_time = Some(std::time::Instant::now());
+                        self.set_status(tr(lang, "saved_scan_restart"));
                     }
                     if should_scan {
                         self.start_scan();

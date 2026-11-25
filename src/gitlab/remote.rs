@@ -59,6 +59,13 @@ impl RemoteInfo {
     }
 }
 
+/// scp-Form: Der Host-Teil muss ein Host sein – kein lokaler Pfad und kein
+/// Laufwerksbuchstabe (wie bei git selbst).
+fn is_scp_authority(authority: &str) -> bool {
+    let drive = authority.len() == 1 && authority.as_bytes()[0].is_ascii_alphabetic();
+    !drive && !authority.contains(['/', '\\'])
+}
+
 /// Parst `http(s)://[userinfo@]host[:port]/pfad`, `ssh://[user@]host[:port]/pfad`
 /// und die scp-Form `[user@]host:pfad`. Host und Pfad kleingeschrieben,
 /// `.git` und Slashes am Rand entfernt; der Pfad braucht mindestens
@@ -81,8 +88,7 @@ pub fn parse_remote_url(url: &str) -> Option<RemoteRef> {
             // scp-Form: Host endet wie bei git am ersten `:`; `/` oder `\`
             // davor bzw. ein Laufwerksbuchstabe heißt lokaler Pfad.
             let (authority, path) = url.split_once(':')?;
-            let drive = authority.len() == 1 && authority.as_bytes()[0].is_ascii_alphabetic();
-            if drive || authority.contains(['/', '\\']) {
+            if !is_scp_authority(authority) {
                 return None;
             }
             (RemoteScheme::Ssh, authority, path)
@@ -186,10 +192,9 @@ pub fn redact_remote_url(url: &str) -> String {
     }
     // scp-Form `user:passwort@host:pfad` (für git ungültig, aber nie
     // anzeigen); lokale Pfade wie in `parse_remote_url` unverändert.
-    let scp = url.split_once(':').is_some_and(|(authority, _)| {
-        let drive = authority.len() == 1 && authority.as_bytes()[0].is_ascii_alphabetic();
-        !drive && !authority.contains(['/', '\\'])
-    });
+    let scp = url
+        .split_once(':')
+        .is_some_and(|(authority, _)| is_scp_authority(authority));
     let at = url
         .match_indices('@')
         .map(|(i, _)| i)

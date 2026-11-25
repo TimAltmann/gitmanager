@@ -583,8 +583,7 @@ impl MyApp {
         self.mr_last_refresh = Some(Instant::now());
         // E20: nur in der MR-Ansicht, nie im Banner oder Tray
         if self.main_view == MainView::MergeRequests {
-            self.status_message = Some(tr(self.config.language, reason_key));
-            self.status_message_time = Some(Instant::now());
+            self.set_status(tr(self.config.language, reason_key));
         }
         self.run_pending_mr_refresh();
     }

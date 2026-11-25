@@ -565,8 +565,7 @@ impl MyApp {
         if let Some(pid) = actions.focus {
             // Im UI-Thread: nur der Vordergrund-Prozess darf den Fokus abgeben
             if !focus_session_window(pid) {
-                self.status_message = Some(tr(self.config.language, "claude_focus_failed"));
-                self.status_message_time = Some(Instant::now());
+                self.set_status(tr(self.config.language, "claude_focus_failed"));
             }
         }
     }
@@ -677,12 +676,11 @@ impl MyApp {
             .terminal_override
             .clone()
             .unwrap_or_else(|| self.config.terminal.preference.clone());
-        self.status_message = Some(tr_fmt(
+        self.set_status(tr_fmt(
             lang,
             "starting_agent_in",
             &[&profile.display_name, cwd],
         ));
-        self.status_message_time = Some(Instant::now());
         let path = PathBuf::from(cwd);
         let err_tx = self.launch_err_tx.clone();
         std::thread::spawn(move || {
