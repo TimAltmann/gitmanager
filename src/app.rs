@@ -1606,27 +1606,7 @@ impl MyApp {
                         .cloned()
                         .or_else(|| self.config.get_active_agent().cloned());
                     if let Some(agent) = agent {
-                        let term_pref = agent
-                            .terminal_override
-                            .clone()
-                            .unwrap_or_else(|| self.config.terminal.preference.clone());
-                        let repo_clone = path.clone();
-                        let agent_clone = agent.clone();
-                        let name = agent.display_name.clone();
-                        let err_tx = self.launch_err_tx.clone();
-                        std::thread::spawn(move || {
-                            if let Err(e) = launch_agent(&agent_clone, &repo_clone, &term_pref) {
-                                let _ = err_tx.send(format!(
-                                    "Agent '{}' konnte nicht gestartet werden: {e:#}",
-                                    name
-                                ));
-                            }
-                        });
-                        self.set_status(crate::i18n::tr_fmt(
-                            self.config.language,
-                            "starting_agent_in",
-                            &[&agent.display_name, &path.display().to_string()],
-                        ));
+                        self.spawn_agent(agent, &path);
                     }
                     self.record_usage(&path, UsageType::Open);
                 }
@@ -1896,32 +1876,38 @@ impl MyApp {
             .or_else(|| self.config.get_active_agent())
     }
 
+    /// Startet `profile` nicht blockierend im Terminal in `path`. Meldung und
+    /// Fehlerkanal sind für alle Agent-Startpfade (UI, Tray, Claude-Sessions)
+    /// identisch.
+    fn spawn_agent(&mut self, profile: crate::config::AgentProfile, path: &Path) {
+        let lang = self.config.language;
+        let term_pref = profile
+            .terminal_override
+            .clone()
+            .unwrap_or_else(|| self.config.terminal.preference.clone());
+        self.set_status(tr_fmt(
+            lang,
+            "starting_agent_in",
+            &[&profile.display_name, &path.display().to_string()],
+        ));
+        let err_tx = self.launch_err_tx.clone();
+        let repo_clone = path.to_path_buf();
+        std::thread::spawn(move || {
+            if let Err(e) = launch_agent(&profile, &repo_clone, &term_pref) {
+                let _ = err_tx.send(format!(
+                    "Agent '{}' konnte nicht gestartet werden: {e:#}",
+                    profile.display_name
+                ));
+            }
+        });
+    }
+
     /// Startet den Agenten `agent_id` (sonst den aktiven) im Terminal in
     /// `path`. `true`, wenn ein Agent gestartet wurde.
     fn open_agent(&mut self, path: &Path, agent_id: &str) -> bool {
         let lang = self.config.language;
         let started = if let Some(agent) = self.agent_by_id(agent_id).cloned() {
-            let term_pref = agent
-                .terminal_override
-                .clone()
-                .unwrap_or_else(|| self.config.terminal.preference.clone());
-            // Nicht blockierend starten (verhindert UI Freeze, besonders bei pwsh/wt)
-            let repo_clone = path.to_path_buf();
-            let display_name = agent.display_name.clone();
-            let err_tx = self.launch_err_tx.clone();
-            self.set_status(tr_fmt(
-                lang,
-                "starting_agent_in",
-                &[&agent.display_name, &path.display().to_string()],
-            ));
-            std::thread::spawn(move || {
-                if let Err(e) = launch_agent(&agent, &repo_clone, &term_pref) {
-                    let _ = err_tx.send(format!(
-                        "Agent '{}' konnte nicht gestartet werden: {e:#}",
-                        display_name
-                    ));
-                }
-            });
+            self.spawn_agent(agent, path);
             true
         } else {
             self.error = Some(tr_fmt(lang, "agent_not_found", &[agent_id]));

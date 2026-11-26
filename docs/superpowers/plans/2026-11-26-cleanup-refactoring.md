@@ -29,14 +29,20 @@ Datum: 2026-11-26 · Freigegeben: Ansatz 2 (strukturell mitziehen, verhaltensneu
 - [x] `gitlab/service.rs`: `with_schema()`-Helfer für fünf Laden/Speichern-Paare
 - bewusst nicht: MR-`icon_button()` (3 vs. 5 Parameter, nur 13 Aufrufstellen – geringer Nutzen)
 
-## Batch 3 – klare strukturelle Extraktionen
-- [ ] `i18n.rs`: 50 identische DE/EN-Paare zusammenführen, `.to_string()` einmal
-- [ ] `git.rs`: `worktree_locations()`-Iterator für drei Enumerationen
-- [ ] `git.rs`: `branch_upstream()` für doppelte Config-Leselogik
-- [ ] `git.rs`: gemeinsamer Kern für `build_agent_command`/`build_agent_cmd_raw`
-- [ ] `git.rs`: gemeinsame PowerShell-Command-Basis
-- [ ] `app.rs`: `apply_scan_intake()` für `poll_scan`-Arme
-- [ ] `app/*`: `WorkerChan<T>` für sechs Default-/Poll-Blöcke
-- [ ] `ui/settings.rs`: `icon_picker_row()` (~95 Zeilen)
-- [ ] `app.rs`: `refuse_while_busy()` für sechs Aufrufer
-- [ ] `app/claude_sessions.rs`: `spawn_agent()` für drei Pfade
+## Batch 3 – klare strukturelle Extraktionen ✅
+- [x] `i18n.rs`: 51 identische DE/EN-Paare zusammengeführt, `.to_string()` einmal;
+      Test-Helper `assert_keys_exist` für 8 Tests
+- [x] `git.rs`: `other_worktrees()` als einzige Quelle für drei Enumerationen
+- [x] `git.rs`: `branch_upstream()` für doppelte Config-Leselogik
+- [x] `git.rs`: `agent_tail()` für die gemeinsamen Zweige beider Command-Builder
+- [x] `git.rs`: `powershell_command()` als gemeinsame Basis
+- [x] `app.rs`: `intake_repos()` + `finish_scan_intake()` für `poll_scan`-Arme
+- [x] `app.rs`: `refuse_while_busy()` für sieben Aufrufer
+- [x] `app.rs`/`app/claude_sessions.rs`: `spawn_agent()` für drei Startpfade
+- bewusst nicht: `WorkerChan<T>` (sechs Structs, nur je eine `mpsc::channel()`-Zeile
+  gespart, dafür breiter Churn); `icon_picker_row()` (Borrow-Konflikte zwischen
+  `state.error` und `&mut ide/agent.icon`, hohes Risiko ohne Verhaltensgewinn)
+
+## Verifikation (final)
+`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo check`, `cargo test`:
+alle Exit-Code 0; **1006 Tests bestanden, 0 fehlgeschlagen** (1 toter Test weniger).

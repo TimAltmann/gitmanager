@@ -1515,6 +1515,14 @@ pub fn count_text(lang: Language, n: usize, one: &str, many: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Jeder gelistete Key muss in beiden Sprachen übersetzt sein.
+    fn assert_keys_exist(keys: &[&str]) {
+        for key in keys {
+            assert_ne!(tr(Language::En, key), *key, "missing EN key: {key}");
+            assert_ne!(tr(Language::De, key), *key, "missing DE key: {key}");
+        }
+    }
+
     #[test]
     fn language_default_is_en() {
         assert_eq!(Language::default(), Language::En);
@@ -1582,10 +1590,7 @@ mod tests {
             "key_attr",
             "value_attr",
         ];
-        for key in keys {
-            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
-            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
-        }
+        assert_keys_exist(&keys);
         // config_saved must support tr_fmt with 2 args without fallback
         let en = tr_fmt(Language::En, "config_saved", &["DB", "prod"]);
         assert_ne!(en, "config_saved");
@@ -1629,8 +1634,7 @@ mod tests {
             "tray_icon_theme_dark",
             "tray_icon_theme_light",
         ] {
-            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
-            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+            assert_keys_exist(&[key]);
         }
         let e = tr_fmt(Language::En, "tray_update_error", &["timeout"]);
         assert!(e.contains("timeout"));
@@ -1684,16 +1688,14 @@ mod tests {
             "claude_dir_hint",
             "claude_dir_placeholder",
         ] {
-            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
-            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+            assert_keys_exist(&[key]);
         }
     }
 
     #[test]
     fn tr_autostart_keys_exist() {
         for key in ["autostart_label", "autostart_hint"] {
-            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
-            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+            assert_keys_exist(&[key]);
         }
     }
 
@@ -1705,8 +1707,7 @@ mod tests {
             "sort_tooltip",
             "sort_title",
         ] {
-            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
-            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+            assert_keys_exist(&[key]);
         }
     }
 
@@ -1718,8 +1719,7 @@ mod tests {
             "auth_hint",
             "fetch_aborted",
         ] {
-            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
-            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+            assert_keys_exist(&[key]);
         }
         // DE wrapper texts stay byte-identical (review I1).
         assert_eq!(tr(Language::De, "fetch_failed"), "Fetch fehlgeschlagen: {}");
@@ -1795,8 +1795,7 @@ mod tests {
             "auto_fetch_off",
             "auto_fetch_running",
         ] {
-            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
-            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+            assert_keys_exist(&[key]);
         }
         let en = tr_fmt(Language::En, "branch_behind", &["3"]);
         assert!(en.contains('3'), "branch_behind EN must embed count: {en}");
@@ -1823,8 +1822,7 @@ mod tests {
     fn tr_tray_branch_more_keys_exist() {
         // Task 6 fix (Finding 2): Overflow-Hinweis sprachabhängig.
         for key in ["tray_branch_more_filtered", "tray_branch_more_main"] {
-            assert_ne!(tr(Language::En, key), key, "missing EN key: {key}");
-            assert_ne!(tr(Language::De, key), key, "missing DE key: {key}");
+            assert_keys_exist(&[key]);
         }
         // De-Texte identisch zum bisherigen Hardcode.
         let de_f = tr_fmt(Language::De, "tray_branch_more_filtered", &["5"]);

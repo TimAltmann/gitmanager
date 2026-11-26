@@ -17,7 +17,6 @@ use crate::claude_sessions::{
     SessionScan,
 };
 use crate::config::AgentProfile;
-use crate::git::launch_agent;
 use crate::i18n::{tr, tr_fmt};
 use crate::ui::claude_sessions::{show_claude_sessions, ClaudeSessionActions, ViewData};
 use crate::ui::new_claude_session::{show_new_claude_contents, DialogOutcome, NewClaudeDialog};
@@ -671,26 +670,7 @@ impl MyApp {
     }
 
     fn launch_claude(&mut self, profile: AgentProfile, cwd: &str) {
-        let lang = self.config.language;
-        let term_pref = profile
-            .terminal_override
-            .clone()
-            .unwrap_or_else(|| self.config.terminal.preference.clone());
-        self.set_status(tr_fmt(
-            lang,
-            "starting_agent_in",
-            &[&profile.display_name, cwd],
-        ));
-        let path = PathBuf::from(cwd);
-        let err_tx = self.launch_err_tx.clone();
-        std::thread::spawn(move || {
-            if let Err(e) = launch_agent(&profile, &path, &term_pref) {
-                let _ = err_tx.send(format!(
-                    "Agent '{}' konnte nicht gestartet werden: {e:#}",
-                    profile.display_name
-                ));
-            }
-        });
+        self.spawn_agent(profile, &PathBuf::from(cwd));
     }
 }
 
