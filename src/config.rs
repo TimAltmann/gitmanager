@@ -45,13 +45,6 @@ pub enum TrayIconTheme {
     Light,
 }
 
-impl TrayIconTheme {
-    #[allow(dead_code)]
-    pub fn all() -> Vec<TrayIconTheme> {
-        vec![TrayIconTheme::Dark, TrayIconTheme::Light]
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrayIconConfig {
     /// Reihenfolge der Icons im Tray-Popup (IDs in Anzeigereihenfolge)
