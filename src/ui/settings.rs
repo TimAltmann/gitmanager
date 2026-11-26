@@ -2679,6 +2679,93 @@ fn show_appearance_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     );
 }
 
+/// One row of an icon order list: eye toggle, label and up/down buttons.
+/// Returns whether the eye was clicked and the requested move delta, if any.
+fn icon_order_row(
+    ui: &mut egui::Ui,
+    lang: Language,
+    label: String,
+    is_hidden: bool,
+    order_idx: usize,
+    order_len: usize,
+) -> (bool, Option<isize>) {
+    let mut toggle = false;
+    let mut move_delta = None;
+    ui.horizontal(|ui| {
+        let eye_icon = if is_hidden { ICON_EYE_OFF } else { ICON_EYE };
+        let eye_tint = if is_hidden {
+            ui.visuals().weak_text_color()
+        } else {
+            ui.visuals().text_color()
+        };
+        if ui
+            .add(egui::Button::image(
+                egui::Image::new(eye_icon)
+                    .fit_to_exact_size(Vec2::splat(14.0))
+                    .tint(eye_tint),
+            ))
+            .on_hover_text(tr(lang, "icons_toggle_visibility"))
+            .clicked()
+        {
+            toggle = true;
+        }
+        let visuals = ui.visuals();
+        ui.label(
+            RichText::new(label)
+                .size(11.0)
+                .color(if is_hidden {
+                    visuals.weak_text_color()
+                } else {
+                    visuals.text_color()
+                }),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(egui::Button::image(
+                    egui::Image::new(ICON_CHEVRON_DOWN)
+                        .tint(ui.visuals().text_color())
+                        .fit_to_exact_size(Vec2::splat(14.0)),
+                ))
+                .clicked()
+                && order_idx + 1 < order_len
+            {
+                move_delta = Some(1);
+            }
+            if ui
+                .add(egui::Button::image(
+                    egui::Image::new(ICON_CHEVRON_UP)
+                        .tint(ui.visuals().text_color())
+                        .fit_to_exact_size(Vec2::splat(14.0)),
+                ))
+                .clicked()
+                && order_idx > 0
+            {
+                move_delta = Some(-1);
+            }
+        });
+    });
+    ui.add_space(2.0);
+    (toggle, move_delta)
+}
+
+/// Apply a queued icon move to an order vector, initializing it lazily when empty.
+fn apply_icon_order_move(
+    move_action: Option<(usize, isize)>,
+    order: &mut Vec<String>,
+    effective: &[String],
+) {
+    if let Some((idx, delta)) = move_action {
+        // Initialisiere Order falls leer (lazy)
+        if order.is_empty() {
+            *order = effective.to_vec();
+        }
+        let new_idx = (idx as isize + delta) as usize;
+        if new_idx < order.len() {
+            order.swap(idx, new_idx);
+        }
+    }
+}
+
 fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     let lang = state.draft.language;
     ui.label(RichText::new(tr(lang, "icons_title")).size(13.0).strong());
@@ -2747,60 +2834,20 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             let ide_opt = profile.ides.iter().find(|i| &i.id == ide_id);
             let Some(ide) = ide_opt else { continue };
             let is_hidden = profile.hidden_ide_ids.contains(ide_id);
-            ui.horizontal(|ui| {
-                let eye_icon = if is_hidden { ICON_EYE_OFF } else { ICON_EYE };
-                let eye_tint = if is_hidden {
-                    ui.visuals().weak_text_color()
-                } else {
-                    ui.visuals().text_color()
-                };
-                if ui
-                    .add(egui::Button::image(
-                        egui::Image::new(eye_icon)
-                            .fit_to_exact_size(Vec2::splat(14.0))
-                            .tint(eye_tint),
-                    ))
-                    .on_hover_text(tr(lang, "icons_toggle_visibility"))
-                    .clicked()
-                {
-                    ide_toggle = Some(ide_id.clone());
-                }
-                let visuals = ui.visuals();
-                ui.label(
-                    RichText::new(format!("{} ({})", ide.display_name, ide.id))
-                        .size(11.0)
-                        .color(if is_hidden {
-                            visuals.weak_text_color()
-                        } else {
-                            visuals.text_color()
-                        }),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(egui::Button::image(
-                            egui::Image::new(ICON_CHEVRON_DOWN)
-                                .tint(ui.visuals().text_color())
-                                .fit_to_exact_size(Vec2::splat(14.0)),
-                        ))
-                        .clicked()
-                        && order_idx + 1 < effective_ide_order.len()
-                    {
-                        ide_move = Some((order_idx, 1));
-                    }
-                    if ui
-                        .add(egui::Button::image(
-                            egui::Image::new(ICON_CHEVRON_UP)
-                                .tint(ui.visuals().text_color())
-                                .fit_to_exact_size(Vec2::splat(14.0)),
-                        ))
-                        .clicked()
-                        && order_idx > 0
-                    {
-                        ide_move = Some((order_idx, -1));
-                    }
-                });
-            });
-            ui.add_space(2.0);
+            let (toggle, delta) = icon_order_row(
+                ui,
+                lang,
+                format!("{} ({})", ide.display_name, ide.id),
+                is_hidden,
+                order_idx,
+                effective_ide_order.len(),
+            );
+            if toggle {
+                ide_toggle = Some(ide_id.clone());
+            }
+            if let Some(delta) = delta {
+                ide_move = Some((order_idx, delta));
+            }
         }
         if let Some(id) = ide_toggle {
             if profile.hidden_ide_ids.contains(&id) {
@@ -2809,16 +2856,7 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                 profile.hidden_ide_ids.push(id);
             }
         }
-        if let Some((idx, delta)) = ide_move {
-            // Initialisiere Order falls leer (lazy)
-            if profile.ide_order.is_empty() {
-                profile.ide_order = effective_ide_order.clone();
-            }
-            let new_idx = (idx as isize + delta) as usize;
-            if new_idx < profile.ide_order.len() {
-                profile.ide_order.swap(idx, new_idx);
-            }
-        }
+        apply_icon_order_move(ide_move, &mut profile.ide_order, &effective_ide_order);
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(8.0);
@@ -2864,60 +2902,24 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             let Some(agent) = agent_opt else { continue };
             let is_hidden = profile.hidden_agent_ids.contains(agent_id);
             let is_active = state.draft.active_agent_ids.contains(agent_id);
-            ui.horizontal(|ui| {
-                let eye_icon = if is_hidden { ICON_EYE_OFF } else { ICON_EYE };
-                let eye_tint = if is_hidden {
-                    ui.visuals().weak_text_color()
-                } else {
-                    ui.visuals().text_color()
-                };
-                if ui
-                    .add(egui::Button::image(
-                        egui::Image::new(eye_icon)
-                            .fit_to_exact_size(Vec2::splat(14.0))
-                            .tint(eye_tint),
-                    ))
-                    .on_hover_text(tr(lang, "icons_toggle_visibility"))
-                    .clicked()
-                {
-                    agent_toggle = Some(agent_id.clone());
-                }
-                let mut label = format!("{} ({})", agent.display_name, agent.id);
-                if !is_active {
-                    label.push_str(" [inaktiv]");
-                }
-                let visuals = ui.visuals();
-                ui.label(RichText::new(label).size(11.0).color(if is_hidden {
-                    visuals.weak_text_color()
-                } else {
-                    visuals.text_color()
-                }));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(egui::Button::image(
-                            egui::Image::new(ICON_CHEVRON_DOWN)
-                                .tint(ui.visuals().text_color())
-                                .fit_to_exact_size(Vec2::splat(14.0)),
-                        ))
-                        .clicked()
-                        && order_idx + 1 < effective_agent_order.len()
-                    {
-                        agent_move = Some((order_idx, 1));
-                    }
-                    if ui
-                        .add(egui::Button::image(
-                            egui::Image::new(ICON_CHEVRON_UP)
-                                .tint(ui.visuals().text_color())
-                                .fit_to_exact_size(Vec2::splat(14.0)),
-                        ))
-                        .clicked()
-                        && order_idx > 0
-                    {
-                        agent_move = Some((order_idx, -1));
-                    }
-                });
-            });
-            ui.add_space(2.0);
+            let mut label = format!("{} ({})", agent.display_name, agent.id);
+            if !is_active {
+                label.push_str(" [inaktiv]");
+            }
+            let (toggle, delta) = icon_order_row(
+                ui,
+                lang,
+                label,
+                is_hidden,
+                order_idx,
+                effective_agent_order.len(),
+            );
+            if toggle {
+                agent_toggle = Some(agent_id.clone());
+            }
+            if let Some(delta) = delta {
+                agent_move = Some((order_idx, delta));
+            }
         }
         if let Some(id) = agent_toggle {
             if profile.hidden_agent_ids.contains(&id) {
@@ -2926,15 +2928,7 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                 profile.hidden_agent_ids.push(id);
             }
         }
-        if let Some((idx, delta)) = agent_move {
-            if profile.agent_order.is_empty() {
-                profile.agent_order = effective_agent_order.clone();
-            }
-            let new_idx = (idx as isize + delta) as usize;
-            if new_idx < profile.agent_order.len() {
-                profile.agent_order.swap(idx, new_idx);
-            }
-        }
+        apply_icon_order_move(agent_move, &mut profile.agent_order, &effective_agent_order);
         ui.add_space(4.0);
         ui.label(
             RichText::new(format!(
@@ -3142,60 +3136,20 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     let mut tray_toggle: Option<String> = None;
     for (order_idx, icon_id) in effective.iter().enumerate() {
         let is_hidden = state.draft.tray_icons.hidden_icon_ids.contains(icon_id);
-        ui.horizontal(|ui| {
-            let eye_icon = if is_hidden { ICON_EYE_OFF } else { ICON_EYE };
-            let eye_tint = if is_hidden {
-                ui.visuals().weak_text_color()
-            } else {
-                ui.visuals().text_color()
-            };
-            if ui
-                .add(egui::Button::image(
-                    egui::Image::new(eye_icon)
-                        .fit_to_exact_size(Vec2::splat(14.0))
-                        .tint(eye_tint),
-                ))
-                .on_hover_text(tr(lang, "icons_toggle_visibility"))
-                .clicked()
-            {
-                tray_toggle = Some(icon_id.clone());
-            }
-            let visuals = ui.visuals();
-            ui.label(
-                RichText::new(format!("{} ({})", tray_icon_display_name(icon_id), icon_id))
-                    .size(11.0)
-                    .color(if is_hidden {
-                        visuals.weak_text_color()
-                    } else {
-                        visuals.text_color()
-                    }),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add(egui::Button::image(
-                        egui::Image::new(ICON_CHEVRON_DOWN)
-                            .tint(ui.visuals().text_color())
-                            .fit_to_exact_size(Vec2::splat(14.0)),
-                    ))
-                    .clicked()
-                    && order_idx + 1 < effective.len()
-                {
-                    tray_move = Some((order_idx, 1));
-                }
-                if ui
-                    .add(egui::Button::image(
-                        egui::Image::new(ICON_CHEVRON_UP)
-                            .tint(ui.visuals().text_color())
-                            .fit_to_exact_size(Vec2::splat(14.0)),
-                    ))
-                    .clicked()
-                    && order_idx > 0
-                {
-                    tray_move = Some((order_idx, -1));
-                }
-            });
-        });
-        ui.add_space(2.0);
+        let (toggle, delta) = icon_order_row(
+            ui,
+            lang,
+            format!("{} ({})", tray_icon_display_name(icon_id), icon_id),
+            is_hidden,
+            order_idx,
+            effective.len(),
+        );
+        if toggle {
+            tray_toggle = Some(icon_id.clone());
+        }
+        if let Some(delta) = delta {
+            tray_move = Some((order_idx, delta));
+        }
     }
     if let Some(id) = tray_toggle {
         if state.draft.tray_icons.hidden_icon_ids.contains(&id) {
@@ -3206,15 +3160,7 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         state.draft.tray_icons.hidden_icon_ids.sort();
         state.draft.tray_icons.hidden_icon_ids.dedup();
     }
-    if let Some((idx, delta)) = tray_move {
-        if state.draft.tray_icons.icon_order.is_empty() {
-            state.draft.tray_icons.icon_order = effective.clone();
-        }
-        let new_idx = (idx as isize + delta) as usize;
-        if new_idx < state.draft.tray_icons.icon_order.len() {
-            state.draft.tray_icons.icon_order.swap(idx, new_idx);
-        }
-    }
+    apply_icon_order_move(tray_move, &mut state.draft.tray_icons.icon_order, &effective);
 
     ui.add_space(8.0);
 

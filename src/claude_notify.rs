@@ -121,6 +121,31 @@ pub(crate) fn xml_escape(s: &str) -> String {
     out
 }
 
+/// Gemeinsames Toast-Gerüst. Kopfzeile, Texte und Bild werden hier escapet;
+/// `tail` enthält die fertigen `<action>`-Elemente, `</actions>` und optional
+/// das `<audio>`-Element, damit Buttons und Ton unverändert erhalten bleiben.
+fn toast_shell(
+    header_id: &str,
+    header: &str,
+    title: &str,
+    line: &str,
+    attribution: &str,
+    image: &str,
+    tail: &str,
+) -> String {
+    let e = xml_escape;
+    format!(
+        r#"<toast launch="{ACTION_TERMINAL}" useButtonStyle="true"><header id="{header_id}" title="{header}" arguments="{ACTION_SHOW}"/><visual><binding template="ToastGeneric"><text>{title}</text><text>{line}</text><text placement="attribution">{attribution}</text>{image}</binding></visual><actions>{tail}</toast>"#,
+        header_id = e(header_id),
+        header = e(header),
+        title = e(title),
+        line = e(line),
+        attribution = e(attribution),
+        image = image,
+        tail = tail,
+    )
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
 /// Toast-XML (Vorlage `ToastGeneric`); `logo` = rundes Logo mit Statusring.
 pub fn toast_xml(toast: &Toast, logo: Option<&Path>) -> String {
@@ -142,14 +167,20 @@ pub fn toast_xml(toast: &Toast, logo: Option<&Path>) -> String {
         NotifyKind::Waiting => r#"<audio src="ms-winsoundevent:Notification.Reminder"/>"#,
         NotifyKind::Done => "",
     };
-    format!(
-        r#"<toast launch="{ACTION_TERMINAL}" useButtonStyle="true"><header id="{HEADER_ID}" title="{header}" arguments="{ACTION_SHOW}"/><visual><binding template="ToastGeneric"><text>{title}</text><text>{line}</text><text placement="attribution">{attribution}</text>{image}</binding></visual><actions><action content="{terminal}" arguments="{ACTION_TERMINAL}"{terminal_style}/><action content="{show}" arguments="{ACTION_SHOW}"/></actions>{audio}</toast>"#,
-        header = e(&toast.header),
-        title = e(&toast.title),
-        line = e(line),
-        attribution = e(&toast.attribution),
+    let actions_xml = format!(
+        r#"<action content="{terminal}" arguments="{ACTION_TERMINAL}"{terminal_style}/><action content="{show}" arguments="{ACTION_SHOW}"/>"#,
         terminal = e(&toast.button_terminal),
         show = e(&toast.button_show),
+    );
+    let tail = format!("{actions_xml}</actions>{audio}");
+    toast_shell(
+        HEADER_ID,
+        &toast.header,
+        &toast.title,
+        line,
+        &toast.attribution,
+        &image,
+        &tail,
     )
 }
 
@@ -180,15 +211,20 @@ pub fn simple_toast_xml(toast: &SimpleToast, logo: Option<&Path>) -> String {
             e(&p.display().to_string())
         )
     });
-    format!(
-        r#"<toast launch="{ACTION_TERMINAL}" useButtonStyle="true"><header id="{header_id}" title="{header}" arguments="{ACTION_SHOW}"/><visual><binding template="ToastGeneric"><text>{title}</text><text>{line}</text><text placement="attribution">{attribution}</text>{image}</binding></visual><actions><action content="{open}" arguments="{ACTION_TERMINAL}"/><action content="{show}" arguments="{ACTION_SHOW}"/></actions></toast>"#,
-        header_id = e(toast.header_id),
-        header = e(&toast.header),
-        title = e(&toast.title),
-        line = e(&toast.line),
-        attribution = e(&toast.attribution),
+    let actions_xml = format!(
+        r#"<action content="{open}" arguments="{ACTION_TERMINAL}"/><action content="{show}" arguments="{ACTION_SHOW}"/>"#,
         open = e(&toast.button_open),
         show = e(&toast.button_show),
+    );
+    let tail = format!("{actions_xml}</actions>");
+    toast_shell(
+        toast.header_id,
+        &toast.header,
+        &toast.title,
+        &toast.line,
+        &toast.attribution,
+        &image,
+        &tail,
     )
 }
 

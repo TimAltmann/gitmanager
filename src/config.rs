@@ -1168,6 +1168,24 @@ impl AppConfig {
         *map = normalized;
     }
 
+    /// Migrationsschritt abschließen: Version setzen und best effort speichern.
+    fn bump_version(cfg: &mut AppConfig, version: u32) {
+        cfg.config_version = version;
+        let _ = cfg.save();
+    }
+
+    /// Icon-Pfad trimmen; leere Angabe wird als „kein Icon" behandelt.
+    fn trim_icon(icon: &mut Option<String>) {
+        if let Some(value) = icon.as_mut() {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                *icon = None;
+            } else {
+                *value = trimmed;
+            }
+        }
+    }
+
     fn try_load() -> Result<Self> {
         let path = Self::config_path().context("Kein Config-Pfad ermittelbar")?;
         // Migration: if new path doesn't exist but legacy repomanager path does, import it
@@ -1208,9 +1226,7 @@ impl AppConfig {
             if cfg.active_agent_id.is_none() {
                 cfg.active_agent_id = default_active_agent();
             }
-            cfg.config_version = 2;
-            // Speichere migrierte Config zurück (best effort)
-            let _ = cfg.save();
+            Self::bump_version(&mut cfg, 2);
         }
         if cfg.config_version < 3 {
             // Neue Defaults seit v3: 7 Profile + 6 Agents – fehlende ergänzen
@@ -1226,8 +1242,7 @@ impl AppConfig {
                     cfg.agents.push(da);
                 }
             }
-            cfg.config_version = 3;
-            let _ = cfg.save();
+            Self::bump_version(&mut cfg, 3);
         }
         if cfg.config_version < 4 {
             // v4: Nur noch .NET als Default-Profil, andere Presets entfernen (Custom bleiben)
@@ -1265,13 +1280,11 @@ impl AppConfig {
                 cfg.active_agent_ids = default_active_agents();
             }
             // Theme ist via #[serde(default)] bereits Light falls fehlend
-            cfg.config_version = 4;
-            let _ = cfg.save();
+            Self::bump_version(&mut cfg, 4);
         }
         if cfg.config_version < 5 {
             // v5: Language setting added (default En via serde), just bump version
-            cfg.config_version = 5;
-            let _ = cfg.save();
+            Self::bump_version(&mut cfg, 5);
         }
         if cfg.config_version < 6 {
             // v6: branch_display_limit + vscode default "." + no_args flag + {repo} Warnung
@@ -1305,39 +1318,22 @@ impl AppConfig {
                     }
                 }
             }
-            cfg.config_version = 6;
-            let _ = cfg.save();
+            Self::bump_version(&mut cfg, 6);
         }
         if cfg.config_version < 7 {
             // Config-Selectors werden unten bei der Profilvalidierung immer normalisiert.
-            cfg.config_version = 7;
-            let _ = cfg.save();
+            Self::bump_version(&mut cfg, 7);
         }
         if cfg.config_version < 8 {
             for p in &mut cfg.profiles {
                 for ide in &mut p.ides {
-                    if let Some(ic) = ide.icon.as_mut() {
-                        let t = ic.trim().to_string();
-                        if t.is_empty() {
-                            ide.icon = None;
-                        } else {
-                            *ic = t;
-                        }
-                    }
+                    Self::trim_icon(&mut ide.icon);
                 }
             }
             for a in &mut cfg.agents {
-                if let Some(ic) = a.icon.as_mut() {
-                    let t = ic.trim().to_string();
-                    if t.is_empty() {
-                        a.icon = None;
-                    } else {
-                        *ic = t;
-                    }
-                }
+                Self::trim_icon(&mut a.icon);
             }
-            cfg.config_version = 8;
-            let _ = cfg.save();
+            Self::bump_version(&mut cfg, 8);
         }
         if cfg.config_version < 9 {
             // v9: Tray settings introduced
@@ -1345,8 +1341,7 @@ impl AppConfig {
             if cfg.tray_branch_limit == 0 {
                 cfg.tray_branch_limit = default_tray_branch_limit();
             }
-            cfg.config_version = 9;
-            let _ = cfg.save();
+            Self::bump_version(&mut cfg, 9);
         }
         if cfg.config_version < 10 {
             // v10: TrayIconConfig introduced (icon_order, hidden_icon_ids, max_display)
@@ -1375,8 +1370,7 @@ impl AppConfig {
             }
             // repo_usage: Ein leeres HashMap neu zuzuweisen wäre ein No-op; die
             // Windows-Key-Normalisierung läuft unten ohnehin für alle Configs.
-            cfg.config_version = 10;
-            let _ = cfg.save();
+            Self::bump_version(&mut cfg, 10);
         }
         // K1: Versionen ab hier ohne Zwischen-Save — einmalig am Ende.
         let loaded_version = cfg.config_version;

@@ -113,12 +113,13 @@ pub fn scan_repos(config: &AppConfig) -> Vec<RepoInfo> {
     all_repos
 }
 
-/// Scannt innerhalb eines Repos nach Solution-/Zieldateien gemäß Profil
-pub fn scan_solutions_for_repo(repo_path: &Path, profile: &LanguageProfile) -> Vec<SolutionFile> {
-    let depth = profile.max_scan_depth.min(4);
-    let mut solutions = Vec::new();
-    let walker = WalkDir::new(repo_path)
-        .max_depth(depth)
+/// Gemeinsamer Walker: nicht in `.git` oder ignorierte Verzeichnisse absteigen.
+fn scan_walker(
+    root: &Path,
+    max_depth: usize,
+) -> impl Iterator<Item = Result<walkdir::DirEntry, walkdir::Error>> {
+    WalkDir::new(root)
+        .max_depth(max_depth)
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
@@ -134,7 +135,14 @@ pub fn scan_solutions_for_repo(repo_path: &Path, profile: &LanguageProfile) -> V
                 }
             }
             true
-        });
+        })
+}
+
+/// Scannt innerhalb eines Repos nach Solution-/Zieldateien gemäß Profil
+pub fn scan_solutions_for_repo(repo_path: &Path, profile: &LanguageProfile) -> Vec<SolutionFile> {
+    let depth = profile.max_scan_depth.min(4);
+    let mut solutions = Vec::new();
+    let walker = scan_walker(repo_path, depth);
 
     for entry in walker.filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
@@ -164,30 +172,7 @@ fn scan_single_root(root: &Path, max_depth: usize) -> Vec<RepoInfo> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     // WalkDir iteriert rekursiv, filter_entry verhindert Abstieg in ignorierte/.git Ordner
-    let walker = WalkDir::new(root)
-        .max_depth(walk_max_depth)
-        .min_depth(0)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            // Verhindere Abstieg in .git und ignorierte Dirs
-            if e.depth() == 0 {
-                return true;
-            }
-            if let Some(name) = e.file_name().to_str() {
-                if name == ".git" {
-                    return false;
-                }
-                if e.file_type().is_dir() && is_ignored_dir(name) {
-                    return false;
-                }
-                // Versteckte Ordner (außer .git das schon behandelt) optional ignorieren?
-                // Wir ignorieren nicht generell, da viele Repos in versteckten Pfaden liegen könnten
-                // Aber: .cache, .local etc. können riesig sein - bei max_depth >3 relevant
-                // Für max_depth <=2 ignorieren wir sie nicht, da sie direkte Kinder sein könnten
-            }
-            true
-        });
+    let walker = scan_walker(root, walk_max_depth);
 
     for entry in walker.filter_map(|e| e.ok()) {
         let path = entry.path().to_path_buf();

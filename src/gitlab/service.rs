@@ -1290,6 +1290,33 @@ struct PatInfo {
     granular: bool,
 }
 
+/// `glab api -i <endpoint>`: HTTP-Code und JSON nur bei 200. `classify`
+/// entscheidet über `Err`, aber nicht für Codes in `own`: die behandelt der
+/// Aufrufer selbst (400 = kein PAT, Redirects/404 beim Projekt) und darf dort
+/// nicht durch eine Fehlerart aus stderr überschrieben werden.
+fn rest_api(
+    runner: &dyn GlabRunner,
+    host: &str,
+    endpoint: impl Into<String>,
+    prepare: Prepare<'_>,
+    own: &[u16],
+) -> Result<(Option<u16>, Option<Value>), GlabErrorKind> {
+    let out = runner
+        .run(prepare(GlabRequest::api(host, [endpoint])))
+        .map_err(|e| e.kind())?;
+    let code = out.http.as_ref().map(|h| h.code);
+    if code == Some(200) {
+        return Ok((code, out.json()));
+    }
+    if code.is_some_and(|c| own.contains(&c)) {
+        return Ok((code, None));
+    }
+    match classify(&out) {
+        Some(kind) if ends_host(&kind) => Err(kind),
+        _ => Ok((code, None)),
+    }
+}
+
 /// `glab api -i personal_access_tokens/self`. `Err` bei Anmelde-, Netz-,
 /// TLS- und Timeout-Fehlern (dann keine weiteren Aufrufe).
 fn token_self(
@@ -1297,18 +1324,13 @@ fn token_self(
     host: &str,
     prepare: Prepare<'_>,
 ) -> Result<SelfInfo, GlabErrorKind> {
-    let out = runner
-        .run(prepare(GlabRequest::api(host, [SELF_ENDPOINT])))
-        .map_err(|e| e.kind())?;
-    match out.http.as_ref().map(|h| h.code) {
-        Some(200) => Ok(out.json().map_or(SelfInfo::Unavailable, |json| {
+    let (code, json) = rest_api(runner, host, SELF_ENDPOINT, prepare, &[400])?;
+    match code {
+        Some(200) => Ok(json.map_or(SelfInfo::Unavailable, |json| {
             SelfInfo::Pat(parse_pat(&json))
         })),
         Some(400) => Ok(SelfInfo::NotPat),
-        _ => match classify(&out) {
-            Some(kind) if ends_host(&kind) => Err(kind),
-            _ => Ok(SelfInfo::Unavailable),
-        },
+        _ => Ok(SelfInfo::Unavailable),
     }
 }
 
@@ -1543,19 +1565,18 @@ fn rest_project(
     prepare: Prepare<'_>,
 ) -> Result<AccessState, GlabErrorKind> {
     let endpoint = format!("projects/{}", encode_path(path));
-    let out = runner
-        .run(prepare(GlabRequest::api(host, [endpoint])))
-        .map_err(|e| e.kind())?;
-    match out.http.as_ref().map(|h| h.code) {
-        Some(200) => Ok(out
-            .json()
-            .map_or(AccessState::Unknown, |json| rest_state(&json, path))),
+    let (code, json) = rest_api(
+        runner,
+        host,
+        endpoint,
+        prepare,
+        &[301, 302, 307, 308, 404],
+    )?;
+    match code {
+        Some(200) => Ok(json.map_or(AccessState::Unknown, |json| rest_state(&json, path))),
         Some(301 | 302 | 307 | 308) => Ok(AccessState::Renamed { to: String::new() }),
         Some(404) => Ok(AccessState::NoAccess),
-        _ => match classify(&out) {
-            Some(kind) if ends_host(&kind) => Err(kind),
-            _ => Ok(AccessState::Unknown),
-        },
+        _ => Ok(AccessState::Unknown),
     }
 }
 
@@ -1702,18 +1723,11 @@ fn rest_username(
     host: &str,
     prepare: Prepare<'_>,
 ) -> Result<Option<String>, GlabErrorKind> {
-    let out = runner
-        .run(prepare(GlabRequest::api(host, ["user"])))
-        .map_err(|e| e.kind())?;
-    if out.http.as_ref().map(|h| h.code) == Some(200) {
-        return Ok(out
-            .json()
-            .and_then(|json| json.get("username")?.as_str().map(str::to_string)));
+    let (code, json) = rest_api(runner, host, "user", prepare, &[])?;
+    if code == Some(200) {
+        return Ok(json.and_then(|json| json.get("username")?.as_str().map(str::to_string)));
     }
-    match classify(&out) {
-        Some(kind) if ends_host(&kind) => Err(kind),
-        _ => Ok(None),
-    }
+    Ok(None)
 }
 
 /// Hat die bisher gespeicherte Anmeldung (ohne Env-Tokens) `api`? Eine
