@@ -16,8 +16,9 @@ pub use merge_requests::{
 };
 
 use crate::ui::icons::{
-    ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CROSS, ICON_EYE, ICON_EYE_OFF, ICON_FOLDER, ICON_PLUS,
-    ICON_TRASH, ICON_WARNING,
+    ICON_AIDER, ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CLAUDE, ICON_CODEX, ICON_COPILOT,
+    ICON_CROSS, ICON_CURSOR, ICON_EYE, ICON_EYE_OFF, ICON_FOLDER, ICON_GEMINI, ICON_PLUS,
+    ICON_RIDER, ICON_TRASH, ICON_VS, ICON_VSCODE, ICON_WARNING,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1502,13 +1503,13 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         // Default icon preview
                                         let default_icon = match ide.id.as_str() {
                                             "vs2022" | "vs" | "visualstudio" => {
-                                                egui::include_image!("../../assets/icons/visualstudio.svg")
+                                                ICON_VS
                                             }
                                             "rider" | "jetbrains" => {
-                                                egui::include_image!("../../assets/icons/rider.svg")
+                                                ICON_RIDER
                                             }
                                             _ => {
-                                                egui::include_image!("../../assets/icons/vscode.svg")
+                                                ICON_VSCODE
                                             }
                                         };
                                         ui.add(
@@ -2294,21 +2295,13 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         } else {
                             ui.add(
                                 egui::Image::new(match agent.id.as_str() {
-                                    "claude" => {
-                                        egui::include_image!("../../assets/icons/claude.svg")
-                                    }
-                                    "codex" => egui::include_image!("../../assets/icons/codex.svg"),
-                                    "gemini" => {
-                                        egui::include_image!("../../assets/icons/gemini.svg")
-                                    }
-                                    "copilot" => {
-                                        egui::include_image!("../../assets/icons/copilot.svg")
-                                    }
-                                    "cursor" => {
-                                        egui::include_image!("../../assets/icons/cursor.svg")
-                                    }
-                                    "aider" => egui::include_image!("../../assets/icons/aider.svg"),
-                                    _ => egui::include_image!("../../assets/icons/claude.svg"),
+                                    "claude" => ICON_CLAUDE,
+                                    "codex" => ICON_CODEX,
+                                    "gemini" => ICON_GEMINI,
+                                    "copilot" => ICON_COPILOT,
+                                    "cursor" => ICON_CURSOR,
+                                    "aider" => ICON_AIDER,
+                                    _ => ICON_CLAUDE,
                                 })
                                 .fit_to_exact_size(preview_size),
                             );
