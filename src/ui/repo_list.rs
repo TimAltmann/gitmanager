@@ -6,6 +6,7 @@ use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt};
 use crate::ui::repo_card_chips::{favorite_star, show_bottom_row, show_chip_row};
 use crate::ui::search_field::search_field;
+use crate::ui::theme::COLOR_MUTED;
 use egui::{Color32, RichText, Ui, Vec2};
 use std::collections::HashMap;
 
@@ -288,7 +289,7 @@ pub fn show_repo_list(
             ui.label(
                 RichText::new(tr(config.language, "no_repos_found"))
                     .size(16.0)
-                    .color(Color32::from_rgb(100, 100, 100)),
+                    .color(COLOR_MUTED),
             );
             ui.add_space(8.0);
             ui.label(

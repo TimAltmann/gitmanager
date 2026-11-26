@@ -15,6 +15,7 @@ use crate::ui::claude_anim::{
 };
 use crate::ui::search_field::search_field;
 use crate::ui::theme::mr_palette;
+use crate::ui::theme::COLOR_MUTED;
 use egui::{FontId, Popup, PopupCloseBehavior, RichText, Ui, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -184,7 +185,7 @@ fn show_empty(ui: &mut Ui, scanning: bool, lang: Language) {
         ui.label(
             RichText::new(tr(lang, "claude_none_found"))
                 .size(16.0)
-                .color(egui::Color32::from_rgb(100, 100, 100)),
+                .color(COLOR_MUTED),
         );
         ui.add_space(8.0);
         let dir = claude_projects_dir()
@@ -565,7 +566,7 @@ fn hover_frame(ui: &Ui, resp: &egui::Response) {
         ui.painter().rect_stroke(
             resp.rect,
             egui::CornerRadius::same(4),
-            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 100, 100)),
+            egui::Stroke::new(1.5_f32, COLOR_MUTED),
             egui::StrokeKind::Outside,
         );
     }

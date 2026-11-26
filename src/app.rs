@@ -17,6 +17,7 @@ use crate::gitlab::model::{MergedList, MrSnapshot};
 use crate::gitlab::remote::{GlabHost, HostMap, LocalProject};
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::scanner::scan_repos;
+use crate::ui::theme::COLOR_MUTED;
 use crate::ui::{
     merge_requests::{MrCheckoutChoice, MrViewState},
     repo_list::{show_repo_list, sort_main_repos, RepoHighlight, RepoListActions, RepoListContext},
@@ -2085,7 +2086,7 @@ impl MyApp {
                         ui.label(
                             RichText::new(tr(lang, "profile_label"))
                                 .size(11.0)
-                                .color(Color32::from_rgb(100, 100, 100)),
+                                .color(COLOR_MUTED),
                         );
                     }
                     let mut new_profile = self.config.active_profile_id.clone();
@@ -2129,11 +2130,7 @@ impl MyApp {
                         if self.config.agents.len() > 1 {
                             ui.add_space(8.0);
                             if !no_captions {
-                                ui.label(
-                                    RichText::new("AI:")
-                                        .size(11.0)
-                                        .color(Color32::from_rgb(100, 100, 100)),
-                                );
+                                ui.label(RichText::new("AI:").size(11.0).color(COLOR_MUTED));
                             }
                             let active_agents = self.config.get_active_agents();
                             let current_text = if active_agents.is_empty() {
@@ -2213,7 +2210,7 @@ impl MyApp {
                             ui.label(
                                 RichText::new(format!("AI: {}", agent.display_name))
                                     .size(11.0)
-                                    .color(Color32::from_rgb(100, 100, 100)),
+                                    .color(COLOR_MUTED),
                             );
                         }
                     }
@@ -2224,7 +2221,7 @@ impl MyApp {
                         ui.label(
                             RichText::new(tr(lang, "language"))
                                 .size(11.0)
-                                .color(Color32::from_rgb(100, 100, 100)),
+                                .color(COLOR_MUTED),
                         );
                     }
                     let mut new_lang = lang;
@@ -2411,7 +2408,7 @@ impl MyApp {
                                 prof.file_extension
                             ))
                             .size(11.0)
-                            .color(Color32::from_rgb(100, 100, 100)),
+                            .color(COLOR_MUTED),
                         );
                     });
                 }
@@ -2445,7 +2442,7 @@ impl MyApp {
                     } else if self.main_view == MainView::ClaudeSessions {
                         let (text, color) = match &self.status_message {
                             Some(msg) => (msg.clone(), Color32::from_rgb(60, 120, 60)),
-                            None => (self.claude_status_line(), Color32::from_rgb(100, 100, 100)),
+                            None => (self.claude_status_line(), COLOR_MUTED),
                         };
                         ui.label(RichText::new(text).size(11.0).color(color));
                     } else if let Some(msg) = &self.status_message {
@@ -2455,11 +2452,7 @@ impl MyApp {
                                 .color(Color32::from_rgb(60, 120, 60)),
                         );
                     } else if let Some(text) = repo_busy_text(lang, &self.git_busy) {
-                        ui.label(
-                            RichText::new(text)
-                                .size(11.0)
-                                .color(Color32::from_rgb(100, 100, 100)),
-                        );
+                        ui.label(RichText::new(text).size(11.0).color(COLOR_MUTED));
                     } else {
                         ui.label(
                             RichText::new({
@@ -2519,7 +2512,7 @@ impl MyApp {
                             tr(lang, "affected_files")
                         ))
                         .size(11.0)
-                        .color(Color32::from_rgb(100, 100, 100)),
+                        .color(COLOR_MUTED),
                     );
                     egui::ScrollArea::vertical()
                         .max_height(100.0)

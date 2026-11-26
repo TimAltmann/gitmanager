@@ -3,6 +3,7 @@ use crate::config::{
     TrayIconTheme,
 };
 use crate::i18n::{tr, tr_fmt, Language};
+use crate::ui::theme::COLOR_MUTED;
 use egui::{Color32, RichText, Vec2};
 use std::path::{Path, PathBuf};
 
@@ -605,7 +606,7 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
             "Wie viele Ebenen tief gesucht wird (1 = nur direkte Kinder, 2 = Kinder + Enkel, ...)",
         )
         .size(11.0)
-        .color(Color32::from_rgb(100, 100, 100)),
+        .color(COLOR_MUTED),
     );
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -643,7 +644,7 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
             "Maximale Anzahl Branches im Dropdown (50–500, Standard 200). Höhere Werte zeigen mehr Branches, können aber die Liste unübersichtlich machen.",
         )
         .size(11.0)
-        .color(Color32::from_rgb(100, 100, 100)),
+        .color(COLOR_MUTED),
     );
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -808,7 +809,7 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
         ui.label(
             RichText::new(tr(lang, "auto_fetch_hint"))
                 .size(11.0)
-                .color(Color32::from_rgb(100, 100, 100)),
+                .color(COLOR_MUTED),
         );
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -860,7 +861,7 @@ fn show_general_tab(ui: &mut egui::Ui, state: &mut SettingsState, update_error: 
     ui.label(
         RichText::new(tr(lang, "claude_notify_hint"))
             .size(11.0)
-            .color(Color32::from_rgb(100, 100, 100)),
+            .color(COLOR_MUTED),
     );
 }
 
@@ -874,7 +875,7 @@ fn show_worktree_root_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
 /// Claude Sessions bekommen, falls sie dort fehlen.
 fn show_folder_files_setting(ui: &mut egui::Ui, draft: &mut AppConfig) {
     let lang = draft.language;
-    let hint_color = Color32::from_rgb(100, 100, 100);
+    let hint_color = COLOR_MUTED;
     ui.label(
         RichText::new(tr(lang, "folder_files_label"))
             .size(13.0)
@@ -952,11 +953,7 @@ fn show_dir_setting(
     let absolute = |v: &Option<String>| crate::config::absolute_dir(v.as_deref());
     ui.label(RichText::new(tr(lang, label)).size(13.0).strong());
     ui.add_space(4.0);
-    ui.label(
-        RichText::new(tr(lang, hint))
-            .size(11.0)
-            .color(Color32::from_rgb(100, 100, 100)),
-    );
+    ui.label(RichText::new(tr(lang, hint)).size(11.0).color(COLOR_MUTED));
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let mut text = value.clone().unwrap_or_default();
@@ -1002,7 +999,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.label(
         RichText::new("Jedes Profil definiert eine Dateiendung (z.B. .sln) und die IDEs, mit denen diese geöffnet werden kann.")
             .size(11.0)
-            .color(Color32::from_rgb(100, 100, 100)),
+            .color(COLOR_MUTED),
     );
     ui.add_space(8.0);
 
@@ -1600,7 +1597,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                 cwd_preview
                             ))
                             .size(10.0)
-                            .color(Color32::from_rgb(100, 100, 100))
+                            .color(COLOR_MUTED)
                             .italics(),
                         );
                         if ide.id == "vscode" && ide.args == vec![".".to_string()] {
@@ -1697,7 +1694,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             ui.label(
                 RichText::new(tr(lang, "config_selector_desc"))
                     .size(11.0)
-                    .color(Color32::from_rgb(100, 100, 100)),
+                    .color(COLOR_MUTED),
             );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -2001,7 +1998,7 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.label(
         RichText::new("Agenten starten ein Terminal im Repo-Verzeichnis und führen den konfigurierten Befehl aus. Claude ist vordefiniert.")
             .size(11.0)
-            .color(Color32::from_rgb(100, 100, 100)),
+            .color(COLOR_MUTED),
     );
     ui.add_space(8.0);
 
@@ -2371,7 +2368,7 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             ui.label(
                 RichText::new(format!("Vorschau: {} {}", prog, args_preview))
                     .size(10.0)
-                    .color(Color32::from_rgb(100, 100, 100))
+                    .color(COLOR_MUTED)
                     .italics(),
             );
             ui.add_space(4.0);
@@ -2437,7 +2434,7 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             state.draft.agents.len()
         ))
         .size(10.5)
-        .color(Color32::from_rgb(100, 100, 100))
+        .color(COLOR_MUTED)
         .italics(),
     );
 }
@@ -2448,7 +2445,7 @@ fn show_terminal_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.label(
         RichText::new("Wähle das bevorzugte Terminal zum Starten von AI-Agents. 'Auto' probiert Windows Terminal → Powershell → cmd.")
             .size(11.0)
-            .color(Color32::from_rgb(100, 100, 100)),
+            .color(COLOR_MUTED),
     );
     ui.add_space(12.0);
 
@@ -2529,7 +2526,7 @@ fn show_language_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             "Wähle die Sprache der Anwendung. Änderungen werden nach dem Speichern übernommen."
         })
         .size(11.0)
-        .color(Color32::from_rgb(100, 100, 100)),
+        .color(COLOR_MUTED),
     );
     ui.add_space(12.0);
 
@@ -2603,7 +2600,7 @@ fn show_appearance_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.label(
         RichText::new("Wähle eines von 5 Themes — wirkt sofort nach Speichern.")
             .size(11.0)
-            .color(Color32::from_rgb(100, 100, 100)),
+            .color(COLOR_MUTED),
     );
     ui.add_space(12.0);
 
@@ -2680,7 +2677,7 @@ fn show_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.label(
         RichText::new(tr(lang, "icons_desc"))
             .size(11.0)
-            .color(Color32::from_rgb(100, 100, 100)),
+            .color(COLOR_MUTED),
     );
     ui.add_space(8.0);
 
@@ -3043,7 +3040,7 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.label(
         RichText::new(tr(lang, "tray_icons_desc"))
             .size(11.0)
-            .color(Color32::from_rgb(100, 100, 100)),
+            .color(COLOR_MUTED),
     );
     ui.add_space(12.0);
 
@@ -3057,7 +3054,7 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.label(
         RichText::new(tr(lang, "tray_icon_theme_desc"))
             .size(11.0)
-            .color(Color32::from_rgb(100, 100, 100)),
+            .color(COLOR_MUTED),
     );
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -3088,7 +3085,7 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             "Wie viele Repos maximal im Tray-Popup angezeigt werden (5–50, Standard 10).",
         )
         .size(11.0)
-        .color(Color32::from_rgb(100, 100, 100)),
+        .color(COLOR_MUTED),
     );
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -3143,7 +3140,7 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.label(
         RichText::new("Icons neu anordnen (↑/↓) und ausblenden (👁). Ausgeblendete Icons verschwinden ohne Lücke in der Tray-Zeile.")
             .size(11.0)
-            .color(Color32::from_rgb(100, 100, 100)),
+            .color(COLOR_MUTED),
     );
     ui.add_space(8.0);
 
@@ -3266,7 +3263,7 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     ui.label(
         RichText::new(tr(lang, "tray_branch_limit_desc"))
             .size(11.0)
-            .color(Color32::from_rgb(100, 100, 100)),
+            .color(COLOR_MUTED),
     );
     ui.add_space(6.0);
     ui.horizontal(|ui| {

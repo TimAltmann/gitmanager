@@ -2,6 +2,7 @@ use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::ui::theme::mr_palette;
+use crate::ui::theme::COLOR_MUTED;
 use egui::{AtomLayoutResponse, Color32, RichText, Vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -570,7 +571,7 @@ pub fn show_tray_popup_ui(
                     ui.label(
                         RichText::new(crate::i18n::tr(lang, "no_repos_found"))
                             .size(12.0)
-                            .color(Color32::from_rgb(100, 100, 100)),
+                            .color(COLOR_MUTED),
                     );
                     ui.add_space(8.0);
                     ui.label(
@@ -850,7 +851,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                     ui.label(
                         RichText::new(truncate_label(&repo.branch, TRAY_LABEL_MAX_CHARS))
                             .size(10.0)
-                            .color(Color32::from_rgb(100, 100, 100))
+                            .color(COLOR_MUTED)
                             .italics(),
                     )
                     .on_hover_text(&repo.branch);
