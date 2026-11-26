@@ -38,18 +38,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // Icons: Phosphor Regular wie in der MR-Ansicht (weiß, per `tint` gefärbt)
-const ICON_CHECK_CIRCLE: ImageSource =
-    egui::include_image!("../../../assets/icons/mr/check-circle.svg");
-const ICON_X_CIRCLE: ImageSource = egui::include_image!("../../../assets/icons/mr/x-circle.svg");
-const ICON_WARNING: ImageSource =
-    egui::include_image!("../../../assets/icons/mr/warning-circle.svg");
-const ICON_MINUS_CIRCLE: ImageSource =
-    egui::include_image!("../../../assets/icons/mr/minus-circle.svg");
-const ICON_LOCK: ImageSource = egui::include_image!("../../../assets/icons/mr/lock-simple.svg");
-const ICON_COPY: ImageSource = egui::include_image!("../../../assets/icons/mr/copy.svg");
-const ICON_OPEN_EXTERNAL: ImageSource =
-    egui::include_image!("../../../assets/icons/mr/arrow-square-out.svg");
-const ICON_TRASH: ImageSource = egui::include_image!("../../../assets/icons/trash.svg");
+use crate::ui::icons::mr::{
+    ICON_CHECK_CIRCLE, ICON_COPY, ICON_LOCK, ICON_MINUS_CIRCLE, ICON_OPEN_EXTERNAL, ICON_WARNING,
+    ICON_X_CIRCLE,
+};
+use crate::ui::icons::ICON_TRASH;
 
 /// Warnung „Läuft in {n} Tagen ab“ ab so vielen Tagen vor dem Ablauf.
 const EXPIRY_WARN_DAYS: i64 = 14;

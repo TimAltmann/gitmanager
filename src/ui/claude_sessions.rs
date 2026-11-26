@@ -19,17 +19,10 @@ use egui::{FontId, Popup, PopupCloseBehavior, RichText, Ui, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
-const ICON_GIT_BRANCH: egui::ImageSource =
-    egui::include_image!("../../assets/icons/git-branch.svg");
-const ICON_TERMINAL: egui::ImageSource = egui::include_image!("../../assets/icons/terminal.svg");
-const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
-const ICON_CHEVRON_DOWN: egui::ImageSource =
-    egui::include_image!("../../assets/icons/chevron-down.svg");
-const ICON_STAR: egui::ImageSource = egui::include_image!("../../assets/icons/star.svg");
-const ICON_STAR_FILL: egui::ImageSource = egui::include_image!("../../assets/icons/star-fill.svg");
-const ICON_CHEVRON_UP: egui::ImageSource =
-    egui::include_image!("../../assets/icons/chevron-up.svg");
+use crate::ui::icons::{
+    ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CLAUDE, ICON_FOLDER, ICON_GIT_BRANCH, ICON_STAR,
+    ICON_STAR_FILL, ICON_TERMINAL,
+};
 
 /// Was der Nutzer in der Ansicht ausgelöst hat.
 #[derive(Debug, Default, PartialEq, Eq)]

@@ -14,17 +14,10 @@ pub use merge_requests::{
     TokenEvent,
 };
 
-const ICON_CHEVRON_DOWN: egui::ImageSource =
-    egui::include_image!("../../assets/icons/chevron-down.svg");
-const ICON_CHEVRON_UP: egui::ImageSource =
-    egui::include_image!("../../assets/icons/chevron-up.svg");
-const ICON_EYE: egui::ImageSource = egui::include_image!("../../assets/icons/eye.svg");
-const ICON_EYE_OFF: egui::ImageSource = egui::include_image!("../../assets/icons/eye-off.svg");
-const ICON_CROSS: egui::ImageSource = egui::include_image!("../../assets/icons/cross.svg");
-const ICON_PLUS: egui::ImageSource = egui::include_image!("../../assets/icons/plus.svg");
-const ICON_TRASH: egui::ImageSource = egui::include_image!("../../assets/icons/trash.svg");
-const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
-const ICON_WARNING: egui::ImageSource = egui::include_image!("../../assets/icons/warning.svg");
+use crate::ui::icons::{
+    ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CROSS, ICON_EYE, ICON_EYE_OFF, ICON_FOLDER, ICON_PLUS,
+    ICON_TRASH, ICON_WARNING,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {

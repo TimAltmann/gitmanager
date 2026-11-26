@@ -7,23 +7,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 // Icons reused from repo_list
-const ICON_VSCODE: egui::ImageSource = egui::include_image!("../../assets/icons/vscode.svg");
-const ICON_VS: egui::ImageSource = egui::include_image!("../../assets/icons/visualstudio.svg");
-const ICON_RIDER: egui::ImageSource = egui::include_image!("../../assets/icons/rider.svg");
-const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
-const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
-const ICON_TERMINAL: egui::ImageSource = egui::include_image!("../../assets/icons/terminal.svg");
-const ICON_CODEX: egui::ImageSource = egui::include_image!("../../assets/icons/codex.svg");
-const ICON_GEMINI: egui::ImageSource = egui::include_image!("../../assets/icons/gemini.svg");
-const ICON_COPILOT: egui::ImageSource = egui::include_image!("../../assets/icons/copilot.svg");
-const ICON_CURSOR: egui::ImageSource = egui::include_image!("../../assets/icons/cursor.svg");
-const ICON_AIDER: egui::ImageSource = egui::include_image!("../../assets/icons/aider.svg");
-const ICON_REFRESH: egui::ImageSource = egui::include_image!("../../assets/icons/refresh.svg");
-const ICON_GEAR: egui::ImageSource = egui::include_image!("../../assets/icons/gear.svg");
-const ICON_CROSS: egui::ImageSource = egui::include_image!("../../assets/icons/cross.svg");
+use crate::ui::icons::mr::ICON_PULL_REQUEST;
+use crate::ui::icons::{
+    ICON_AIDER, ICON_CLAUDE, ICON_CODEX, ICON_COPILOT, ICON_CROSS, ICON_CURSOR, ICON_FOLDER,
+    ICON_GEAR, ICON_GEMINI, ICON_REFRESH, ICON_RIDER, ICON_TERMINAL, ICON_VS, ICON_VSCODE,
+};
 // Phosphor Regular wie in der MR-Ansicht (weiß, `tint` färbt ein)
-const ICON_PULL_REQUEST: egui::ImageSource =
-    egui::include_image!("../../assets/icons/mr/git-pull-request.svg");
 
 fn ide_icon_for(ide_id: &str) -> egui::ImageSource<'static> {
     match ide_id {

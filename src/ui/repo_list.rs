@@ -10,27 +10,11 @@ use egui::{Color32, RichText, Ui, Vec2};
 use std::collections::HashMap;
 
 // Icons via egui include_image! (Simple Icons CC0 + Phosphor for folder)
-const ICON_VSCODE: egui::ImageSource = egui::include_image!("../../assets/icons/vscode.svg");
-const ICON_VS: egui::ImageSource = egui::include_image!("../../assets/icons/visualstudio.svg");
-const ICON_RIDER: egui::ImageSource = egui::include_image!("../../assets/icons/rider.svg");
-const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
-const ICON_CODEX: egui::ImageSource = egui::include_image!("../../assets/icons/codex.svg");
-const ICON_GEMINI: egui::ImageSource = egui::include_image!("../../assets/icons/gemini.svg");
-const ICON_COPILOT: egui::ImageSource = egui::include_image!("../../assets/icons/copilot.svg");
-const ICON_CURSOR: egui::ImageSource = egui::include_image!("../../assets/icons/cursor.svg");
-const ICON_AIDER: egui::ImageSource = egui::include_image!("../../assets/icons/aider.svg");
-const ICON_CHEVRON_DOWN: egui::ImageSource =
-    egui::include_image!("../../assets/icons/chevron-down.svg");
-const ICON_CHEVRON_UP: egui::ImageSource =
-    egui::include_image!("../../assets/icons/chevron-up.svg");
-const ICON_GIT_BRANCH: egui::ImageSource =
-    egui::include_image!("../../assets/icons/git-branch.svg");
-const ICON_GIT_COMMIT: egui::ImageSource =
-    egui::include_image!("../../assets/icons/git-commit.svg");
-const ICON_SEARCH: egui::ImageSource = egui::include_image!("../../assets/icons/search.svg");
-const ICON_REFRESH: egui::ImageSource = egui::include_image!("../../assets/icons/refresh.svg");
-const ICON_TRASH: egui::ImageSource = egui::include_image!("../../assets/icons/trash.svg");
-const ICON_PLUS: egui::ImageSource = egui::include_image!("../../assets/icons/plus.svg");
+use crate::ui::icons::{
+    ICON_AIDER, ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CLAUDE, ICON_CODEX, ICON_COPILOT,
+    ICON_CURSOR, ICON_GEMINI, ICON_GIT_BRANCH, ICON_GIT_COMMIT, ICON_PLUS, ICON_REFRESH,
+    ICON_RIDER, ICON_SEARCH, ICON_TRASH, ICON_VS, ICON_VSCODE,
+};
 
 /// Tooltip-Text für den Branch-Button. Der Rückstand steht im ↓-Chip
 /// (`repo_card_chips::behind_tooltip`).

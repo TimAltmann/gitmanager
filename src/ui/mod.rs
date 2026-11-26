@@ -1,5 +1,6 @@
 pub mod claude_anim;
 pub mod claude_sessions;
+pub mod icons;
 pub mod merge_requests;
 pub mod new_claude_session;
 pub mod repo_card_chips;

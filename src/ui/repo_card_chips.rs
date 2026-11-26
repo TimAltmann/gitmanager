@@ -20,23 +20,14 @@ use crate::ui::merge_requests::pipeline_icon;
 use crate::ui::repo_list::{agent_image, ide_image, RepoListActions, RepoListContext};
 use crate::ui::theme::{mr_palette, MrPalette};
 
-const ICON_STAR: ImageSource = egui::include_image!("../../assets/icons/star.svg");
-const ICON_STAR_FILL: ImageSource = egui::include_image!("../../assets/icons/star-fill.svg");
-const ICON_DOTS: ImageSource = egui::include_image!("../../assets/icons/dots-three.svg");
-const ICON_ARROW_UP: ImageSource = egui::include_image!("../../assets/icons/arrow-up.svg");
-const ICON_ARROW_DOWN: ImageSource = egui::include_image!("../../assets/icons/arrow-down.svg");
-const ICON_CHECK: ImageSource = egui::include_image!("../../assets/icons/mr/check.svg");
-const ICON_WARNING: ImageSource = egui::include_image!("../../assets/icons/mr/warning-circle.svg");
-const ICON_PULL: ImageSource = egui::include_image!("../../assets/icons/mr/download-simple.svg");
-const ICON_MR: ImageSource = egui::include_image!("../../assets/icons/mr/git-pull-request.svg");
-const ICON_SPARKLE: ImageSource = egui::include_image!("../../assets/icons/mr/sparkle.svg");
-const ICON_COPY: ImageSource = egui::include_image!("../../assets/icons/mr/copy.svg");
-const ICON_BROWSER: ImageSource =
-    egui::include_image!("../../assets/icons/mr/arrow-square-out.svg");
-const ICON_FOLDER_PLUS: ImageSource = egui::include_image!("../../assets/icons/mr/folder-plus.svg");
-const ICON_TRASH: ImageSource = egui::include_image!("../../assets/icons/trash.svg");
-const ICON_FOLDER: ImageSource = egui::include_image!("../../assets/icons/folder.svg");
-const ICON_TERMINAL: ImageSource = egui::include_image!("../../assets/icons/terminal.svg");
+use crate::ui::icons::mr::{
+    ICON_CHECK, ICON_COPY, ICON_DOWNLOAD as ICON_PULL, ICON_FOLDER_PLUS,
+    ICON_OPEN_EXTERNAL as ICON_BROWSER, ICON_PULL_REQUEST as ICON_MR, ICON_SPARKLE, ICON_WARNING,
+};
+use crate::ui::icons::{
+    ICON_ARROW_DOWN, ICON_ARROW_UP, ICON_DOTS, ICON_FOLDER, ICON_STAR, ICON_STAR_FILL,
+    ICON_TERMINAL, ICON_TRASH,
+};
 
 /// Neue i18n-Schlüssel der Karte (Test: beide Sprachen vorhanden).
 #[cfg(test)]
