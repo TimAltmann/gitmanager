@@ -1275,10 +1275,6 @@ impl AppConfig {
                     cfg.active_agent_ids = default_active_agents();
                 }
             }
-            // Falls active_agent_ids leer, setze default
-            if cfg.active_agent_ids.is_empty() {
-                cfg.active_agent_ids = default_active_agents();
-            }
             // Theme ist via #[serde(default)] bereits Light falls fehlend
             Self::bump_version(&mut cfg, 4);
         }
@@ -1570,13 +1566,6 @@ impl AppConfig {
         }
         // Sync deprecated field
         cfg.active_agent_id = cfg.active_agent_ids.first().cloned();
-        if let Some(active) = &cfg.active_agent_id {
-            if !cfg.agents.iter().any(|a| &a.id == active) {
-                let new_active = cfg.agents.first().map(|a| a.id.clone());
-                cfg.active_agent_id = new_active.clone();
-                cfg.active_agent_ids = new_active.into_iter().collect();
-            }
-        }
         // Per-Profil hidden_agent_ids / agent_order gegen tatsächliche Agents validieren
         let valid_agent_ids: Vec<String> = cfg.agents.iter().map(|a| a.id.clone()).collect();
         for p in &mut cfg.profiles {
@@ -1689,11 +1678,8 @@ impl AppConfig {
 
     pub fn toggle_agent_active(&mut self, agent_id: &str) {
         if self.is_agent_active(agent_id) {
+            // Leere Liste ist erlaubt (UI zeigt dann keinen Button).
             self.active_agent_ids.retain(|id| id != agent_id);
-            // Verhindere leere Liste nicht strikt, aber sync deprecated
-            if self.active_agent_ids.is_empty() {
-                // Erlaube leer, aber UI zeigt dann keinen Button – optional fallback
-            }
         } else {
             self.active_agent_ids.push(agent_id.to_string());
         }

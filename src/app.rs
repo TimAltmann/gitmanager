@@ -983,9 +983,6 @@ impl MyApp {
         self.pending_branch_switches = deferred;
         if !pending.is_empty() {
             for (path, branch) in dedup_branch_switches(pending) {
-                if tray_branch_switch_opens_main_window() {
-                    self.show_main_window(ctx);
-                }
                 self.handle_branch_switch(ctx, path, branch);
             }
             // K1: MR-Wechsel ohne Ausführung und ohne eigenen Dialog verwerfen
@@ -1005,14 +1002,6 @@ impl MyApp {
             self.error = error;
         }
     }
-}
-
-/// Produktentscheidung: Tray-Branch-Switches öffnen das Hauptfenster nie von selbst.
-/// Saubere Switches laufen headless im Tray (Popup bleibt offen); bei Dirty landet
-/// der Entscheidungs-Dialog in `branch_dialog`, Konflikte/Fehler in `error` —
-/// beides wird sichtbar, sobald das Hauptfenster manuell geöffnet wird.
-pub fn tray_branch_switch_opens_main_window() -> bool {
-    false
 }
 
 /// Dedupliziert gequeue-te Branch-Switches: pro Repo zählt nur der zuletzt
@@ -4315,13 +4304,6 @@ mod tests {
         crate::config_parser::write_xml_value(dir.path(), &sel, "prod").unwrap();
         let out = std::fs::read_to_string(dir.path().join("App.config")).unwrap();
         assert!(out.contains(r#"value="prod""#));
-    }
-
-    #[test]
-    fn tray_branch_switch_never_forces_main_window() {
-        // Produktentscheidung: Tray-Switches laufen headless, auch bei Dirty
-        // (Dialog/Fehler warten in main). Popup bleibt offen, Main bleibt zu.
-        assert!(!tray_branch_switch_opens_main_window());
     }
 
     #[test]

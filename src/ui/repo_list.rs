@@ -653,14 +653,6 @@ fn show_repo_row(
                     if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
                         close_popup = true;
                     }
-                    // Wenn Window geschlossen (z.B. durch Klick außerhalb des egui Bereichs), open wird false
-                    if let Some(r) = win_resp {
-                        // r.response enthält den Frame – nicht direkt nutzen
-                        // Wir halten popup offen, es sei denn close_popup
-                        let _ = r;
-                    } else {
-                        // Window not shown due to earlier return? keep open
-                    }
                     // Persist filter während Popup offen
                     branch_filter_changed = branch_filter_changed || do_fetch;
                 }

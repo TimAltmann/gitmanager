@@ -3,20 +3,14 @@
 
 use anyhow::Result;
 
-#[allow(dead_code)]
-pub const RUN_VALUE_NAME: &str = "GitManager";
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const RUN_VALUE_NAME: &str = "GitManager";
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 /// Schreibt (enabled) oder entfernt (!enabled) den Run-Key-Eintrag.
 pub fn apply_autostart(enabled: bool) -> Result<()> {
     imp::set(enabled)
-}
-
-/// Meldet, ob der Run-Key-Eintrag aktuell gesetzt ist.
-#[allow(dead_code)]
-pub fn is_enabled() -> bool {
-    imp::is_enabled()
 }
 
 #[cfg(target_os = "windows")]
@@ -97,10 +91,6 @@ mod imp {
     pub fn set(_enabled: bool) -> Result<()> {
         Ok(())
     }
-
-    pub fn is_enabled() -> bool {
-        false
-    }
 }
 
 #[cfg(test)]
@@ -119,9 +109,8 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn noop_apply_ok_and_disabled() {
+    fn noop_apply_ok() {
         assert!(apply_autostart(true).is_ok());
         assert!(apply_autostart(false).is_ok());
-        assert!(!is_enabled());
     }
 }

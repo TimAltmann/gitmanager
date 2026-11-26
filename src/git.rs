@@ -23,12 +23,12 @@ fn rider_cache() -> &'static CachedPath {
     RIDER_PATH_CACHE.get_or_init(|| Mutex::new(None))
 }
 
-pub fn clear_vs_cache() {
+fn clear_vs_cache() {
     if let Some(m) = VS_PATH_CACHE.get() {
         *m.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
-pub fn clear_rider_cache() {
+fn clear_rider_cache() {
     if let Some(m) = RIDER_PATH_CACHE.get() {
         *m.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
@@ -2879,10 +2879,6 @@ fn escape_for_cmd(s: &str) -> String {
     shell_escape(s, '"', "\"\"", &[' ', '&', '|', '<', '>', '^', '"'], false)
 }
 
-fn has_placeholders(s: &str) -> bool {
-    s.contains("{file}") || s.contains("{dir}") || s.contains("{repo}")
-}
-
 fn build_agent_command<F>(
     agent: &AgentProfile,
     repo_path: &Path,
@@ -2914,11 +2910,7 @@ where
             format!("{prefix}{escaped_program} {args_str}")
         }
     } else if let Some(cmd) = &agent.command {
-        if has_placeholders(cmd) {
-            substitute_placeholders(cmd, repo_path, repo_path)
-        } else {
-            cmd.clone()
-        }
+        substitute_placeholders(cmd, repo_path, repo_path)
     } else {
         format!("{}{}", prefix, escape_fn(&agent.program))
     }
@@ -2941,11 +2933,7 @@ fn build_agent_cmd_raw(agent: &AgentProfile, repo_path: &Path) -> String {
             .join(" ");
         format!("{} {}", agent.program, args_str)
     } else if let Some(cmd) = &agent.command {
-        if has_placeholders(cmd) {
-            substitute_placeholders(cmd, repo_path, repo_path)
-        } else {
-            cmd.clone()
-        }
+        substitute_placeholders(cmd, repo_path, repo_path)
     } else {
         agent.program.clone()
     }
