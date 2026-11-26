@@ -384,6 +384,23 @@ pub fn fast_forward(path: &Path) -> anyhow::Result<FfOutcome> {
     fast_forward_inner(path, || {})
 }
 
+/// Upstream eines Branches aus `branch.<name>.remote/.merge`. Ein lokaler
+/// Upstream (`.`) und ein ungewöhnlicher Merge-Ref zählen als „keiner“.
+fn branch_upstream(repo: &Repository, branch: &str) -> anyhow::Result<Option<(String, String)>> {
+    let cfg = repo.config()?;
+    let remote = cfg.get_string(&format!("branch.{branch}.remote")).ok();
+    let merge = cfg.get_string(&format!("branch.{branch}.merge")).ok();
+    let (Some(remote), Some(merge)) = (remote, merge) else {
+        return Ok(None);
+    };
+    if remote == "." {
+        return Ok(None);
+    }
+    Ok(merge
+        .strip_prefix("refs/heads/")
+        .map(|name| (remote, name.to_string())))
+}
+
 /// Wie [`fast_forward`]; `after_fetch` läuft direkt nach dem Fetch (Tests
 /// simulieren damit Änderungen während des Abrufs).
 fn fast_forward_inner(path: &Path, after_fetch: impl FnOnce()) -> anyhow::Result<FfOutcome> {
@@ -393,19 +410,9 @@ fn fast_forward_inner(path: &Path, after_fetch: impl FnOnce()) -> anyhow::Result
     if detached {
         return Ok(FfOutcome::Detached);
     }
-    let cfg = repo.config()?;
-    let remote = cfg.get_string(&format!("branch.{branch}.remote")).ok();
-    let merge = cfg.get_string(&format!("branch.{branch}.merge")).ok();
-    let (Some(remote), Some(merge)) = (remote, merge) else {
+    let Some((remote, merge_branch)) = branch_upstream(&repo, &branch)? else {
         return Ok(FfOutcome::NoUpstream);
     };
-    let Some(merge_branch) = merge.strip_prefix("refs/heads/") else {
-        return Ok(FfOutcome::NoUpstream);
-    };
-    // Lokaler Remote ("."): kein Tracking-Ref zum Fetchen.
-    if remote == "." {
-        return Ok(FfOutcome::NoUpstream);
-    }
     let refname = format!("refs/heads/{branch}");
     // Stand vor dem Fetch merken: danach wird nur umgesetzt, wenn HEAD und
     // Branch noch genau so stehen (Compare-and-Swap).
@@ -1121,19 +1128,7 @@ pub fn tip_in_merged_heads(repo: &Repository, tip: git2::Oid, merged_heads: &[gi
 /// Hat der Branch einen konfigurierten Upstream, dessen Remote-Branch aber
 /// nicht mehr existiert (nach `fetch --prune` gelöscht)?
 pub fn upstream_gone(repo: &Repository, branch: &str) -> bool {
-    let Ok(cfg) = repo.config() else {
-        return false;
-    };
-    let remote = cfg.get_string(&format!("branch.{branch}.remote")).ok();
-    let merge = cfg.get_string(&format!("branch.{branch}.merge")).ok();
-    let (Some(remote), Some(merge)) = (remote, merge) else {
-        return false;
-    };
-    // Lokaler Upstream ("."): kein Remote-Tracking-Ref, nie „gone“.
-    if remote == "." {
-        return false;
-    }
-    let Some(name) = merge.strip_prefix("refs/heads/") else {
+    let Ok(Some((remote, name))) = branch_upstream(repo, branch) else {
         return false;
     };
     repo.find_reference(&format!("refs/remotes/{remote}/{name}"))
@@ -1659,33 +1654,56 @@ impl std::fmt::Display for BranchSwitchBlocked {
 
 impl std::error::Error for BranchSwitchBlocked {}
 
+/// Haupt- und verlinkte Worktrees außer dem eigenen, mit ausgechecktem
+/// Branch (`None` bei Detached HEAD). Liest nur Dateien unter `commondir`;
+/// verwaiste Einträge fallen in [`linked_worktree_path`] weg.
+fn other_worktrees(repo: &Repository) -> Vec<WorktreeHead> {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let own = canon(repo.path());
+    let common = repo.commondir();
+    let branch_of = |git_dir: &Path| {
+        head_symref(git_dir).and_then(|r| r.strip_prefix("refs/heads/").map(str::to_string))
+    };
+    let mut out = Vec::new();
+    // Haupt-Worktree: beim Basis-Klon ist `commondir` der eigene Git-Ordner.
+    if canon(common) != own {
+        if let Some(workdir) = Repository::open(common)
+            .ok()
+            .and_then(|r| r.workdir().map(|w| w.components().collect::<PathBuf>()))
+        {
+            out.push(WorktreeHead {
+                path: workdir,
+                branch: branch_of(common),
+            });
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(common.join("worktrees")) else {
+        return out;
+    };
+    for admin in entries.flatten().map(|e| e.path()) {
+        if canon(&admin) == own {
+            continue;
+        }
+        if let Some(path) = linked_worktree_path(&admin) {
+            out.push(WorktreeHead {
+                path,
+                branch: branch_of(&admin),
+            });
+        }
+    }
+    out
+}
+
 /// E15: Ist `branch` (Kurzname) in einem anderen Worktree desselben Repos
 /// als HEAD ausgecheckt? Liefert dessen Pfad. Liest `<commondir>/HEAD`
 /// (Haupt-Worktree, nicht bei Bare) und `<commondir>/worktrees/*/HEAD`
 /// direkt; der eigene Worktree zählt nicht. Verwaiste Einträge (Ordner
 /// gelöscht, nicht gesperrt) zählen wie bei `git worktree prune` nicht.
 pub(crate) fn branch_checked_out_elsewhere(repo: &Repository, branch: &str) -> Option<PathBuf> {
-    let wanted = format!("refs/heads/{branch}");
-    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let own = canon(repo.path());
-    let common = repo.commondir();
-    if canon(common) != own && head_symref(common).as_deref() == Some(wanted.as_str()) {
-        let main = Repository::open(common).ok();
-        if let Some(workdir) = main.as_ref().and_then(|r| r.workdir()) {
-            // Ohne abschließenden Separator (`…/c1/` → `…/c1`) für die Meldung.
-            return Some(workdir.components().collect());
-        }
-    }
-    let entries = std::fs::read_dir(common.join("worktrees")).ok()?;
-    for admin in entries.flatten().map(|e| e.path()) {
-        if canon(&admin) == own || head_symref(&admin).as_deref() != Some(wanted.as_str()) {
-            continue;
-        }
-        if let Some(path) = linked_worktree_path(&admin) {
-            return Some(path);
-        }
-    }
-    None
+    other_worktrees(repo)
+        .into_iter()
+        .find(|w| w.branch.as_deref() == Some(branch))
+        .map(|w| w.path)
 }
 
 /// Symbolischer HEAD eines Git-Verzeichnisses (`ref: refs/heads/x` →
@@ -2730,42 +2748,7 @@ pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
 /// [`branch_checked_out_elsewhere`] nur Dateien unter `commondir` (ein
 /// `readdir` je Repo); verwaiste Einträge fehlen.
 fn read_worktree_heads(repo: &Repository) -> Vec<WorktreeHead> {
-    let branch_of = |git_dir: &Path| {
-        head_symref(git_dir).and_then(|r| r.strip_prefix("refs/heads/").map(str::to_string))
-    };
-    let common = repo.commondir();
-    let mut heads = Vec::new();
-    if repo.is_worktree() {
-        let main = Repository::open(common).ok();
-        if let Some(workdir) = main.as_ref().and_then(|r| r.workdir()) {
-            heads.push(WorktreeHead {
-                // Ohne abschließenden Separator wie bei `branch_checked_out_elsewhere`
-                path: workdir.components().collect(),
-                branch: branch_of(common),
-            });
-        }
-    }
-    let Ok(names) = repo.worktrees() else {
-        return heads;
-    };
-    if names.is_empty() {
-        return heads;
-    }
-    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let own = canon(repo.path());
-    for name in names.iter().filter_map(|n| n.ok().flatten()) {
-        let admin = common.join("worktrees").join(name);
-        if canon(&admin) == own {
-            continue;
-        }
-        if let Some(path) = linked_worktree_path(&admin) {
-            heads.push(WorktreeHead {
-                path,
-                branch: branch_of(&admin),
-            });
-        }
-    }
-    heads
+    other_worktrees(repo)
 }
 
 /// Kanonischer Pfad als Vergleichsschlüssel (`RepoInfo.common_dir`). libgit2
@@ -2909,10 +2892,17 @@ where
         } else {
             format!("{prefix}{escaped_program} {args_str}")
         }
-    } else if let Some(cmd) = &agent.command {
-        substitute_placeholders(cmd, repo_path, repo_path)
     } else {
-        format!("{}{}", prefix, escape_fn(&agent.program))
+        agent_tail(agent, repo_path, prefix, escape_fn(&agent.program))
+    }
+}
+
+/// Gemeinsamer Rest ohne Args: fertige `command`-Zeile (mit Substitution) oder
+/// das (vom Aufrufer schon aufbereitete) Programm mit `prefix`.
+fn agent_tail(agent: &AgentProfile, repo_path: &Path, prefix: &str, program: String) -> String {
+    match &agent.command {
+        Some(cmd) => substitute_placeholders(cmd, repo_path, repo_path),
+        None => format!("{prefix}{program}"),
     }
 }
 
@@ -2932,10 +2922,8 @@ fn build_agent_cmd_raw(agent: &AgentProfile, repo_path: &Path) -> String {
             .collect::<Vec<_>>()
             .join(" ");
         format!("{} {}", agent.program, args_str)
-    } else if let Some(cmd) = &agent.command {
-        substitute_placeholders(cmd, repo_path, repo_path)
     } else {
-        agent.program.clone()
+        agent_tail(agent, repo_path, "", agent.program.clone())
     }
 }
 
@@ -3322,14 +3310,19 @@ fn spawn_wt(repo_str: &str, cmd_string: &str, repo_path: &Path) -> anyhow::Resul
 }
 
 #[cfg(not(test))]
-fn spawn_powershell(ps_script: &str, repo_path: &Path) -> anyhow::Result<()> {
+/// `pwsh` bevorzugen, sonst `powershell`; gemeinsame Startargumente.
+fn powershell_command() -> (std::process::Command, bool) {
     let has_pwsh = is_program_available("pwsh");
-    let ps = if has_pwsh { "pwsh" } else { "powershell" };
-    let mut cmd = std::process::Command::new(ps);
+    let mut cmd = std::process::Command::new(if has_pwsh { "pwsh" } else { "powershell" });
+    cmd.args(["-NoLogo", "-NoExit"]);
+    (cmd, has_pwsh)
+}
+
+#[cfg(not(test))]
+fn spawn_powershell(ps_script: &str, repo_path: &Path) -> anyhow::Result<()> {
+    let (mut cmd, has_pwsh) = powershell_command();
     if has_pwsh {
         cmd.args([
-            "-NoLogo",
-            "-NoExit",
             "-WorkingDirectory",
             &repo_path.display().to_string(),
             "-Command",
@@ -3338,27 +3331,18 @@ fn spawn_powershell(ps_script: &str, repo_path: &Path) -> anyhow::Result<()> {
     } else {
         let repo_escaped = escape_for_powershell_force(&repo_path.display().to_string());
         let full_script = format!("Set-Location {}; {}", repo_escaped, ps_script);
-        cmd.args(["-NoLogo", "-NoExit", "-Command", &full_script]);
+        cmd.args(["-Command", &full_script]);
     }
     spawn_finish(&mut cmd, repo_path, 0x00000010, "Powershell")
 }
 
 #[cfg(not(test))]
 fn spawn_powershell_shell(repo_path: &Path) -> anyhow::Result<()> {
-    let has_pwsh = is_program_available("pwsh");
-    let ps = if has_pwsh { "pwsh" } else { "powershell" };
-    let mut cmd = std::process::Command::new(ps);
+    let (mut cmd, has_pwsh) = powershell_command();
     if has_pwsh {
-        cmd.args([
-            "-NoLogo",
-            "-NoExit",
-            "-WorkingDirectory",
-            &repo_path.display().to_string(),
-        ]);
+        cmd.args(["-WorkingDirectory", &repo_path.display().to_string()]);
     } else {
         cmd.args([
-            "-NoLogo",
-            "-NoExit",
             "-Command",
             &format!(
                 "Set-Location {}",

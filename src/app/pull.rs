@@ -80,12 +80,7 @@ impl MyApp {
     pub(super) fn start_pull(&mut self, path: PathBuf) {
         let lang = self.config.language;
         // Wie beim manuellen Fetch: keine zwei libgit2-Läufe auf denselben Refs
-        if self.auto_fetching {
-            self.set_status(tr(lang, "auto_fetch_running"));
-            return;
-        }
-        if self.git_busy.holds_refs() {
-            self.set_status(tr(lang, "fetch_busy"));
+        if self.refuse_while_busy(lang, "auto_fetch_running", "fetch_busy", false) {
             return;
         }
         self.set_git_busy(GitBusy::Pull { repo: path.clone() });

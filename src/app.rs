@@ -734,6 +734,31 @@ impl MyApp {
         app
     }
 
+    /// Sperrt Aktionen, während ein Fetch oder andere Git-Arbeit läuft.
+    /// `pending` merkt den Wunsch für `poll_scan` (nur `start_scan`).
+    /// `true` = Aufrufer muss abbrechen, die Meldung ist schon gesetzt.
+    fn refuse_while_busy(
+        &mut self,
+        lang: Language,
+        auto_key: &str,
+        busy_key: &str,
+        pending: bool,
+    ) -> bool {
+        if self.auto_fetching || self.git_busy.holds_refs() {
+            if pending {
+                self.pending_scan = true;
+            }
+            let key = if self.auto_fetching {
+                auto_key
+            } else {
+                busy_key
+            };
+            self.set_status(tr(lang, key));
+            return true;
+        }
+        false
+    }
+
     fn start_scan(&mut self) {
         match self.git_busy {
             GitBusy::Idle => {}
@@ -753,9 +778,12 @@ impl MyApp {
         // L2: kein paralleler Lauf zum Auto-Fetch — zwei libgit2-Fetches
         // auf denselben Repos racen um FETCH_HEAD/refs (cannot lock ref).
         // P2b: Intent merken statt verwerfen — FetchDone(is_auto) holt nach.
-        if self.auto_fetching {
-            self.pending_scan = true;
-            self.set_status(tr(self.config.language, "auto_fetch_running"));
+        if self.refuse_while_busy(
+            self.config.language,
+            "auto_fetch_running",
+            "fetch_busy",
+            true,
+        ) {
             return;
         }
         self.set_git_busy(GitBusy::Scan);
@@ -779,6 +807,26 @@ impl MyApp {
         });
     }
 
+    /// Gemeinsamer Intake für `Repos` und `FetchDone`: Sortierung und
+    /// nachgelagerte Aktualisierungen, die auf neue Repo-Daten warten.
+    fn intake_repos(&mut self, repos: Vec<RepoInfo>) {
+        let mut repos = repos;
+        sort_main_repos(&mut repos, &self.config);
+        self.repos = repos;
+        self.repo_sort_dirty = false;
+        self.mr_after_scan();
+        self.claude_after_scan();
+    }
+
+    /// Abschluss eines Scan-Intakes: ausstehende IDE-Öffnungen, Tray-Sync,
+    /// neu zeichnen.
+    fn finish_scan_intake(&mut self, ctx: &egui::Context) {
+        self.run_pending_after_checkout();
+        self.mark_tray_dirty();
+        self.sync_tray_service();
+        ctx.request_repaint();
+    }
+
     fn poll_scan(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.scan_rx.try_recv() {
             match result {
@@ -791,22 +839,13 @@ impl MyApp {
                     // Task 4: View-Sortierung einmalig am Intake (per Frame nur
                     // noch bei dirty, siehe Render-Pfad) — Intake sortiert mit
                     // aktueller Config und erfüllt damit pending dirty.
-                    let mut repos = repos;
-                    sort_main_repos(&mut repos, &self.config);
-                    self.repos = repos;
-                    self.repo_sort_dirty = false;
                     // P2b: abgeschlossener Scan erfüllt gemerkten Refresh.
                     self.pending_scan = false;
                     self.error = self.error_after_scan.take();
-                    self.mr_after_scan();
-                    self.claude_after_scan();
-                    // K1: IDE nach dem Auschecken, sobald der Ordner bekannt ist
-                    self.run_pending_after_checkout();
+                    self.intake_repos(repos);
                     // Review-Fix: dirty VOR dem direkten Sync markieren — bei
                     // WouldBlock bleibt das Flag (Backstop in sync_tray_service).
-                    self.mark_tray_dirty();
-                    self.sync_tray_service();
-                    ctx.request_repaint();
+                    self.finish_scan_intake(ctx);
                 }
                 ScanResult::FetchDone {
                     repos,
@@ -830,12 +869,7 @@ impl MyApp {
                         // (> Intervall) kein Back-to-Back-Dauerfeuer.
                         self.last_auto_fetch = Some(std::time::Instant::now());
                     }
-                    let mut repos = repos;
-                    sort_main_repos(&mut repos, &self.config);
-                    self.repos = repos;
-                    self.repo_sort_dirty = false;
-                    self.mr_after_scan();
-                    self.claude_after_scan();
+                    self.intake_repos(repos);
                     if let Some(raw) = fetch_error {
                         let key = fetch_error_i18n_key(fetch_partial);
                         // I2: auth_hint nur bei echten Remote-Fehlern — bei
@@ -854,10 +888,7 @@ impl MyApp {
                     } else {
                         self.error = None;
                     }
-                    self.run_pending_after_checkout();
-                    self.mark_tray_dirty();
-                    self.sync_tray_service();
-                    ctx.request_repaint();
+                    self.finish_scan_intake(ctx);
                 }
                 ScanResult::FetchAborted { reason_key } => {
                     // H3: Thread-Panic vor send — Flags lösen (kein ewiger
@@ -1669,16 +1700,9 @@ impl MyApp {
     /// Fetch-Button im Tray): im Hintergrund, danach Rescan (`FetchDone`).
     fn start_repo_fetch(&mut self, repo_path: PathBuf) {
         let lang = self.config.language;
-        // L2: wie start_scan — kein manueller Fetch während
-        // Auto-Fetch läuft (Ref-Race); Request verwerfen + Hinweis.
-        if self.auto_fetching {
-            self.set_status(tr(lang, "auto_fetch_running"));
-            return;
-        }
-        // Ein Scan/Fetch/Checkout läuft schon (Tray-Stand kann veraltet sein):
-        // kein zweiter Fetch auf dieselben Refs
-        if self.git_busy.holds_refs() {
-            self.set_status(tr(lang, "fetch_busy"));
+        // L2: kein zweiter Fetch auf dieselben Refs (Ref-Race), auch nicht
+        // während des Auto-Fetch; Request verwerfen + Hinweis.
+        if self.refuse_while_busy(lang, "auto_fetch_running", "fetch_busy", false) {
             return;
         }
         let path_clone = repo_path.clone();

@@ -424,12 +424,7 @@ impl MyApp {
             return;
         }
         let lang = self.config.language;
-        if self.auto_fetching {
-            self.set_status(tr(lang, "auto_fetch_running"));
-            return;
-        }
-        if self.git_busy.holds_refs() {
-            self.set_status(tr(lang, "fetch_busy"));
+        if self.refuse_while_busy(lang, "auto_fetch_running", "fetch_busy", false) {
             return;
         }
         self.cleanup_ui.dialog = Some(CleanupDialog::scanning());
@@ -455,12 +450,7 @@ impl MyApp {
     /// „{n} entfernen“: ausgewählte Einträge nacheinander im Hintergrund.
     pub(super) fn confirm_cleanup(&mut self) {
         let lang = self.config.language;
-        if self.auto_fetching {
-            self.set_status(tr(lang, "auto_fetch_running"));
-            return;
-        }
-        if self.git_busy.holds_refs() {
-            self.set_status(tr(lang, "fetch_busy"));
+        if self.refuse_while_busy(lang, "auto_fetch_running", "fetch_busy", false) {
             return;
         }
         let Some(dialog) = self.cleanup_ui.dialog.as_mut() else {

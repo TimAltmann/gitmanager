@@ -17,16 +17,17 @@ Datum: 2026-11-26 · Freigegeben: Ansatz 2 (strukturell mitziehen, verhaltensneu
 - [x] `git.rs`: `has_placeholders` + wirkungslose Guards entfernen
 - [x] `git.rs`: `clear_vs_cache`/`clear_rider_cache` privatisieren
 
-## Batch 2 – vorhandene Helfer konsequent nutzen
-- [ ] `app.rs`/`app/*`: `config.save()`-Fehler über `note_config_save_error()`/Helfer
-- [ ] `app.rs`: `git::is_vs_program`/`is_rider_program` statt lokaler Listen
-- [ ] `ui/settings.rs`: `ide_icon_for`/`agent_icon_for` statt 9× `include_image!`
-- [ ] `ui/repo_card_chips.rs`: `icons::icon_image` statt lokalem `icon()`
-- [ ] `ui/merge_requests.rs` + `ui/settings/merge_requests.rs`: `small()`/Icon-Button vereinen
-- [ ] XML-Escape in `config_parser.rs` + `claude_notify.rs` zentralisieren; Logo-XML einmal bauen
-- [ ] `app/repo_badges.rs`: `LiveStatus::rank` nutzen
-- [ ] `gitlab/checkout.rs`: `config::absolute_dir` nutzen
-- [ ] `gitlab/service.rs`: `with_schema`-Helfer
+## Batch 2 – vorhandene Helfer konsequent nutzen ✅ (commit 672d312)
+- [x] `app.rs`: `save_failed_text()` für alle `save_failed`-Meldungen (statt 8 Kopien)
+- [x] `app.rs`: `git::is_vs_program`/`is_rider_program` statt lokaler Listen
+- [x] `ui/settings.rs`: `ide_icon_for`/`agent_icon_for` statt 9× `include_image!`
+- [x] `ui/repo_card_chips.rs`: `icons::icon_image` statt lokalem `icon()`
+- [x] identisches `small()` beider MR-Module nach `ui::widgets` geholt (Alias-Import)
+- [x] XML-Escape in `config_parser.rs` + `claude_notify.rs` → neues `src/xml.rs`; Logo-XML einmal
+- [x] `app/repo_badges.rs`: `LiveStatus::badge_priority()` statt lokalem `claude_rank`
+- [x] `gitlab/checkout.rs`: `config::absolute_dir` statt Kopie
+- [x] `gitlab/service.rs`: `with_schema()`-Helfer für fünf Laden/Speichern-Paare
+- bewusst nicht: MR-`icon_button()` (3 vs. 5 Parameter, nur 13 Aufrufstellen – geringer Nutzen)
 
 ## Batch 3 – klare strukturelle Extraktionen
 - [ ] `i18n.rs`: 50 identische DE/EN-Paare zusammenführen, `.to_string()` einmal

@@ -104,8 +104,7 @@ impl MyApp {
                 .merge_requests
                 .remember_after_checkout(&choice.after);
         }
-        if self.git_busy.holds_refs() || self.auto_fetching {
-            self.set_status(tr(lang, "mr_checkout_blocked"));
+        if self.refuse_while_busy(lang, "mr_checkout_blocked", "mr_checkout_blocked", false) {
             return;
         }
         // Ein MR-Wechsel wartet im Dialog auf die Entscheidung: ein zweiter
