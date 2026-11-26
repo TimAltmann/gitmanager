@@ -1169,6 +1169,14 @@ pub fn ready(mr: &MergeRequest) -> bool {
         && mr.threads_open == 0
 }
 
+/// Merge-Konflikte mit dem Ziel-Branch (`detailedMergeStatus == CONFLICT`);
+/// ohne das Feld (altes GitLab) unbekannt → `false`.
+pub fn has_conflicts(mr: &MergeRequest) -> bool {
+    mr.detailed_merge_status
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("CONFLICT"))
+}
+
 /// (gegeben, erforderlich, fehlend). `left` von GitLab (kennt z. B. Code
 /// Owner); fallen Bot-Approvals weg, nie weniger als die eigene Lücke.
 fn approval_counts(mr: &MergeRequest, ignore_bots: bool) -> (u32, u32, u32) {
@@ -2798,6 +2806,20 @@ mod tests {
         let mut mr = by_iid(&snap.mine, 412).clone();
         mr.detailed_merge_status = Some("CONFLICT".to_string());
         assert!(!ready(&mr));
+    }
+
+    #[test]
+    fn conflicts_from_detailed_merge_status() {
+        let snap = sample_snapshot(false);
+        let mut mr = by_iid(&snap.mine, 412).clone();
+        assert!(!has_conflicts(&mr));
+        mr.detailed_merge_status = Some("CONFLICT".to_string());
+        assert!(has_conflicts(&mr));
+        mr.detailed_merge_status = Some("conflict".to_string());
+        assert!(has_conflicts(&mr));
+        // Altes GitLab ohne das Feld: unbekannt, kein Chip
+        mr.detailed_merge_status = None;
+        assert!(!has_conflicts(&mr));
     }
 
     #[test]

@@ -17,10 +17,10 @@ use crate::gitlab::checkout::{
 use crate::gitlab::glab::{GlabErrorKind, GlabOutput};
 use crate::gitlab::graphql::MERGED_PAGE_SIZE;
 use crate::gitlab::model::{
-    approvals, chip_counts, empty_state, filter_others, initials, merged_matches, mr_matches,
-    mr_url, others_header_count, pipeline_url, ready, Approvals, ChipCounts, Chips, EmptyKind,
-    HeaderCount, MergeRequest, MergedList, MergedMr, MrPart, MrSnapshot, MyReview, PipelineState,
-    Reason, UninvolvedList,
+    approvals, chip_counts, empty_state, filter_others, has_conflicts, initials, merged_matches,
+    mr_matches, mr_url, others_header_count, pipeline_url, ready, Approvals, ChipCounts, Chips,
+    EmptyKind, HeaderCount, MergeRequest, MergedList, MergedMr, MrPart, MrSnapshot, MyReview,
+    PipelineState, Reason, UninvolvedList,
 };
 use crate::gitlab::remote::{HostMap, LocalProject};
 use crate::gitlab::service::{error_text, is_auth_error};
@@ -1699,6 +1699,9 @@ impl Row<'_> {
         let draft = mr.draft.then(|| tr(lang, "mr_draft"));
         let ready_label = (self.kind == RowKind::Mine && ready(mr)).then(|| tr(lang, "mr_ready"));
         let merged_label = (self.kind == RowKind::Merged).then(|| tr(lang, "mr_seg_merged"));
+        // Konflikte: in jeder Liste außer „Gemergt“
+        let conflict_label =
+            (self.kind != RowKind::Merged && has_conflicts(mr)).then(|| tr(lang, "mr_conflict"));
         let news = activity_labels(lang, &mr.activity);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -1709,6 +1712,9 @@ impl Row<'_> {
             }
             if let Some(r) = &ready_label {
                 suffix += pill_width(ui, r, true) + 8.0;
+            }
+            if let Some(c) = &conflict_label {
+                suffix += pill_width(ui, c, true) + 8.0;
             }
             if let Some(m) = &merged_label {
                 suffix += pill_width(ui, m, true) + 8.0;
@@ -1754,6 +1760,15 @@ impl Row<'_> {
                     Some((ICON_CHECK, p.ok_icon)),
                 )
                 .on_hover_text(tr(lang, "mr_ready_tt"));
+            }
+            if let Some(c) = &conflict_label {
+                pill(
+                    ui,
+                    c,
+                    PillStyle::outline(p.fail_text),
+                    Some((ICON_WARNING, p.fail_icon)),
+                )
+                .on_hover_text(tr(lang, "mr_conflict_tt"));
             }
             if let Some(m) = &merged_label {
                 pill(

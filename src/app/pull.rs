@@ -118,12 +118,17 @@ impl MyApp {
             }
             let text = pull_message(lang, &name, &done.result);
             self.start_scan();
+            // Agent aus der MR-Ansicht wartete auf diesen Pull
+            let then = self.start_agent_after_pull(&done.repo);
             if pull_is_error(&done.result) {
                 // Banner bleibt über den Rescan hinweg stehen
                 self.error = Some(text.clone());
                 self.error_after_scan = Some(text);
             } else {
-                self.set_status(text);
+                self.set_status(match then {
+                    Some(then) => format!("{text} {then}"),
+                    None => text,
+                });
             }
             ctx.request_repaint();
         }

@@ -776,11 +776,9 @@ fn show_open_card(
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         status_line(ui, o, lang, now_ms);
                         title_row(ui, |ui| {
-                            // Nur Favoriten zeigen den Stern (zum Entfernen)
-                            if config.is_favorite_session(&o.live.session_id) {
-                                star_clicked =
-                                    favorite_star(ui, &o.live.session_id, config, actions);
-                            }
+                            // Stern auch bei offenen Sessions: der Favorit
+                            // gilt der Session-ID und bleibt nach dem Schließen
+                            star_clicked = favorite_star(ui, &o.live.session_id, config, actions);
                             ui.add(
                                 egui::Label::new(RichText::new(&o.title).size(13.0).strong())
                                     .truncate(),
@@ -1029,14 +1027,18 @@ mod tests {
     }
 
     #[test]
-    fn open_card_has_no_star_unless_favorite() {
+    fn open_card_star_marks_favorite_without_focusing() {
+        // Offene Sessions lassen sich auch als Favorit markieren; der Favorit
+        // hängt an der Session-ID und bleibt nach dem Schließen
         let o = open(3, "a1", "Titel", LiveStatus::Idle);
         let config = AppConfig::default();
         let add = tr(config.language, "repo_fav_add");
-        let (_, labels) = click_label(&add, |ui, a| {
+        let (actions, labels) = click_label(&add, |ui, a| {
             show_open_card(ui, &o, &config, 0, Preview::Collapsed, a);
         });
-        assert!(!labels.contains(&add), "{labels:?}");
+        assert!(labels.contains(&add), "{labels:?}");
+        assert_eq!(actions.toggle_favorite.as_deref(), Some("a1"));
+        assert_eq!(actions.focus, None);
     }
 
     #[test]

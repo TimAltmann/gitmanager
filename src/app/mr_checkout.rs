@@ -6,6 +6,7 @@
 //! paralleler Scan oder Auto-Fetch); Fehler gehen wie beim Fetch über
 //! `self.error` und damit ins Banner beider Ansichten (E20).
 
+use super::mr_pull_prompt::MrAgentStart;
 use super::{fetch_error_i18n_key, fetch_error_parts, GitBusy, MainView, MyApp, ScanResult};
 use super::{ICON_CROSS, ICON_WARNING};
 use crate::config::{AfterAction, AppConfig};
@@ -125,12 +126,9 @@ impl MyApp {
         let mr = mr.clone();
         // Menü seit dem Öffnen veraltet: der Branch ist inzwischen ausgecheckt
         if let Some(path) = self.mr_checked_out_at(&mr) {
-            let behind = self
-                .repos
-                .iter()
-                .find(|r| same_dir(&r.path, &path))
-                .map_or(0, |r| r.behind);
-            self.mr_already_checked_out(&path, behind, &choice.after);
+            let behind = self.behind_of(&path);
+            let head = mr.diff_head_sha.clone();
+            self.mr_already_checked_out(&path, behind, head.as_deref(), &choice.after);
             return;
         }
         let job = match self.checkout_job(&mr, &choice.kind) {
@@ -259,7 +257,12 @@ impl MyApp {
                 }),
             ) => {
                 // Branch ist dort schon HEAD: kein Worktree, kein Wechsel
-                self.mr_already_checked_out(&base, behind, &choice.after);
+                let head = self
+                    .mr_snapshot
+                    .as_deref()
+                    .and_then(|s| find_mr(s, &choice.host_key, &choice.mr_id))
+                    .and_then(|mr| mr.diff_head_sha.clone());
+                self.mr_already_checked_out(&base, behind, head.as_deref(), &choice.after);
             }
             (MrCheckoutKind::NewWorktree { path, base }, prep) => {
                 if let Some(MrPrep {
@@ -322,8 +325,16 @@ impl MyApp {
         self.set_status(with_then(message, then));
     }
 
-    /// MR-Branch ist in `path` schon HEAD: nur „Danach öffnen“ dort.
-    fn mr_already_checked_out(&mut self, path: &Path, behind: usize, after: &AfterAction) {
+    /// MR-Branch ist in `path` schon HEAD: nur „Danach öffnen“ dort. Ein
+    /// Agent fragt vorher, ob gepullt wird, wenn Commits fehlen (`behind`,
+    /// `mr_head` = Kopf-Commit des MR).
+    fn mr_already_checked_out(
+        &mut self,
+        path: &Path,
+        behind: usize,
+        mr_head: Option<&str>,
+        after: &AfterAction,
+    ) {
         let lang = self.config.language;
         let shown = path.display().to_string();
         let message = if behind > 0 {
@@ -335,6 +346,18 @@ impl MyApp {
         } else {
             tr_fmt(lang, "mr_already_head", &[&shown])
         };
+        if let AfterAction::Agent(id) = after {
+            self.start_scan();
+            let then = match self.start_mr_agent(path, id, behind, mr_head) {
+                MrAgentStart::Asking => Some(tr(lang, "mr_then_pull_ask")),
+                MrAgentStart::Started => self
+                    .agent_by_id(id)
+                    .map(|a| tr_fmt(lang, "mr_then_agent", &[&a.display_name])),
+                MrAgentStart::NotStarted => None,
+            };
+            self.set_status(with_then(message, then));
+            return;
+        }
         self.finish_mr_checkout(path, None, after, message);
     }
 
@@ -465,12 +488,20 @@ impl MyApp {
     }
 
     /// Menü „Bereits ausgecheckt in {Pfad}“ (E5): Repo-Liste oder die
-    /// Methoden der Repo-Karte.
-    pub(super) fn open_existing(&mut self, path: &Path, target: &OpenTarget) {
+    /// Methoden der Repo-Karte. `mr_head` = Kopf-Commit des MR: fehlt er im
+    /// Klon (oder ist der Branch hinterher), fragt der Agent vorher, ob
+    /// gepullt wird.
+    pub(super) fn open_existing(
+        &mut self,
+        path: &Path,
+        target: &OpenTarget,
+        mr_head: Option<&str>,
+    ) {
         match target {
             OpenTarget::ShowInRepoList => self.show_in_repo_list(path),
             OpenTarget::Agent(id) => {
-                self.open_agent(path, id);
+                let behind = self.behind_of(path);
+                self.start_mr_agent(path, id, behind, mr_head);
             }
             OpenTarget::Shell => self.open_shell(path),
             OpenTarget::Explorer => {
@@ -788,7 +819,7 @@ fn find_mr<'s>(snapshot: &'s MrSnapshot, host_key: &str, id: &str) -> Option<&'s
 
 /// Gleicher Ordner trotz Schreibweise (Separatoren, unter Windows Groß-/
 /// Kleinschreibung, siehe [`path_key`]).
-fn same_dir(a: &Path, b: &Path) -> bool {
+pub(super) fn same_dir(a: &Path, b: &Path) -> bool {
     path_key(a) == path_key(b)
 }
 
@@ -1325,6 +1356,21 @@ mod tests {
                 clone.display()
             ))
         );
+        // Mit Agent und fehlenden Commits: erst fragen, ob gepullt wird
+        app.on_mr_checkout_ready(
+            switch(&clone, AfterAction::Agent("claude".to_string())),
+            prep(MrPrepOutcome::AlreadyHead { behind: 2 }),
+        );
+        let prompt = app.mr_pull_prompt.clone().expect("Frage „Vorher pullen?“");
+        assert_eq!(prompt.path, clone);
+        assert_eq!(prompt.behind, 2);
+        assert_eq!(
+            app.status_message,
+            Some(format!(
+                "Already checked out in {} (2 behind) – new commits in the MR, pull first?",
+                clone.display()
+            ))
+        );
     }
 
     /// Bestehender Klon mit echtem git: Fetch, Branch vorbereiten, Wechsel
@@ -1699,7 +1745,7 @@ mod tests {
         );
         let target = PathBuf::from("/tmp/gm-noide/other-mr-5");
         assert_eq!(ide_name_for(&app.config, &app.repos, &target), None);
-        app.open_existing(&target, &OpenTarget::Ide);
+        app.open_existing(&target, &OpenTarget::Ide, None);
         assert_eq!(
             app.status_message.as_deref(),
             Some("No IDE in this folder's profile")
@@ -1883,7 +1929,7 @@ mod tests {
         }];
         let mut app = app_with(vec![info]);
         app.main_view = MainView::MergeRequests;
-        app.open_existing(&outside, &OpenTarget::ShowInRepoList);
+        app.open_existing(&outside, &OpenTarget::ShowInRepoList, None);
         assert_eq!(app.main_view, MainView::Repos);
         let ctx = egui::Context::default();
         let first = app.repo_highlight_frame(&ctx).expect("Hervorhebung");
@@ -1901,24 +1947,28 @@ mod tests {
         }
         assert!(app.repo_highlight_frame(&ctx).is_none());
         assert!(app.repo_highlight.is_none());
-        app.open_existing(&outside, &OpenTarget::Explorer);
+        app.open_existing(&outside, &OpenTarget::Explorer, None);
         assert_eq!(
             app.status_message,
             Some(format!("Explorer opened: {}", outside.display()))
         );
-        app.open_existing(&outside, &OpenTarget::Shell);
+        app.open_existing(&outside, &OpenTarget::Shell, None);
         assert_eq!(
             app.status_message,
             Some(format!("Shell opened: {}", outside.display()))
         );
-        app.open_existing(&outside, &OpenTarget::Agent("claude".to_string()));
+        app.open_existing(&outside, &OpenTarget::Agent("claude".to_string()), None);
         assert_eq!(
             app.status_message,
             Some(format!("Starting Claude Code in {}...", outside.display()))
         );
         // Ordner ohne Karte: nur die Ansicht wechselt
         app.main_view = MainView::MergeRequests;
-        app.open_existing(Path::new("/tmp/elsewhere"), &OpenTarget::ShowInRepoList);
+        app.open_existing(
+            Path::new("/tmp/elsewhere"),
+            &OpenTarget::ShowInRepoList,
+            None,
+        );
         assert_eq!(app.main_view, MainView::Repos);
         assert!(app.repo_highlight.is_none());
     }

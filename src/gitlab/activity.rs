@@ -32,6 +32,8 @@ pub struct MrMark {
     pub mentioned: bool,
     /// Unix-Sekunden des letzten Abrufs, in dem der MR vorkam
     pub last_fetch: i64,
+    /// Head-Commit, dessen neue Commits schon auf eigene geprüft wurden
+    pub checked_sha: Option<String>,
 }
 
 /// Neues seit dem letzten Öffnen.
@@ -199,6 +201,80 @@ impl MrActivityStore {
         *mark != before
     }
 
+    /// MRs mit neuen Commits (oder neuem Head-Commit), die noch nicht auf
+    /// eigene Commits geprüft wurden (siehe [`Self::apply_own_commits`]).
+    pub fn commit_checks(&self, snapshot: &MrSnapshot) -> Vec<CommitCheck> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for mr in snapshot.mine.iter().chain(&snapshot.others) {
+            let key = mr_key(&mr.host_key, &mr.id);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let (Some(head), Some(mark)) = (&mr.diff_head_sha, self.marks.get(&key)) else {
+                continue;
+            };
+            if mark.checked_sha.as_ref() == Some(head) {
+                continue;
+            }
+            let activity = self.activity(mr);
+            if activity.new_commits == 0 && !activity.rewritten {
+                continue;
+            }
+            out.push(CommitCheck {
+                host_key: mr.host_key.clone(),
+                id: mr.id.clone(),
+                project_path: mr.project_path.clone(),
+                iid: mr.iid,
+                head_sha: head.clone(),
+                added: activity.new_commits,
+                count: mr.commit_count.unwrap_or(0),
+            });
+        }
+        out
+    }
+
+    /// Eigene Commits zählen nicht als neu: `commits` = die neuesten Commits
+    /// des MR (neueste zuerst) zum Stand von `check`. Sind alle neuen
+    /// Commits meine (bzw. bei gleichbleibender Anzahl der neue Head-Commit,
+    /// etwa nach meinem Rebase), gilt auch der Head-Commit als gesehen.
+    /// `true` bei Änderung.
+    pub fn apply_own_commits(
+        &mut self,
+        check: &CommitCheck,
+        commits: &[CommitInfo],
+        me: &MyIdentity,
+    ) -> bool {
+        let Some(mark) = self.marks.get_mut(&mr_key(&check.host_key, &check.id)) else {
+            return false;
+        };
+        let before = mark.clone();
+        mark.checked_sha = Some(check.head_sha.clone());
+        // Liste passt nicht zum geprüften Stand (inzwischen neu gepusht):
+        // nichts ableiten, der nächste Abruf prüft erneut
+        if commits.first().map(|c| c.sha.as_str()) != Some(check.head_sha.as_str()) {
+            mark.checked_sha = before.checked_sha.clone();
+            return *mark != before;
+        }
+        if check.added == 0 {
+            // Gleiche Anzahl, anderer Head (Force-Push, Rebase): von mir?
+            if me.authored(&commits[0]) || me.committed(&commits[0]) {
+                mark.seen_sha = Some(check.head_sha.clone());
+            }
+        } else {
+            let newest = &commits[..commits.len().min(check.added as usize)];
+            let own = newest.iter().filter(|c| me.authored(c)).count() as u32;
+            if own > 0 {
+                let cap = check.count.max(mark.seen_commits);
+                mark.seen_commits = (mark.seen_commits + own).min(cap);
+            }
+            if own == check.added {
+                mark.seen_sha = Some(check.head_sha.clone());
+            }
+        }
+        *mark != before
+    }
+
     /// `own` neue Kommentare sind meine eigenen: sie zählen nicht als neu.
     /// Höchstens bis `count` (Stand des Abrufs).
     pub fn mark_own_notes_seen(&mut self, host_key: &str, id: &str, own: u32, count: u32) -> bool {
@@ -300,6 +376,72 @@ impl MrActivityStore {
     }
 }
 
+/// MR, dessen neue Commits auf eigene geprüft werden
+/// ([`MrActivityStore::commit_checks`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitCheck {
+    pub host_key: String,
+    pub id: String,
+    pub project_path: String,
+    pub iid: u64,
+    /// Head-Commit beim Abruf
+    pub head_sha: String,
+    /// Neue Commits seit dem letzten Öffnen (0 = nur neuer Head-Commit)
+    pub added: u32,
+    /// Commits im MR beim Abruf
+    pub count: u32,
+}
+
+/// Ein Commit aus `service::fetch_recent_commits`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub committer_email: String,
+}
+
+/// Wer ich bin, um eigene Commits zu erkennen: GitLab-Benutzername und
+/// bekannte E-Mail-Adressen (GitLab-Konto, globale git-Konfiguration).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MyIdentity {
+    pub username: Option<String>,
+    /// Kleingeschrieben
+    pub emails: Vec<String>,
+}
+
+impl MyIdentity {
+    fn is_mine(&self, email: &str) -> bool {
+        let email = email.trim().to_ascii_lowercase();
+        if email.is_empty() {
+            return false;
+        }
+        if self.emails.contains(&email) {
+            return true;
+        }
+        // Private Commit-Adresse von GitLab: `{id}-{user}@users.noreply.{host}`
+        self.username
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .is_some_and(|u| {
+                let u = u.to_ascii_lowercase();
+                let Some((local, domain)) = email.split_once('@') else {
+                    return false;
+                };
+                domain.starts_with("users.noreply.")
+                    && (local == u || local.ends_with(&format!("-{u}")))
+            })
+    }
+
+    pub fn authored(&self, c: &CommitInfo) -> bool {
+        self.is_mine(&c.author_email)
+    }
+
+    pub fn committed(&self, c: &CommitInfo) -> bool {
+        self.is_mine(&c.committer_email)
+    }
+}
+
 /// Ein Kommentar aus der Folgeabfrage (`graphql::recent_notes`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NoteInfo {
@@ -370,6 +512,112 @@ mod tests {
             others,
             ..MrSnapshot::default()
         }
+    }
+
+    fn commit(sha: &str, author: &str, committer: &str) -> CommitInfo {
+        CommitInfo {
+            sha: sha.to_string(),
+            author_name: String::new(),
+            author_email: author.to_string(),
+            committer_email: committer.to_string(),
+        }
+    }
+
+    fn me() -> MyIdentity {
+        MyIdentity {
+            username: Some("twolber".to_string()),
+            emails: vec!["tim@example.com".to_string()],
+        }
+    }
+
+    #[test]
+    fn identity_matches_emails_and_gitlab_noreply() {
+        let me = me();
+        assert!(me.authored(&commit("a", "Tim@Example.com", "")));
+        assert!(me.authored(&commit(
+            "a",
+            "42-twolber@users.noreply.gitlab.example.com",
+            ""
+        )));
+        assert!(me.authored(&commit("a", "twolber@users.noreply.gitlab.com", "")));
+        assert!(!me.authored(&commit("a", "42-xtwolber@example.com", "")));
+        assert!(!me.authored(&commit("a", "anna@example.com", "")));
+        assert!(!me.authored(&commit("a", "", "")));
+        assert!(me.committed(&commit("a", "anna@example.com", "tim@example.com")));
+    }
+
+    #[test]
+    fn own_commits_are_not_new() {
+        let mut store = MrActivityStore::default();
+        store.observe(&snap(vec![mr("a", 0, 2, "s2")], vec![]), 100);
+        // Zwei neue Commits: einer von mir, einer von Anna
+        let snapshot = snap(vec![mr("a", 0, 4, "s4")], vec![]);
+        store.observe(&snapshot, 200);
+        let checks = store.commit_checks(&snapshot);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].added, 2);
+        let commits = [
+            commit("s4", "tim@example.com", "tim@example.com"),
+            commit("s3", "anna@example.com", "anna@example.com"),
+        ];
+        assert!(store.apply_own_commits(&checks[0], &commits, &me()));
+        let a = store.activity(&snapshot.mine[0]);
+        assert_eq!(a.new_commits, 1);
+        // Geprüft: kein zweiter Abruf für denselben Head
+        assert!(store.commit_checks(&snapshot).is_empty());
+    }
+
+    #[test]
+    fn only_own_commits_clear_badge_and_push_marker() {
+        let mut store = MrActivityStore::default();
+        store.observe(&snap(vec![], vec![mr("a", 0, 1, "s1")]), 100);
+        let snapshot = snap(vec![], vec![mr("a", 0, 3, "s3")]);
+        store.observe(&snapshot, 200);
+        let checks = store.commit_checks(&snapshot);
+        let commits = [
+            commit("s3", "tim@example.com", ""),
+            commit("s2", "tim@example.com", ""),
+            commit("s1", "anna@example.com", ""),
+        ];
+        store.apply_own_commits(&checks[0], &commits, &me());
+        assert!(store.activity(&snapshot.others[0]).is_empty());
+    }
+
+    #[test]
+    fn own_force_push_is_not_new() {
+        let mut store = MrActivityStore::default();
+        store.observe(&snap(vec![mr("a", 0, 2, "old")], vec![]), 100);
+        let snapshot = snap(vec![mr("a", 0, 2, "new")], vec![]);
+        store.observe(&snapshot, 200);
+        assert!(store.activity(&snapshot.mine[0]).rewritten);
+        let checks = store.commit_checks(&snapshot);
+        assert_eq!(checks[0].added, 0);
+        // Rebase von mir: Autor Anna, Committer ich
+        let commits = [commit("new", "anna@example.com", "tim@example.com")];
+        store.apply_own_commits(&checks[0], &commits, &me());
+        assert!(store.activity(&snapshot.mine[0]).is_empty());
+    }
+
+    #[test]
+    fn foreign_commits_stay_new_and_stale_list_is_retried() {
+        let mut store = MrActivityStore::default();
+        store.observe(&snap(vec![mr("a", 0, 1, "s1")], vec![]), 100);
+        let snapshot = snap(vec![mr("a", 0, 2, "s2")], vec![]);
+        store.observe(&snapshot, 200);
+        let checks = store.commit_checks(&snapshot);
+        // Liste gehört zu einem anderen Stand: nicht als geprüft merken
+        store.apply_own_commits(&checks[0], &[commit("s9", "tim@example.com", "")], &me());
+        assert_eq!(store.commit_checks(&snapshot).len(), 1);
+        store.apply_own_commits(&checks[0], &[commit("s2", "anna@example.com", "")], &me());
+        assert_eq!(store.activity(&snapshot.mine[0]).new_commits, 1);
+        assert!(store.commit_checks(&snapshot).is_empty());
+    }
+
+    #[test]
+    fn old_marks_without_checked_sha_load() {
+        let json = r#"{"initialized":true,"marks":{"h|a":{"seen_commits":1,"last_fetch":5}}}"#;
+        let store: MrActivityStore = serde_json::from_str(json).unwrap();
+        assert_eq!(store.marks["h|a"].checked_sha, None);
     }
 
     fn reviewer(mut m: MergeRequest) -> MergeRequest {

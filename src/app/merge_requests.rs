@@ -82,6 +82,11 @@ pub(super) enum MrResult {
         me: Option<String>,
         jobs: Vec<super::mr_activity::NotesJob>,
     },
+    /// Neueste Commits zu MRs mit neuen Commits: eigene zählen nicht als neu
+    Commits {
+        me: crate::gitlab::activity::MyIdentity,
+        results: Vec<super::mr_activity::CommitsResult>,
+    },
 }
 
 impl MyApp {
@@ -488,6 +493,7 @@ impl MyApp {
                 }
                 MrResult::Aborted { reason_key } => self.on_mr_aborted(reason_key),
                 MrResult::Notes { me, jobs } => self.on_mr_notes(me, jobs),
+                MrResult::Commits { me, results } => self.on_mr_commits(&me, results),
             }
             ctx.request_repaint();
         }
@@ -885,7 +891,14 @@ impl MyApp {
             self.start_mr_checkout(choice);
         }
         if let Some((path, target)) = actions.open_existing {
-            self.open_existing(&path, &target);
+            // Kopf-Commit des MR dieser Zeile (`seen` kommt aus demselben Klick)
+            let head = actions.seen.as_ref().and_then(|(host_key, id)| {
+                let snap = self.mr_snapshot.as_deref()?;
+                crate::gitlab::activity::MrActivityStore::find(snap, host_key, id)?
+                    .diff_head_sha
+                    .clone()
+            });
+            self.open_existing(&path, &target, head.as_deref());
         }
         if actions.refresh {
             self.mr_user_refresh();

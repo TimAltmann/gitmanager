@@ -4,7 +4,7 @@
 //! sowie Token prüfen und in glab speichern (E3). Alle Aufrufe gehen über
 //! `GlabRunner`; das Token nur als `SecretString` in Kind-Env bzw. Kind-stdin.
 
-use super::activity::NoteInfo;
+use super::activity::{CommitInfo, NoteInfo};
 use super::glab::{
     classify, glab_version, EnvValue, GlabErrorKind, GlabOutput, GlabRequest, GlabRunner,
     StdinBody, CI_ENV, DEFAULT_TIMEOUT, SECRET_ENV, TOKEN_ENV,
@@ -850,6 +850,74 @@ fn discussion_notes(discussions: &[Value]) -> Vec<NoteInfo> {
         .collect();
     notes.sort_by_key(|(created, _)| *created);
     notes.into_iter().map(|(_, n)| n).collect()
+}
+
+/// Die `count` neuesten Commits eines MRs (neueste zuerst) über REST
+/// `…/merge_requests/:iid/commits`; `None` bei Fehlern.
+pub fn fetch_recent_commits(
+    runner: &dyn GlabRunner,
+    host: &str,
+    path: &str,
+    iid: u64,
+    count: u32,
+) -> Option<Vec<CommitInfo>> {
+    let per_page = count.clamp(1, 100);
+    let endpoint = format!(
+        "projects/{}/merge_requests/{iid}/commits?per_page={per_page}",
+        encode_path(path)
+    );
+    let out = runner.run(GlabRequest::api(host, [endpoint])).ok()?;
+    if out.http.as_ref().map(|h| h.code) != Some(200) {
+        return None;
+    }
+    let json = out.json()?;
+    let text = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut commits: Vec<(i64, usize, CommitInfo)> = json
+        .as_array()?
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let created = parse_rfc3339(&text(c, "created_at")).unwrap_or(0);
+            let info = CommitInfo {
+                sha: text(c, "id"),
+                author_name: text(c, "author_name"),
+                author_email: text(c, "author_email"),
+                committer_email: text(c, "committer_email"),
+            };
+            (created, i, info)
+        })
+        .collect();
+    // GitLab liefert neueste zuerst; bei gleicher Zeit bleibt die Reihenfolge
+    commits.sort_by_key(|(created, i, _)| (std::cmp::Reverse(*created), *i));
+    Some(commits.into_iter().map(|(_, _, c)| c).collect())
+}
+
+/// E-Mail-Adressen des angemeldeten Benutzers über REST `user` (Adresse,
+/// Commit-Adresse, öffentliche Adresse); leer bei Fehlern.
+pub fn fetch_my_emails(runner: &dyn GlabRunner, host: &str) -> Vec<String> {
+    let Ok(out) = runner.run(GlabRequest::api(host, ["user".to_string()])) else {
+        return Vec::new();
+    };
+    if out.http.as_ref().map(|h| h.code) != Some(200) {
+        return Vec::new();
+    }
+    let Some(json) = out.json() else {
+        return Vec::new();
+    };
+    let mut emails: Vec<String> = ["email", "commit_email", "public_email"]
+        .iter()
+        .filter_map(|k| json.get(*k).and_then(Value::as_str))
+        .filter(|e| e.contains('@'))
+        .map(str::to_ascii_lowercase)
+        .collect();
+    emails.sort();
+    emails.dedup();
+    emails
 }
 
 /// Quell-Branch → gemergte MRs `(iid, kopf-sha)` eines Projekts.
@@ -1984,6 +2052,45 @@ mod tests {
         let users: Vec<&str> = got[0].iter().map(|n| n.author_username.as_str()).collect();
         assert_eq!(users, ["anna", "bot", "twolber"]);
         assert_eq!(got[0][2].body, "Antwort");
+    }
+
+    #[test]
+    fn recent_commits_and_my_emails_over_rest() {
+        let runner = gated();
+        let fake = runner.inner();
+        let commits = json!([
+            {"id": "c2", "author_name": "Tim", "author_email": "Tim@Example.com",
+             "committer_email": "tim@example.com", "created_at": "2026-11-18T11:00:00.000Z"},
+            {"id": "c1", "author_name": "Anna", "author_email": "anna@example.com",
+             "committer_email": "anna@example.com", "created_at": "2026-11-18T10:00:00.000Z"}
+        ]);
+        fake.push(FakeReply::http(200, &commits.to_string()));
+        let got = fetch_recent_commits(&runner, HOST, "g/p", 7, 2).unwrap();
+        let calls = fake.take_calls();
+        assert!(
+            calls[0]
+                .request
+                .args
+                .iter()
+                .any(|a| a == "projects/g%2Fp/merge_requests/7/commits?per_page=2"),
+            "{:?}",
+            calls[0].request.args
+        );
+        let shas: Vec<&str> = got.iter().map(|c| c.sha.as_str()).collect();
+        assert_eq!(shas, ["c2", "c1"]);
+        assert_eq!(got[0].author_email, "Tim@Example.com");
+
+        fake.push(FakeReply::http(
+            200,
+            &json!({"username": "twolber", "email": "Tim@Example.com",
+                    "commit_email": "tim@example.com", "public_email": ""})
+            .to_string(),
+        ));
+        assert_eq!(fetch_my_emails(&runner, HOST), ["tim@example.com"]);
+        fake.push(FakeReply::http(404, "{}"));
+        assert!(fetch_my_emails(&runner, HOST).is_empty());
+        fake.push(FakeReply::http(500, "{}"));
+        assert!(fetch_recent_commits(&runner, HOST, "g/p", 7, 2).is_none());
     }
 
     /// ACCESS nur mit `currentUser` (ohne Projekte).

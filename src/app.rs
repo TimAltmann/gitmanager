@@ -3,6 +3,7 @@ mod cleanup;
 mod merge_requests;
 mod mr_activity;
 mod mr_checkout;
+mod mr_pull_prompt;
 mod mr_settings;
 mod new_worktree;
 mod pull;
@@ -442,6 +443,10 @@ pub struct MyApp {
     pending_after_checkout: Option<(PathBuf, AfterAction)>,
     /// K1: Hinweis in der MR-Ansicht (divergierter Branch); überlebt Rescans
     mr_notice: Option<String>,
+    /// Agent aus der MR-Ansicht: Frage „Vorher pullen?“
+    mr_pull_prompt: Option<mr_pull_prompt::MrPullPrompt>,
+    /// Agent startet, sobald der Pull dieses Ordners fertig ist
+    agent_after_pull: Option<(PathBuf, String)>,
     /// „In Repo-Liste zeigen“: hervorgehobene Karte und seit wann
     repo_highlight: Option<(RepoHighlight, std::time::Instant)>,
     /// Offener MR je Repo-Ordner für den Chip der Repo-Karte
@@ -567,6 +572,8 @@ impl MyApp {
             mr_switch: None,
             pending_after_checkout: None,
             mr_notice: None,
+            mr_pull_prompt: None,
+            agent_after_pull: None,
             repo_highlight: None,
             repo_mrs: Default::default(),
             mr_rediscover: Default::default(),
@@ -2780,6 +2787,7 @@ impl eframe::App for MyApp {
         self.show_remove_worktree_dialog(&ctx);
         self.show_cleanup_dialog(&ctx);
         self.show_new_claude_dialog(&ctx);
+        self.show_mr_pull_prompt(&ctx);
         self.show_update_dialog(&ctx);
 
         egui::CentralPanel::default()
@@ -3235,6 +3243,8 @@ mod tests {
             mr_switch: None,
             pending_after_checkout: None,
             mr_notice: None,
+            mr_pull_prompt: None,
+            agent_after_pull: None,
             repo_highlight: None,
             repo_mrs: Default::default(),
             mr_rediscover: Default::default(),

@@ -254,6 +254,31 @@ fn dirty_count(repo: &Repository) -> usize {
     repo.statuses(Some(&mut opts)).map_or(0, |s| s.len())
 }
 
+/// `user.email` aus der globalen git-Konfiguration (kleingeschrieben).
+pub fn global_user_email() -> Option<String> {
+    let cfg = git2::Config::open_default().ok()?;
+    let email = cfg.get_string("user.email").ok()?;
+    let email = email.trim().to_ascii_lowercase();
+    email.contains('@').then_some(email)
+}
+
+/// Ob HEAD in `path` den Commit `sha` schon enthält (gleich oder
+/// Nachfahre). `Some(false)`, wenn der Commit lokal fehlt oder HEAD ihn
+/// nicht enthält; `None`, wenn sich das nicht prüfen lässt (kein Repo,
+/// ungültige SHA, kein HEAD).
+pub fn head_contains(path: &Path, sha: &str) -> Option<bool> {
+    let repo = Repository::open(path).ok()?;
+    let oid = git2::Oid::from_str(sha).ok()?;
+    let head = repo.head().ok()?.peel_to_commit().ok()?.id();
+    if head == oid {
+        return Some(true);
+    }
+    if repo.find_commit(oid).is_err() {
+        return Some(false);
+    }
+    Some(repo.graph_descendant_of(head, oid).unwrap_or(false))
+}
+
 /// Detaillierter Status: staged, unstaged, untracked, Konflikte
 pub fn has_merge_conflicts(repo: &Repository) -> bool {
     repo.index().map(|idx| idx.has_conflicts()).unwrap_or(false)

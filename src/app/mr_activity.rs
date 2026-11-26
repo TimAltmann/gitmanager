@@ -6,9 +6,10 @@ use super::merge_requests::MrResult;
 use super::{MainView, MyApp};
 use crate::claude_notify::{show_simple_notification, SimpleToast, ToastClick};
 use crate::gitlab::activity::{
-    note_snippet, others_notes, own_notes, MrActivityStore, MrEvent, MrEventKind, NoteInfo,
+    note_snippet, others_notes, own_notes, CommitCheck, CommitInfo, MrActivityStore, MrEvent,
+    MrEventKind, MyIdentity, NoteInfo,
 };
-use crate::gitlab::service::fetch_recent_notes;
+use crate::gitlab::service::{fetch_my_emails, fetch_recent_commits, fetch_recent_notes};
 use crate::gitlab::time::now_unix;
 use crate::i18n::{tr, tr_fmt};
 use std::collections::{BTreeMap, HashMap};
@@ -78,6 +79,9 @@ impl MrActivityState {
 }
 
 /// Neue Kommentare eines MR mit den zuletzt gelesenen Kommentaren.
+/// Geprüfter MR samt seinen neuesten Commits (`None` = Abruf gescheitert).
+pub(super) type CommitsResult = (CommitCheck, Option<Vec<CommitInfo>>);
+
 pub(super) struct NotesJob {
     event: MrEvent,
     /// Review-Anfrage/Erwähnung im selben Abruf: Titel der Benachrichtigung
@@ -119,6 +123,7 @@ impl MyApp {
         }
         let direct = triggers.into_values().map(|e| (e, None)).collect();
         self.notify_mr_events(direct);
+        self.check_own_commits(me_per_host);
         for (host, events) in by_host {
             let runner = Arc::clone(&self.glab);
             let tx = self.mr_tx.clone();
@@ -143,6 +148,79 @@ impl MyApp {
                     .collect();
                 let _ = tx.send(MrResult::Notes { me, jobs });
             });
+        }
+    }
+
+    /// Neue Commits auf eigene prüfen (je Host ein Thread): eigene Commits
+    /// zählen nicht als „neu“ (siehe `on_mr_commits`).
+    fn check_own_commits(&mut self, me_per_host: &BTreeMap<String, String>) {
+        let Some(snap) = self.mr_snapshot.as_deref() else {
+            return;
+        };
+        let mut by_host: HashMap<String, Vec<CommitCheck>> = HashMap::new();
+        for check in self.mr_activity.store.commit_checks(snap) {
+            by_host
+                .entry(check.host_key.clone())
+                .or_default()
+                .push(check);
+        }
+        if by_host.is_empty() {
+            return;
+        }
+        let git_email = crate::git::global_user_email();
+        for (host, checks) in by_host {
+            let runner = Arc::clone(&self.glab);
+            let tx = self.mr_tx.clone();
+            let username = me_per_host.get(&host).cloned();
+            let git_email = git_email.clone();
+            std::thread::spawn(move || {
+                let work = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut emails = fetch_my_emails(&*runner, &host);
+                    emails.extend(git_email);
+                    emails.sort();
+                    emails.dedup();
+                    let me = MyIdentity { username, emails };
+                    let results = checks
+                        .into_iter()
+                        .map(|check| {
+                            let commits = fetch_recent_commits(
+                                &*runner,
+                                &host,
+                                &check.project_path,
+                                check.iid,
+                                check.added.max(1),
+                            );
+                            (check, commits)
+                        })
+                        .collect();
+                    (me, results)
+                }));
+                if let Ok((me, results)) = work {
+                    let _ = tx.send(MrResult::Commits { me, results });
+                }
+            });
+        }
+    }
+
+    /// Neueste Commits da: eigene gelten als gesehen.
+    pub(super) fn on_mr_commits(&mut self, me: &MyIdentity, results: Vec<CommitsResult>) {
+        let mut changed = false;
+        for (check, commits) in results {
+            // Abruf gescheitert: beim nächsten Abruf erneut prüfen
+            let Some(commits) = commits else {
+                continue;
+            };
+            changed |= self
+                .mr_activity
+                .store
+                .apply_own_commits(&check, &commits, me);
+        }
+        if changed {
+            self.mr_activity.save();
+            if let Some(snap) = self.mr_snapshot.as_deref_mut() {
+                self.mr_activity.store.annotate(snap);
+            }
+            self.mark_tray_dirty();
         }
     }
 
@@ -442,6 +520,37 @@ mod tests {
         );
         let snap = app.mr_snapshot.as_deref().unwrap();
         assert_eq!(snap.others[0].activity.new_notes, 0);
+    }
+
+    #[test]
+    fn own_commits_count_as_seen() {
+        let mut app = test_app();
+        set_snapshot(&mut app, vec![mr("a", 1)]);
+        app.on_mr_activity(&BTreeMap::new());
+        let mut pushed = mr("a", 1);
+        pushed.commit_count = Some(2);
+        pushed.diff_head_sha = Some("y".to_string());
+        set_snapshot(&mut app, vec![pushed]);
+        app.mr_activity
+            .store
+            .observe(app.mr_snapshot.as_deref().unwrap(), now_unix());
+        let snap = app.mr_snapshot.as_deref().unwrap();
+        let checks = app.mr_activity.store.commit_checks(snap);
+        assert_eq!(checks.len(), 1);
+        let me = MyIdentity {
+            username: Some("me".to_string()),
+            emails: vec!["me@example.com".to_string()],
+        };
+        let mine = CommitInfo {
+            sha: "y".to_string(),
+            author_email: "me@example.com".to_string(),
+            ..CommitInfo::default()
+        };
+        // Gescheiterter Abruf ändert nichts
+        app.on_mr_commits(&me, vec![(checks[0].clone(), None)]);
+        app.on_mr_commits(&me, vec![(checks[0].clone(), Some(vec![mine]))]);
+        let snap = app.mr_snapshot.as_deref().unwrap();
+        assert!(snap.others[0].activity.is_empty());
     }
 
     #[test]
