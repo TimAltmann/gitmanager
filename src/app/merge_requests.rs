@@ -1456,11 +1456,17 @@ pub(super) mod tests {
         assert!(app.mr_pending_refresh, "Wunsch gemerkt");
         assert!(glab.inner().take_calls().is_empty(), "kein zweiter Abruf");
         glab.inner().push(not_installed());
-        app.mr_tx.send(loaded(0, 1)).expect("send");
+        // Der Worker des gemerkten Refreshs meldet sich auf dem alten Kanal;
+        // der kommt erst nach der Prüfung zurück. Ein schneller Worker landet
+        // sonst noch im selben poll_mr und beendet `mr_loading` schon dort.
+        let (tx, rx) = mpsc::channel();
+        let worker_rx = std::mem::replace(&mut app.mr_rx, rx);
+        tx.send(loaded(0, 1)).expect("send");
         app.poll_mr(&egui::Context::default());
         assert_eq!(app.mr_snapshot.as_deref().map(|s| s.badge), Some(1));
         assert!(!app.mr_pending_refresh);
         assert!(app.mr_loading, "gemerkter Refresh läuft");
+        app.mr_rx = worker_rx;
         settle(&mut app);
         assert_eq!(glab.inner().take_calls().len(), 1);
     }
