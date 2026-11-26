@@ -443,7 +443,9 @@ fn resolve_program(program: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::test_app_with_glab;
+    use super::super::tests::{
+        config_get, is_version, push_signed_in, test_app_with_glab, version_reply,
+    };
     use super::*;
     use crate::config::HostAlias;
     use crate::git::RepoInfo;
@@ -482,35 +484,6 @@ mod tests {
         );
         repo.remotes = vec![RemoteInfo::new("origin", url)];
         repo
-    }
-
-    fn is_version(r: &GlabRequest) -> bool {
-        r.args.first().is_some_and(|a| a == "version")
-    }
-
-    fn version_reply() -> FakeReply {
-        FakeReply::stdout(0, "glab 1.123.0 (a300719)\n", "")
-    }
-
-    fn config_get(host: &'static str, key: &'static str) -> impl Fn(&GlabRequest) -> bool + Send {
-        move |r: &GlabRequest| {
-            r.args.first().is_some_and(|a| a == "config")
-                && r.args.last().is_some_and(|k| k == key)
-                && r.host_key.as_deref() == Some(host)
-        }
-    }
-
-    /// Erkennung: `host` ist bei glab angemeldet.
-    fn push_signed_in(fake: &FakeGlab, host: &'static str) {
-        fake.push_when(
-            config_get(host, "user"),
-            FakeReply::stdout(0, "taltmann\n", ""),
-        );
-        fake.push_when(config_get(host, "ssh_host"), FakeReply::stdout(0, "", ""));
-        fake.push_when(
-            config_get(host, "api_protocol"),
-            FakeReply::stdout(0, "", ""),
-        );
     }
 
     /// ACCESS nur mit `currentUser` (ohne Projekte).

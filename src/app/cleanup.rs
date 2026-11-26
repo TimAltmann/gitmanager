@@ -751,20 +751,9 @@ fn show_results(ui: &mut egui::Ui, lang: crate::i18n::Language, results: &[Clean
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{test_app, test_app_with_glab};
+    use crate::app::tests::{git, test_app, test_app_with_glab};
     use crate::gitlab::glab::{FakeGlab, FakeReply, GatedRunner, GlabError};
     use crate::gitlab::remote::{HostTarget, RemoteInfo};
-
-    fn git(dir: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{args:?}: {out:?}");
-    }
 
     fn branch_exists(repo: &Path, b: &str) -> bool {
         std::process::Command::new("git")

@@ -3081,7 +3081,7 @@ impl eframe::App for MyApp {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
-    use crate::gitlab::glab::GatedRunner;
+    use crate::gitlab::glab::{FakeGlab, FakeReply, GatedRunner, GlabRequest};
 
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -3139,6 +3139,51 @@ mod tests {
         // 1-Min-Intervall
         let old1 = now - std::time::Duration::from_secs(61);
         assert!(should_auto_fetch(Some(old1), 1, now));
+    }
+
+    // --- Gemeinsame Helfer der Testmodule unter `app/` ---
+
+    pub(super) fn is_version(r: &GlabRequest) -> bool {
+        r.args.first().is_some_and(|a| a == "version")
+    }
+
+    pub(super) fn version_reply() -> FakeReply {
+        FakeReply::stdout(0, "glab 1.123.0 (a300719)\n", "")
+    }
+
+    pub(super) fn config_get(
+        host: &'static str,
+        key: &'static str,
+    ) -> impl Fn(&GlabRequest) -> bool + Send {
+        move |r: &GlabRequest| {
+            r.args.first().is_some_and(|a| a == "config")
+                && r.args.last().is_some_and(|k| k == key)
+                && r.host_key.as_deref() == Some(host)
+        }
+    }
+
+    /// Erkennung: `host` ist bei glab angemeldet.
+    pub(super) fn push_signed_in(fake: &FakeGlab, host: &'static str) {
+        fake.push_when(
+            config_get(host, "user"),
+            FakeReply::stdout(0, "taltmann\n", ""),
+        );
+        fake.push_when(config_get(host, "ssh_host"), FakeReply::stdout(0, "", ""));
+        fake.push_when(
+            config_get(host, "api_protocol"),
+            FakeReply::stdout(0, "", ""),
+        );
+    }
+
+    pub(super) fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
     }
 
     /// Test-App ohne Fenster; glab ist ein `FakeGlab` ohne Antworten.
