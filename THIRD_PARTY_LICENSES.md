@@ -17,7 +17,7 @@ GitManager itself is licensed under the **MIT License** (see `LICENSE`). All lis
 |-------|----------------------|---------|-------|
 | `eframe` | 0.32 | MIT OR Apache-2.0 | egui framework, glow backend |
 | `egui` | 0.32 | MIT OR Apache-2.0 | Immediate-mode GUI |
-| `egui_extras` | 0.32 | MIT OR Apache-2.0 | SVG image loader |
+| `egui_extras` | 0.32 | MIT OR Apache-2.0 | Image loaders (SVG, file, png/ico/jpg) |
 | `git2` | 0.20 | MIT OR Apache-2.0 | Safe bindings to libgit2 |
 | `libgit2-sys` (transitive) | — | GPL-2.0 **with linking exception** | Vendored C library; exception allows linking without GPL contamination (see https://github.com/libgit2/libgit2/blob/main/COPYING) |
 | `libz-sys` (transitive) | — | MIT OR Apache-2.0 / Zlib | Compression |
