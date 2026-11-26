@@ -1481,6 +1481,23 @@ pub fn ahead_behind_in(repo: &Repository) -> (usize, usize) {
             }
         }
     }
+    // Zähler gegen `<remote>/<branch>`: erst der volle Ref-Name, dann die
+    // Kurzform; `None`, wenn keiner auflösbar ist oder der Graph fehlschlägt.
+    let against_remote = |remote: &str| -> Option<(usize, usize)> {
+        [
+            format!("refs/remotes/{remote}/{branch}"),
+            format!("{remote}/{branch}"),
+        ]
+        .iter()
+        .find_map(|candidate| {
+            let obj = repo.revparse_single(candidate).ok()?;
+            let up_oid = obj
+                .peel_to_commit()
+                .map(|c| c.id())
+                .unwrap_or_else(|_| obj.id());
+            repo.graph_ahead_behind(local_oid, up_oid).ok()
+        })
+    };
     // 2) Fallback: alle Remotes statt nur origin (I4) — sonst liefert
     // ein upstream-Remote oder Firmen-Remote ≠ origin immer (0,0).
     // Zuerst branch.<name>.remote lesen (explizites Tracking ohne upstream-Ref),
@@ -1489,21 +1506,10 @@ pub fn ahead_behind_in(repo: &Repository) -> (usize, usize) {
         .config()
         .and_then(|c| c.get_string(&format!("branch.{branch}.remote")))
     {
-        for candidate in [
-            format!("refs/remotes/{cfg_branch_remote}/{branch}"),
-            format!("{cfg_branch_remote}/{branch}"),
-        ] {
-            if let Ok(obj) = repo.revparse_single(&candidate) {
-                let up_oid = obj
-                    .peel_to_commit()
-                    .map(|c| c.id())
-                    .unwrap_or_else(|_| obj.id());
-                if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
-                    return (a, b);
-                }
-                // F2#2: Graph-Fehler → nicht (0,0), sondern unten andere
-                // Remotes versuchen (Upstream-bekannt-Regel oben bleibt).
-            }
+        // F2#2: Graph-Fehler → nicht (0,0), sondern unten andere
+        // Remotes versuchen (Upstream-bekannt-Regel oben bleibt).
+        if let Some(counts) = against_remote(&cfg_branch_remote) {
+            return counts;
         }
     }
     if let Ok(remotes) = repo.remotes() {
@@ -1515,20 +1521,9 @@ pub fn ahead_behind_in(repo: &Repository) -> (usize, usize) {
             .collect();
         names.sort_by_key(|n| (n != "origin", n.clone()));
         for remote_name in &names {
-            for candidate in [
-                format!("refs/remotes/{remote_name}/{branch}"),
-                format!("{remote_name}/{branch}"),
-            ] {
-                if let Ok(obj) = repo.revparse_single(&candidate) {
-                    let up_oid = obj
-                        .peel_to_commit()
-                        .map(|c| c.id())
-                        .unwrap_or_else(|_| obj.id());
-                    if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
-                        return (a, b);
-                    }
-                    // F2#2: Graph-Fehler → nächsten Remote versuchen.
-                }
+            // F2#2: Graph-Fehler → nächsten Remote versuchen.
+            if let Some(counts) = against_remote(remote_name) {
+                return counts;
             }
         }
     }
