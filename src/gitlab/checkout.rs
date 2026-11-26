@@ -7,7 +7,7 @@
 
 use super::model::{MergeRequest, MrSnapshot};
 use super::remote::{HostMap, RemoteInfo};
-use crate::config::{AppConfig, MrConfig};
+use crate::config::{absolute_dir, AppConfig, MrConfig};
 use crate::git::RepoInfo;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -577,9 +577,7 @@ fn is_default_branch(branch: &str, target_branch: &str) -> bool {
 /// gesetzt: er hinge vom Arbeitsordner des Prozesses ab (Autostart oft
 /// `System32`), der git-CLI-Fallback läge im Basis-Klon.
 pub fn review_root_dir(cfg: &MrConfig) -> Option<PathBuf> {
-    let root = cfg.review_root.as_deref()?.trim();
-    let dir: PathBuf = Path::new(root).components().collect();
-    dir.is_absolute().then_some(dir)
+    absolute_dir(cfg.review_root.as_deref())
 }
 
 /// Ordnername aus erlaubten Zeichen (GitLab-Pfadregeln `[A-Za-z0-9._-]`);

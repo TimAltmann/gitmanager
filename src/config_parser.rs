@@ -1,25 +1,7 @@
 use crate::config::ConfigSelector;
+use crate::xml::{escape as escape_xml_attr, unescape as unescape_xml_attr};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-
-fn escape_xml_attr(s: &str) -> String {
-    // Escape XML attribute value (minimal set). Order matters: & first.
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-fn unescape_xml_attr(s: &str) -> String {
-    // Reverse of escape – handle common entities. Do &amp; last to avoid double decoding
-    // For key comparison fallback.
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
-}
 
 fn find_attr_range(tag: &str, attr_name: &str) -> Option<(usize, usize, char)> {
     let mut search_pos = 0;

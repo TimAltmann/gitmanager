@@ -49,6 +49,11 @@ impl LiveStatus {
     pub fn animated(self) -> bool {
         self != Self::Idle
     }
+
+    /// Priorität für den Claude-Chip: wartet vor arbeitet, `Idle` zählt nicht.
+    pub fn badge_priority(self) -> u8 {
+        u8::from(self != Self::Idle) + u8::from(self == Self::Waiting)
+    }
 }
 
 /// Eine laufende Claude-Code-Instanz.

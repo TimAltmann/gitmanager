@@ -17,7 +17,7 @@ use crate::gitlab::remote::RemoteScheme;
 use crate::gitlab::time::relative_time;
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::ui::icons::{
-    agent_image, ide_image, ICON_ARROW_DOWN, ICON_ARROW_UP, ICON_DOTS, ICON_FOLDER,
+    agent_image, icon_image, ide_image, ICON_ARROW_DOWN, ICON_ARROW_UP, ICON_DOTS, ICON_FOLDER,
     ICON_MR_CHECK as ICON_CHECK, ICON_MR_COPY as ICON_COPY, ICON_MR_DOWNLOAD as ICON_PULL,
     ICON_MR_FOLDER_PLUS as ICON_FOLDER_PLUS, ICON_MR_OPEN_EXTERNAL as ICON_BROWSER,
     ICON_MR_PULL_REQUEST as ICON_MR, ICON_MR_SPARKLE as ICON_SPARKLE,
@@ -196,12 +196,6 @@ pub fn claude_chip_text(lang: Language, status: LiveStatus) -> Option<String> {
 
 // --- Zeichnen ---------------------------------------------------------------
 
-fn icon(source: ImageSource<'static>, size: f32, tint: Color32) -> Image<'static> {
-    Image::new(source)
-        .fit_to_exact_size(Vec2::splat(size))
-        .tint(tint)
-}
-
 /// Chip (h 20, r 10, Text 11 px, Icon 12 px) mit getönter Fläche in der
 /// Akzentfarbe; `label` ist der AccessKit-Name.
 fn chip(
@@ -260,7 +254,7 @@ pub(crate) fn favorite_star(
     };
     let label = tr(lang, key);
     let resp = ui
-        .add(Button::image(icon(source, 16.0, tint)).frame(false))
+        .add(Button::image(icon_image(source, 16.0, tint)).frame(false))
         .on_hover_cursor(CursorIcon::PointingHand);
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &label));
     if resp.on_hover_text(&label).clicked() {
@@ -286,11 +280,11 @@ pub(crate) fn show_chip_row(
         let (label, color) = state_chip(lang, repo.state, repo.dirty_files, &p);
         let mut atoms = Atoms::new(());
         match repo.state {
-            RepoState::Clean => atoms.push_right(icon(ICON_CHECK, 12.0, color)),
+            RepoState::Clean => atoms.push_right(icon_image(ICON_CHECK, 12.0, color)),
             // „•“ statt „●“: ● zeichnet die egui-Standardschrift als Quadrat
             RepoState::Dirty => atoms.push_right(RichText::new(DIRTY_DOT).size(13.0).color(color)),
             RepoState::Conflict | RepoState::InProgress(_) => {
-                atoms.push_right(icon(ICON_WARNING, 12.0, color))
+                atoms.push_right(icon_image(ICON_WARNING, 12.0, color))
             }
         }
         atoms.push_right(chip_text(&label, text));
@@ -309,7 +303,7 @@ pub(crate) fn show_chip_row(
             let tooltip = tr_fmt(lang, "repo_ahead_tt", &[&n]);
             let accent = ui.visuals().selection.stroke.color;
             let mut atoms = Atoms::new(());
-            atoms.push_right(icon(ICON_ARROW_UP, 12.0, accent));
+            atoms.push_right(icon_image(ICON_ARROW_UP, 12.0, accent));
             atoms.push_right(chip_text(n, text));
             chip(ui, atoms, accent, &tooltip, &tooltip, false);
         }
@@ -319,10 +313,10 @@ pub(crate) fn show_chip_row(
             let tooltip = behind_tooltip(lang, repo.behind);
             let pulling = cx.pulling.is_some_and(|path| path == repo.path);
             let mut atoms = Atoms::new(());
-            atoms.push_right(icon(ICON_ARROW_DOWN, 12.0, p.warn_icon));
+            atoms.push_right(icon_image(ICON_ARROW_DOWN, 12.0, p.warn_icon));
             atoms.push_right(chip_text(repo.behind.to_string(), text));
             if !pulling {
-                atoms.push_right(icon(ICON_PULL, 12.0, p.warn_icon));
+                atoms.push_right(icon_image(ICON_PULL, 12.0, p.warn_icon));
             }
             let resp = chip(ui, atoms, p.warn_icon, &tooltip, &tooltip, !pulling);
             if pulling {
@@ -346,7 +340,7 @@ pub(crate) fn show_chip_row(
                     p.run_icon
                 };
                 let mut atoms = Atoms::new(());
-                atoms.push_right(icon(ICON_SPARKLE, 12.0, accent));
+                atoms.push_right(icon_image(ICON_SPARKLE, 12.0, accent));
                 atoms.push_right(chip_text(&label, text));
                 let tooltip = tr(lang, "repo_claude_tt");
                 if chip(ui, atoms, accent, &label, &tooltip, true).clicked() {
@@ -376,7 +370,7 @@ fn mr_chip(
         )
     };
     let mut atoms = Atoms::new(());
-    atoms.push_right(icon(ICON_MR, 12.0, accent));
+    atoms.push_right(icon_image(ICON_MR, 12.0, accent));
     atoms.push_right(chip_text(format!("!{}", badge.iid), text));
     let approvals = match badge.required {
         Some(required) => Some(format!("{}/{required}", badge.approved)),
@@ -386,12 +380,16 @@ fn mr_chip(
         atoms.push_right(chip_text(format!("· {approvals}"), text));
         let done = badge.required.is_none_or(|r| badge.approved >= r);
         let tint = if done { p.ok_icon } else { weak };
-        atoms.push_right(icon(ICON_CHECK, 12.0, tint));
+        atoms.push_right(icon_image(ICON_CHECK, 12.0, tint));
     }
     if badge.pipeline != PipelineState::NoPipeline {
         let (source, color) = pipeline_icon(badge.pipeline, p);
         atoms.push_right(chip_text("·", text));
-        atoms.push_right(icon(source, 12.0, if badge.draft { weak } else { color }));
+        atoms.push_right(icon_image(
+            source,
+            12.0,
+            if badge.draft { weak } else { color },
+        ));
     }
     let mut title = badge.title.clone();
     if badge.draft {
@@ -507,13 +505,13 @@ pub(crate) fn show_bottom_row(
             }
 
             if profile.show_shell {
-                let image = icon(ICON_TERMINAL, 18.0, ui.visuals().text_color());
+                let image = icon_image(ICON_TERMINAL, 18.0, ui.visuals().text_color());
                 if tool_button(ui, image, &tr(lang, "open_in_shell")) {
                     actions.shell_open = Some(repo.path.clone());
                 }
             }
             if profile.show_explorer {
-                let image = icon(ICON_FOLDER, 18.0, ui.visuals().text_color());
+                let image = icon_image(ICON_FOLDER, 18.0, ui.visuals().text_color());
                 if tool_button(ui, image, &tr(lang, "open_in_explorer")) {
                     actions.explorer_open = Some(repo.path.clone());
                 }
@@ -583,7 +581,7 @@ fn ide_preview(ide: &IdeConfig, repo: &RepoInfo) -> String {
 /// Menüeintrag mit Icon; schließt das Menü beim Klick.
 fn menu_item(ui: &mut Ui, source: ImageSource<'static>, text: &str) -> bool {
     let tint = ui.visuals().text_color();
-    ui.add(Button::image_and_text(icon(source, 14.0, tint), text))
+    ui.add(Button::image_and_text(icon_image(source, 14.0, tint), text))
         .clicked()
 }
 
@@ -597,7 +595,7 @@ fn more_menu(
 ) {
     let lang = config.language;
     let label = tr(lang, "repo_more");
-    let button = Button::image(icon(ICON_DOTS, 18.0, ui.visuals().text_color()));
+    let button = Button::image(icon_image(ICON_DOTS, 18.0, ui.visuals().text_color()));
     let (resp, _) = MenuButton::from_button(button).ui(ui, |ui| {
         ui.set_min_width(200.0);
         let profile = config.get_effective_profile_for_repo(&repo.path);

@@ -275,6 +275,16 @@ fn store_schema(host: &str, schema: HostSchema) {
     });
 }
 
+/// Schema für `host` lernen, `f` damit ausführen und den Stand danach
+/// zurückschreiben. Die Sperre wird nur für Laden/Speichern gehalten, nicht
+/// während `f` (dort laufen Netzaufrufe).
+fn with_schema<T>(host: &str, f: impl FnOnce(&mut HostSchema) -> T) -> T {
+    let mut schema = schema_for(host);
+    let out = f(&mut schema);
+    store_schema(host, schema);
+    out
+}
+
 // --- Fehlerarten ----------------------------------------------------------
 
 /// Nach diesen Fehlern geht im selben Durchlauf kein Aufruf mehr an den Host.
@@ -747,10 +757,10 @@ pub fn fetch_merged(
             .map(|(host, me, cursor)| {
                 let since = &since;
                 scope.spawn(move || {
-                    let mut schema = schema_for(host);
-                    let query = graphql::merged(since, cursor.as_deref());
-                    let page = run_query(runner, host, &mut schema, query).and_then(merged_page);
-                    store_schema(host, schema);
+                    let page = with_schema(host, |schema| {
+                        let query = graphql::merged(since, cursor.as_deref());
+                        run_query(runner, host, schema, query).and_then(merged_page)
+                    });
                     MergedHostPage {
                         host_key: host.clone(),
                         me: me.clone(),
@@ -771,18 +781,19 @@ pub fn fetch_recent_notes(
     host: &str,
     mrs: &[(String, u64)],
 ) -> Vec<Vec<NoteInfo>> {
-    let mut schema = schema_for(host);
-    let mut out = Vec::with_capacity(mrs.len());
-    for (query, chunk) in graphql::recent_notes(mrs)
-        .into_iter()
-        .zip(mrs.chunks(graphql::NOTES_CHUNK))
-    {
-        match run_query(runner, host, &mut schema, query) {
-            Ok(got) => out.extend(graphql::parse_recent_notes(&got.data, chunk.len())),
-            Err(_) => out.extend(chunk.iter().map(|_| Vec::new())),
+    let mut out = with_schema(host, |schema| {
+        let mut out = Vec::with_capacity(mrs.len());
+        for (query, chunk) in graphql::recent_notes(mrs)
+            .into_iter()
+            .zip(mrs.chunks(graphql::NOTES_CHUNK))
+        {
+            match run_query(runner, host, schema, query) {
+                Ok(got) => out.extend(graphql::parse_recent_notes(&got.data, chunk.len())),
+                Err(_) => out.extend(chunk.iter().map(|_| Vec::new())),
+            }
         }
-    }
-    store_schema(host, schema);
+        out
+    });
     // Ohne Nutzer-Kommentar (fein granulierter Token ohne „Work Item:
     // Read“: GraphQL liefert sie leer, ohne Fehler) über REST-Diskussionen,
     // die solche Tokens lesen dürfen; sonst bliebe der Autor unbekannt
@@ -875,47 +886,48 @@ pub fn fetch_merged_branches(
         .filter(|(_, branches)| !branches.is_empty())
         .cloned()
         .collect();
-    let mut schema = schema_for(host);
-    let mut found: Vec<MergedByBranch> = Vec::with_capacity(asked.len());
-    let mut failure = None;
-    for (query, chunk) in graphql::merged_by_branches(&asked)
-        .into_iter()
-        .zip(asked.chunks(graphql::MERGED_BRANCHES_CHUNK))
-    {
-        let got = match run_query(runner, host, &mut schema, query) {
-            Ok(got) => got,
-            Err(kind) => {
-                failure = Some(kind);
+    let (found, failure) = with_schema(host, |schema| {
+        let mut found: Vec<MergedByBranch> = Vec::with_capacity(asked.len());
+        let mut failure = None;
+        for (query, chunk) in graphql::merged_by_branches(&asked)
+            .into_iter()
+            .zip(asked.chunks(graphql::MERGED_BRANCHES_CHUNK))
+        {
+            let got = match run_query(runner, host, schema, query) {
+                Ok(got) => got,
+                Err(kind) => {
+                    failure = Some(kind);
+                    break;
+                }
+            };
+            // Teilfehler: fehlt ein Projekt trotz Meldungen, wäre „nichts
+            // gemergt“ falsch (ohne Meldungen heißt es nur: keine Rechte).
+            let lost = (0..chunk.len()).any(|i| {
+                got.data
+                    .get(format!("p{i}"))
+                    .and_then(|p| p.get("mergeRequests"))
+                    .is_none_or(Value::is_null)
+            });
+            if lost && !got.errors.is_empty() {
+                failure = Some(GlabErrorKind::GraphQl(got.errors));
                 break;
             }
-        };
-        // Teilfehler: fehlt ein Projekt trotz Meldungen, wäre „nichts
-        // gemergt“ falsch (ohne Meldungen heißt es nur: keine Rechte).
-        let lost = (0..chunk.len()).any(|i| {
-            got.data
-                .get(format!("p{i}"))
-                .and_then(|p| p.get("mergeRequests"))
-                .is_none_or(Value::is_null)
-        });
-        if lost && !got.errors.is_empty() {
-            failure = Some(GlabErrorKind::GraphQl(got.errors));
-            break;
-        }
-        for mrs in graphql::parse_merged_by_branches(&got.data, chunk.len()) {
-            let mut map = MergedByBranch::new();
-            for (iid, branch, sha) in mrs {
-                if let Some(sha) = sha {
-                    map.entry(branch).or_default().push((iid, sha));
+            for mrs in graphql::parse_merged_by_branches(&got.data, chunk.len()) {
+                let mut map = MergedByBranch::new();
+                for (iid, branch, sha) in mrs {
+                    if let Some(sha) = sha {
+                        map.entry(branch).or_default().push((iid, sha));
+                    }
                 }
+                // mehrere gemergte MRs je Branch: höchste iid zuerst, deterministisch
+                for list in map.values_mut() {
+                    list.sort_by(|a, b| b.cmp(a));
+                }
+                found.push(map);
             }
-            // mehrere gemergte MRs je Branch: höchste iid zuerst, deterministisch
-            for list in map.values_mut() {
-                list.sort_by(|a, b| b.cmp(a));
-            }
-            found.push(map);
         }
-    }
-    store_schema(host, schema);
+        (found, failure)
+    });
     if let Some(kind) = failure {
         return Err(kind);
     }
@@ -974,9 +986,9 @@ pub fn fetch_uninvolved_more(
     if pages.is_empty() {
         return Ok(page);
     }
-    let mut schema = schema_for(host);
-    let loaded = load_uninvolved_pages(runner, host, me, &pages, &mut schema, &mut page);
-    store_schema(host, schema);
+    let loaded = with_schema(host, |schema| {
+        load_uninvolved_pages(runner, host, me, &pages, schema, &mut page)
+    });
     loaded?;
     sort_uninvolved(&mut page.mrs);
     Ok(page)
@@ -1392,10 +1404,9 @@ fn access_probe(
     paths: &[String],
     prepare: Prepare<'_>,
 ) -> Result<AccessProbe, GlabErrorKind> {
-    let mut schema = schema_for(host);
-    let result = run_access(runner, host, paths, prepare, &mut schema);
-    store_schema(host, schema);
-    result
+    with_schema(host, |schema| {
+        run_access(runner, host, paths, prepare, schema)
+    })
 }
 
 fn run_access(

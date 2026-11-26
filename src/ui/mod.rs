@@ -8,6 +8,7 @@ pub mod repo_list;
 pub mod search_field;
 pub mod settings;
 pub mod theme;
+pub mod widgets;
 // Nur auf Windows via tray_service live verdrahtet; auf Linux nur für Tests
 // (calculate_popup_position) kompiliert — daher dead_code dort erlaubt,
 // auf Windows bleibt -D warnings strikt.

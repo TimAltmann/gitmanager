@@ -69,15 +69,6 @@ pub(crate) fn pick_badges(hits: Vec<(PathBuf, MrBadge)>) -> HashMap<PathBuf, MrB
     out
 }
 
-/// Rang für den Claude-Chip: „wartet“ vor „arbeitet“; `Idle` zählt nicht.
-fn claude_rank(status: LiveStatus) -> u8 {
-    match status {
-        LiveStatus::Waiting => 2,
-        LiveStatus::Busy | LiveStatus::Shell => 1,
-        LiveStatus::Idle => 0,
-    }
-}
-
 /// Live-Status je Repo-Ordner (gleicher `path_key` wie `cwd` der Session);
 /// teilen sich mehrere Sessions einen Ordner, gewinnt „wartet“.
 pub(crate) fn claude_card_status(
@@ -86,7 +77,7 @@ pub(crate) fn claude_card_status(
 ) -> HashMap<PathBuf, LiveStatus> {
     let active: Vec<(String, LiveStatus)> = live
         .iter()
-        .filter(|s| claude_rank(s.status) > 0)
+        .filter(|s| LiveStatus::badge_priority(s.status) > 0)
         .map(|s| (path_key(&s.cwd), s.status))
         .collect();
     let mut out = HashMap::new();
@@ -99,7 +90,7 @@ pub(crate) fn claude_card_status(
             .iter()
             .filter(|(k, _)| *k == key)
             .map(|(_, s)| *s)
-            .max_by_key(|s| claude_rank(*s));
+            .max_by_key(|s| LiveStatus::badge_priority(*s));
         if let Some(status) = best {
             out.insert(repo.path.clone(), status);
         }
@@ -111,8 +102,8 @@ pub(crate) fn claude_card_status(
 pub(crate) fn claude_pid_for(live: &[LiveSession], path: &std::path::Path) -> Option<u32> {
     let key = path_key(&path.to_string_lossy());
     live.iter()
-        .filter(|s| claude_rank(s.status) > 0 && path_key(&s.cwd) == key)
-        .max_by_key(|s| claude_rank(s.status))
+        .filter(|s| LiveStatus::badge_priority(s.status) > 0 && path_key(&s.cwd) == key)
+        .max_by_key(|s| LiveStatus::badge_priority(s.status))
         .map(|s| s.pid)
 }
 

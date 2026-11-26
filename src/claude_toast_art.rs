@@ -178,7 +178,7 @@ fn author_png(initials: &str, color: &str) -> Option<Vec<u8>> {
     pixmap.encode_png().ok()
 }
 
-use crate::claude_notify::xml_escape;
+use crate::xml::escape as xml_escape;
 
 /// `dir/<name>_v<ART_VERSION>.png`, beim ersten Mal mit `render` erzeugt.
 fn cached_png(dir: &Path, name: &str, render: impl FnOnce() -> Option<Vec<u8>>) -> Option<PathBuf> {

@@ -4,8 +4,8 @@ use crate::config::{
 };
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::ui::icons::{
-    ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CROSS, ICON_EYE, ICON_EYE_OFF, ICON_FOLDER, ICON_PLUS,
-    ICON_TRASH, ICON_WARNING,
+    agent_icon_for, ide_icon_for, ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CROSS, ICON_EYE,
+    ICON_EYE_OFF, ICON_FOLDER, ICON_PLUS, ICON_TRASH, ICON_WARNING,
 };
 use egui::{Color32, RichText, Vec2};
 use std::path::{Path, PathBuf};
@@ -1509,17 +1509,7 @@ fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         }
                                     } else {
                                         // Default icon preview
-                                        let default_icon = match ide.id.as_str() {
-                                            "vs2022" | "vs" | "visualstudio" => {
-                                                egui::include_image!("../../assets/icons/visualstudio.svg")
-                                            }
-                                            "rider" | "jetbrains" => {
-                                                egui::include_image!("../../assets/icons/rider.svg")
-                                            }
-                                            _ => {
-                                                egui::include_image!("../../assets/icons/vscode.svg")
-                                            }
-                                        };
+                                        let default_icon = ide_icon_for(&ide.id);
                                         ui.add(
                                             egui::Image::new(default_icon)
                                                 .fit_to_exact_size(preview_size),
@@ -2302,24 +2292,8 @@ fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                             }
                         } else {
                             ui.add(
-                                egui::Image::new(match agent.id.as_str() {
-                                    "claude" => {
-                                        egui::include_image!("../../assets/icons/claude.svg")
-                                    }
-                                    "codex" => egui::include_image!("../../assets/icons/codex.svg"),
-                                    "gemini" => {
-                                        egui::include_image!("../../assets/icons/gemini.svg")
-                                    }
-                                    "copilot" => {
-                                        egui::include_image!("../../assets/icons/copilot.svg")
-                                    }
-                                    "cursor" => {
-                                        egui::include_image!("../../assets/icons/cursor.svg")
-                                    }
-                                    "aider" => egui::include_image!("../../assets/icons/aider.svg"),
-                                    _ => egui::include_image!("../../assets/icons/claude.svg"),
-                                })
-                                .fit_to_exact_size(preview_size),
+                                egui::Image::new(agent_icon_for(&agent.id))
+                                    .fit_to_exact_size(preview_size),
                             );
                             ui.label(
                                 RichText::new("(Default)")

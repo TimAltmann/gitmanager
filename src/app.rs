@@ -682,18 +682,12 @@ impl MyApp {
                 let mut need_save = false;
                 for profile in &mut cfg.profiles {
                     for ide in &mut profile.ides {
-                        let prog_lower = ide.program.to_lowercase();
-                        let is_vs_program = matches!(prog_lower.as_str(), "devenv" | "devenv.exe");
-                        let is_rider_program = matches!(
-                            prog_lower.as_str(),
-                            "rider" | "rider.exe" | "rider64.exe" | "rider.cmd"
-                        );
-                        if ide.id == "vs2022" && is_vs_program {
+                        if ide.id == "vs2022" && crate::git::is_vs_program(&ide.program) {
                             if let Some(p) = crate::git::resolve_vs_path() {
                                 ide.program = p.display().to_string();
                                 need_save = true;
                             }
-                        } else if ide.id == "rider" && is_rider_program {
+                        } else if ide.id == "rider" && crate::git::is_rider_program(&ide.program) {
                             if let Some(p) = crate::git::resolve_rider_path() {
                                 ide.program = p.display().to_string();
                                 need_save = true;
@@ -1318,15 +1312,16 @@ impl MyApp {
         }
     }
 
+    /// Einheitlicher Meldungstext für Config-Save-Fehler.
+    fn save_failed_text(lang: Language, err: &anyhow::Error) -> String {
+        tr_fmt(lang, "save_failed", &[&format!("{err:#}")])
+    }
+
     /// #12: Config-Save-Fehler einheitlich melden statt still zu verwerfen:
     /// eprintln für Logs + `self.error` fürs Hauptfenster (sichtbar beim Öffnen).
     fn note_config_save_error(&mut self, err: &anyhow::Error) {
         eprintln!("Config speichern fehlgeschlagen: {err:#}");
-        self.error = Some(tr_fmt(
-            self.config.language,
-            "save_failed",
-            &[&format!("{err:#}")],
-        ));
+        self.error = Some(Self::save_failed_text(self.config.language, err));
     }
 
     fn show_main_window(&mut self, ctx: &egui::Context) {
@@ -1830,7 +1825,7 @@ impl MyApp {
             // Review-Fix: Tray-Snapshot sonst stale.
             self.mark_tray_dirty();
             if let Err(e) = self.config.save() {
-                self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                self.error = Some(Self::save_failed_text(lang, &e));
             }
         }
         let mut started = false;
@@ -2127,7 +2122,7 @@ impl MyApp {
                     if new_profile != self.config.active_profile_id {
                         self.config.active_profile_id = new_profile;
                         if let Err(e) = self.config.save() {
-                            self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                            self.error = Some(Self::save_failed_text(lang, &e));
                         } else {
                             // Review-Fix: Profilwechsel betrifft Tray-Listen.
                             self.mark_tray_dirty();
@@ -2161,7 +2156,7 @@ impl MyApp {
                             } else {
                                 format!("{} aktiv", active_agents.len())
                             };
-                            let mut save_err: Option<String> = None;
+                            let mut save_err: Option<anyhow::Error> = None;
                             // Review-Fix: Agent-Liste betrifft Tray-Popup → dirty.
                             let mut agents_changed = false;
                             let agent_combo = egui::ComboBox::from_id_salt("active_agent_top")
@@ -2184,7 +2179,7 @@ impl MyApp {
                                             self.config.toggle_agent_active(id);
                                             agents_changed = true;
                                             if let Err(e) = self.config.save() {
-                                                save_err = Some(format!("{e:#}"));
+                                                save_err = Some(e);
                                             }
                                         }
                                     }
@@ -2203,7 +2198,7 @@ impl MyApp {
                                             }
                                         }
                                         if let Err(e) = self.config.save() {
-                                            save_err = Some(format!("{e:#}"));
+                                            save_err = Some(e);
                                         }
                                     }
                                     if ui.button("Alle deaktivieren").clicked() {
@@ -2211,7 +2206,7 @@ impl MyApp {
                                         self.config.active_agent_id = None;
                                         agents_changed = true;
                                         if let Err(e) = self.config.save() {
-                                            save_err = Some(format!("{e:#}"));
+                                            save_err = Some(e);
                                         }
                                     }
                                 });
@@ -2224,7 +2219,7 @@ impl MyApp {
                                 self.mark_tray_dirty();
                             }
                             if let Some(e) = save_err {
-                                self.error = Some(tr_fmt(lang, "save_failed", &[&e]));
+                                self.error = Some(Self::save_failed_text(lang, &e));
                             }
                         } else if let Some(agent) = self.config.get_active_agent() {
                             ui.add_space(8.0);
@@ -2265,7 +2260,7 @@ impl MyApp {
                         // Review-Fix: Sprache betrifft auch Tray-Texte.
                         self.mark_tray_dirty();
                         if let Err(e) = self.config.save() {
-                            self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                            self.error = Some(Self::save_failed_text(lang, &e));
                         }
                     }
 
@@ -2362,8 +2357,7 @@ impl MyApp {
                             // Finding A: Moduswechsel invalidiert die Sortierung.
                             self.repo_sort_dirty = true;
                             if let Err(e) = self.config.save() {
-                                self.error =
-                                    Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                                self.error = Some(Self::save_failed_text(lang, &e));
                             }
                         }
                     });
@@ -2922,7 +2916,7 @@ impl eframe::App for MyApp {
                     // Review-Fix: Tray-Snapshot sonst stale (kein Scan/Sync hier).
                     self.mark_tray_dirty();
                     if let Err(e) = self.config.save() {
-                        self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                        self.error = Some(Self::save_failed_text(lang, &e));
                     } else {
                         // Update auch im RepoInfo direkt
                         if let Some(repo) = self.repos.iter_mut().find(|r| r.path == repo_path) {
@@ -2945,7 +2939,7 @@ impl eframe::App for MyApp {
                     self.config
                         .set_repo_profile_override(&repo_path, profile_opt.clone());
                     if let Err(e) = self.config.save() {
-                        self.error = Some(tr_fmt(lang, "save_failed", &[&format!("{e:#}")]));
+                        self.error = Some(Self::save_failed_text(lang, &e));
                     } else {
                         self.set_status(tr_fmt(
                             lang,
@@ -3016,7 +3010,7 @@ impl eframe::App for MyApp {
                         Ok(()) => false,
                         Err(e) => {
                             eprintln!("Autostart anwenden fehlgeschlagen: {e:#}");
-                            let msg = tr_fmt(lang, "save_failed", &[&format!("{e:#}")]);
+                            let msg = Self::save_failed_text(lang, &e);
                             self.error = Some(msg.clone());
                             // I2: Dialog offen halten für Korrektur/Retry; Fehler auch
                             // im Settings-State sichtbar (show_settings_window zeigt

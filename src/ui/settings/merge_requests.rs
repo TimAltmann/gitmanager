@@ -45,6 +45,7 @@ use crate::ui::icons::{
     ICON_MR_OPEN_EXTERNAL as ICON_OPEN_EXTERNAL, ICON_MR_WARNING as ICON_WARNING,
     ICON_MR_X_CIRCLE as ICON_X_CIRCLE, ICON_TRASH,
 };
+use crate::ui::widgets::small_text as small;
 
 /// Warnung „Läuft in {n} Tagen ab“ ab so vielen Tagen vor dem Ablauf.
 const EXPIRY_WARN_DAYS: i64 = 14;
@@ -2123,10 +2124,6 @@ fn status_line(ui: &mut Ui, icon: ImageSource<'static>, color: Color32, text: &s
 
 fn wrapped(ui: &mut Ui, text: &str, size: f32, color: Color32) {
     ui.add(Label::new(RichText::new(text).size(size).color(color)).wrap());
-}
-
-fn small(ui: &mut Ui, text: &str, color: Color32) -> Response {
-    ui.label(RichText::new(text).size(11.0).color(color))
 }
 
 /// Icon-Button 22 × 22 mit Tooltip und AccessKit-Namen.

@@ -8,14 +8,14 @@ Datum: 2026-11-26 · Freigegeben: Ansatz 2 (strukturell mitziehen, verhaltensneu
 - Keine Angleichung der Tray-/Hauptfenster-Unterschiede (Punkt 3, nicht freigegeben).
 - Nach jedem Batch: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`.
 
-## Batch 1 – echte Leichen / wirkungslose Guards
-- [ ] `app.rs`: `tray_branch_switch_opens_main_window()` + toter `if` + Test entfernen
-- [ ] `autostart.rs`: `is_enabled()` (inkl. Test) entfernen, veraltete `allow(dead_code)` streichen
-- [ ] `config.rs`: unerreichbare/leere Blöcke (~1278, ~1573, ~1693) entfernen
-- [ ] `ui/repo_list.rs`: No-Op-Block (~657) entfernen
-- [ ] `ui/icons.rs`: `ICON_MR_DOTS` entfernen, Alias in `ui/merge_requests.rs` auflösen
-- [ ] `git.rs`: `has_placeholders` + wirkungslose Guards entfernen
-- [ ] `git.rs`: `clear_vs_cache`/`clear_rider_cache` privatisieren
+## Batch 1 – echte Leichen / wirkungslose Guards ✅ (commit d3c557f)
+- [x] `app.rs`: `tray_branch_switch_opens_main_window()` + toter `if` + Test entfernen
+- [x] `autostart.rs`: `is_enabled()` (inkl. Test) entfernen, `allow(dead_code)` auf `cfg_attr` präzisieren
+- [x] `config.rs`: unerreichbare/leere Blöcke (~1278, ~1573, ~1693) entfernen
+- [x] `ui/repo_list.rs`: No-Op-Block (~657) entfernen
+- [x] `ui/icons.rs`: `ICON_MR_DOTS` entfernen, Alias in `ui/merge_requests.rs` auflösen
+- [x] `git.rs`: `has_placeholders` + wirkungslose Guards entfernen
+- [x] `git.rs`: `clear_vs_cache`/`clear_rider_cache` privatisieren
 
 ## Batch 2 – vorhandene Helfer konsequent nutzen
 - [ ] `app.rs`/`app/*`: `config.save()`-Fehler über `note_config_save_error()`/Helfer

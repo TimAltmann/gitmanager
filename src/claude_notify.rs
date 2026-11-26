@@ -8,6 +8,7 @@
 
 use crate::claude_live::{LiveSession, LiveStatus};
 use crate::claude_preview::{PreviewItem, PreviewRole};
+use crate::xml::escape as xml_escape;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -105,22 +106,6 @@ fn click_of(action: &str) -> ToastClick {
     }
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn xml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
 /// Gemeinsames Toast-Gerüst. Kopfzeile, Texte und Bild werden hier escapet;
 /// `tail` enthält die fertigen `<action>`-Elemente, `</actions>` und optional
 /// das `<audio>`-Element, damit Buttons und Ton unverändert erhalten bleiben.
@@ -146,16 +131,21 @@ fn toast_shell(
     )
 }
 
+/// `<image>`-Element für das runde Toast-Logo (leer ohne Logo).
+fn logo_image_xml(logo: Option<&Path>) -> String {
+    logo.map_or_else(String::new, |p| {
+        format!(
+            r#"<image placement="appLogoOverride" hint-crop="circle" src="file:///{}"/>"#,
+            xml_escape(&p.display().to_string())
+        )
+    })
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
 /// Toast-XML (Vorlage `ToastGeneric`); `logo` = rundes Logo mit Statusring.
 pub fn toast_xml(toast: &Toast, logo: Option<&Path>) -> String {
     let e = xml_escape;
-    let image = logo.map_or_else(String::new, |p| {
-        format!(
-            r#"<image placement="appLogoOverride" hint-crop="circle" src="file:///{}"/>"#,
-            e(&p.display().to_string())
-        )
-    });
+    let image = logo_image_xml(logo);
     let line = toast.snippet.as_deref().unwrap_or(&toast.status);
     // Grüner „Erfolg“-Stil nur für fertig; für wartet gibt Windows keine
     // passende Farbe her
@@ -205,12 +195,7 @@ pub struct SimpleToast {
 /// Toast-XML für [`SimpleToast`]; `logo` = rundes Logo (Personen-Avatar).
 pub fn simple_toast_xml(toast: &SimpleToast, logo: Option<&Path>) -> String {
     let e = xml_escape;
-    let image = logo.map_or_else(String::new, |p| {
-        format!(
-            r#"<image placement="appLogoOverride" hint-crop="circle" src="file:///{}"/>"#,
-            e(&p.display().to_string())
-        )
-    });
+    let image = logo_image_xml(logo);
     let actions_xml = format!(
         r#"<action content="{open}" arguments="{ACTION_TERMINAL}"/><action content="{show}" arguments="{ACTION_SHOW}"/>"#,
         open = e(&toast.button_open),

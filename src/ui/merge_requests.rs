@@ -53,6 +53,7 @@ use crate::ui::icons::{
     ICON_MR_SORT as ICON_SORT, ICON_MR_SPARKLE as ICON_SPARKLE, ICON_MR_TERMINAL as ICON_TERMINAL,
     ICON_MR_USER as ICON_USER, ICON_MR_WARNING as ICON_WARNING, ICON_MR_X_CIRCLE as ICON_X_CIRCLE,
 };
+use crate::ui::widgets::small_text as small;
 
 /// Mindestbreite einer Spalte: zwei Spalten ab 2 × 420 + 12 = 852 px
 /// Inhaltsbreite (E8), damit B beim Mindestfenster zweispaltig bleibt.
@@ -2827,11 +2828,6 @@ pub(crate) fn pipeline_icon(
         PipelineState::Manual => (ICON_PLAY_CIRCLE, p.neutral_icon),
         PipelineState::NoPipeline => (ICON_MINUS_CIRCLE, p.neutral_icon),
     }
-}
-
-/// 11 px Text, nicht umbrechend.
-fn small(ui: &mut Ui, text: &str, color: Color32) -> Response {
-    ui.label(RichText::new(text).size(11.0).color(color))
 }
 
 fn mono(ui: &mut Ui, text: &str, size: f32, color: Color32) -> Response {

@@ -22,6 +22,7 @@ mod tray;
 mod tray_service;
 mod ui;
 mod updater;
+mod xml;
 
 use app::MyApp;
 
