@@ -7,77 +7,13 @@ use egui::{AtomLayoutResponse, Color32, RichText, Vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-// Icons reused from repo_list
 use crate::ui::icons::mr::ICON_PULL_REQUEST;
 use crate::ui::icons::{
-    ICON_AIDER, ICON_CLAUDE, ICON_CODEX, ICON_COPILOT, ICON_CROSS, ICON_CURSOR, ICON_FOLDER,
-    ICON_GEAR, ICON_GEMINI, ICON_REFRESH, ICON_RIDER, ICON_TERMINAL, ICON_VS, ICON_VSCODE,
+    agent_image, ide_image, ICON_CROSS, ICON_FOLDER, ICON_GEAR, ICON_REFRESH, ICON_TERMINAL,
 };
-// Phosphor Regular wie in der MR-Ansicht (weiß, `tint` färbt ein)
 
-fn ide_icon_for(ide_id: &str) -> egui::ImageSource<'static> {
-    match ide_id {
-        "vs2022" | "vs" | "visualstudio" => ICON_VS,
-        "rider" | "jetbrains" => ICON_RIDER,
-        "vscode" => ICON_VSCODE,
-        _ => ICON_VSCODE,
-    }
-}
-
-fn agent_icon_for(agent_id: &str) -> egui::ImageSource<'static> {
-    match agent_id {
-        "claude" => ICON_CLAUDE,
-        "codex" => ICON_CODEX,
-        "gemini" => ICON_GEMINI,
-        "copilot" => ICON_COPILOT,
-        "cursor" => ICON_CURSOR,
-        "aider" => ICON_AIDER,
-        _ => ICON_CLAUDE,
-    }
-}
-
-fn ide_image(ide: &crate::config::IdeConfig) -> egui::Image<'static> {
-    if let Some(path) = &ide.icon {
-        // #6: Existenz nur einmal pro Pfad per stat prüfen (statt pro Repo pro
-        // Frame). Icons sind quasi-statisch; Dateiwechsel greift ab Neustart.
-        if icon_exists_cached(path) {
-            let uri = format!("file://{}", path.replace('\\', "/"));
-            return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(16.0));
-        }
-    }
-    egui::Image::new(ide_icon_for(&ide.id)).fit_to_exact_size(Vec2::splat(16.0))
-}
-
-fn agent_image(agent: &crate::config::AgentProfile) -> egui::Image<'static> {
-    if let Some(path) = &agent.icon {
-        // #6: siehe ide_image — gecachter stat statt Syscall pro Frame.
-        if icon_exists_cached(path) {
-            let uri = format!("file://{}", path.replace('\\', "/"));
-            return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(16.0));
-        }
-    }
-    egui::Image::new(agent_icon_for(&agent.id)).fit_to_exact_size(Vec2::splat(16.0))
-}
-
-/// #6: gecachter `Path.exists` für Icon-Dateien. Ein stat-Syscall pro Pfad
-/// pro Prozess statt pro Repo-Zeile pro Frame (~3000 stats/s bei 30fps).
-/// Der erste Aufruf prüft das FS, danach gilt der Cache (Icons ändern sich
-/// praktisch nie zur Laufzeit; Wechsel greift ab Neustart).
-pub fn icon_exists_cached(path: &str) -> bool {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(&hit) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(path) {
-        return hit;
-    }
-    let exists = std::path::Path::new(path).exists();
-    cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(path.to_string(), exists);
-    exists
-}
+/// Kantenlänge der IDE- und Agent-Icons im Popup
+const TOOL_ICON_SIZE: f32 = 16.0;
 
 /// #9: ROOT-DPI auflösen. Nur endliche positive Werte übernehmen — sonst
 /// neutral 1.0. Nie auf die DPI des off-screen Service-Viewports
@@ -200,7 +136,8 @@ pub fn truncate_label(s: &str, max_chars: usize) -> String {
 pub struct TrayFetching {
     /// Scan oder Fetch läuft: Fetch-Buttons gesperrt
     pub busy: bool,
-    /// Repo des laufenden manuellen Fetch (Spinner statt Button)
+    /// Repo des laufenden manuellen Fetch oder Branch-Wechsels (Spinner
+    /// statt Button)
     pub repo: Option<PathBuf>,
 }
 
@@ -466,7 +403,7 @@ pub fn show_tray_popup_ui(
                             )
                             .small(),
                         )
-                        .on_hover_text("Schließen (Esc)")
+                        .on_hover_text(format!("{} (Esc)", tr(lang, "close")))
                         .clicked()
                     {
                         actions.close_popup = true;
@@ -479,7 +416,7 @@ pub fn show_tray_popup_ui(
                     .small();
                     if ui
                         .add(settings_btn)
-                        .on_hover_text("Settings öffnen")
+                        .on_hover_text(tr(lang, "settings"))
                         .clicked()
                     {
                         actions.open_settings = true;
@@ -491,7 +428,11 @@ pub fn show_tray_popup_ui(
                             .tint(ui.visuals().text_color()),
                     )
                     .small();
-                    if ui.add(refresh_btn).on_hover_text("Refresh").clicked() {
+                    if ui
+                        .add(refresh_btn)
+                        .on_hover_text(tr(lang, "refresh"))
+                        .clicked()
+                    {
                         actions.refresh = true;
                     }
                 });
@@ -580,7 +521,7 @@ pub fn show_tray_popup_ui(
                             .color(Color32::from_rgb(130, 130, 130)),
                     );
                     ui.add_space(12.0);
-                    if ui.button("🔄 Refresh").clicked() {
+                    if ui.button(tr(lang, "refresh")).clicked() {
                         actions.refresh = true;
                     }
                 });
@@ -927,10 +868,12 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                         .selected_solution
                         .clone()
                         .unwrap_or_else(|| repo.path.clone());
-                    let btn = egui::Button::image(ide_image(ide)).small();
-                    let resp = ui
-                        .add(btn)
-                        .on_hover_text(format!("In {} öffnen", ide.display_name));
+                    let btn = egui::Button::image(ide_image(ide, TOOL_ICON_SIZE)).small();
+                    let resp = ui.add(btn).on_hover_text(format!(
+                        "{} {}",
+                        tr(lang, "open_in"),
+                        ide.display_name
+                    ));
                     if resp.clicked() {
                         actions.ide_open = Some((repo.path.clone(), ide.id.clone(), file_path));
                         actions.close_popup = true;
@@ -953,7 +896,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                         );
                     } else if !any_visible_original {
                         ui.label(
-                            RichText::new("Keine IDE")
+                            RichText::new(tr(lang, "tray_no_ide"))
                                 .size(9.0)
                                 .color(Color32::from_rgb(140, 140, 140)),
                         );
@@ -982,7 +925,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                             )
                             .small(),
                         )
-                        .on_hover_text("Im Explorer öffnen")
+                        .on_hover_text(tr(lang, "open_in_explorer"))
                         .clicked()
                 {
                     actions.explorer_open = Some(repo.path.clone());
@@ -998,7 +941,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                             )
                             .small(),
                         )
-                        .on_hover_text("Terminal öffnen")
+                        .on_hover_text(tr(lang, "open_in_shell"))
                         .clicked()
                 {
                     actions.shell_open = Some(repo.path.clone());
@@ -1024,10 +967,12 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                     ui.separator();
                 }
                 for agent in filtered.iter().take(2) {
-                    let btn = egui::Button::image(agent_image(agent)).small();
-                    let resp = ui
-                        .add(btn)
-                        .on_hover_text(format!("Agent {} starten", agent.display_name));
+                    let btn = egui::Button::image(agent_image(agent, TOOL_ICON_SIZE)).small();
+                    let resp = ui.add(btn).on_hover_text(tr_fmt(
+                        lang,
+                        "open_in_terminal",
+                        &[&agent.display_name],
+                    ));
                     if resp.clicked() {
                         actions.agent_open = Some((repo.path.clone(), agent.id.clone()));
                         actions.close_popup = true;
@@ -1037,8 +982,8 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                     let first = &active_agents[0];
                     if !tray_hidden.contains(&first.id)
                         && ui
-                            .add(egui::Button::image(agent_image(first)).small())
-                            .on_hover_text(format!("Agent {} starten", first.display_name))
+                            .add(egui::Button::image(agent_image(first, TOOL_ICON_SIZE)).small())
+                            .on_hover_text(tr_fmt(lang, "open_in_terminal", &[&first.display_name]))
                             .clicked()
                     {
                         actions.agent_open = Some((repo.path.clone(), first.id.clone()));
@@ -1674,26 +1619,6 @@ mod tests {
         assert_eq!(repos[idx[1]].path, PathBuf::from("/tmp/r00"));
         assert_eq!(repos[idx[2]].path, PathBuf::from("/tmp/r05"));
         assert_eq!(repos[idx[3]].path, PathBuf::from("/tmp/r42"));
-    }
-
-    #[test]
-    fn icon_exists_cached_reports_fs_and_caches() {
-        // #6: Einmal geprüfte Pfade dürfen keinen erneuten stat-Syscall brauchen.
-        let dir = std::env::temp_dir().join(format!(
-            "gm_icon_cache_test_{}_{}",
-            std::process::id(),
-            "traypopup"
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let present = dir.join("present_xyz123.png");
-        std::fs::write(&present, b"x").unwrap();
-        let missing = dir.join("missing_xyz123.png");
-        assert!(icon_exists_cached(present.to_str().unwrap()));
-        assert!(!icon_exists_cached(missing.to_str().unwrap()));
-        // Gecacht: nach Löschen weiterhin true (kein erneuter stat).
-        std::fs::remove_file(&present).unwrap();
-        assert!(icon_exists_cached(present.to_str().unwrap()));
-        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

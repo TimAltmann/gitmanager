@@ -1,7 +1,9 @@
 //! Aufräumen: Sicherheit beim Löschen von Branches, verwaiste Branches,
 //! Worktrees und lokale Branches entfernen.
 
-use super::{canonical_key_path, run_git_cli, strip_verbatim, GIT_CLI_WORKTREE_TIMEOUT};
+use super::{
+    branch_upstream, canonical_key_path, run_git_cli, strip_verbatim, GIT_CLI_WORKTREE_TIMEOUT,
+};
 use git2::{BranchType, Repository};
 use std::path::{Path, PathBuf};
 
@@ -84,19 +86,8 @@ pub fn tip_in_merged_heads(repo: &Repository, tip: git2::Oid, merged_heads: &[gi
 /// Hat der Branch einen konfigurierten Upstream, dessen Remote-Branch aber
 /// nicht mehr existiert (nach `fetch --prune` gelöscht)?
 pub fn upstream_gone(repo: &Repository, branch: &str) -> bool {
-    let Ok(cfg) = repo.config() else {
-        return false;
-    };
-    let remote = cfg.get_string(&format!("branch.{branch}.remote")).ok();
-    let merge = cfg.get_string(&format!("branch.{branch}.merge")).ok();
-    let (Some(remote), Some(merge)) = (remote, merge) else {
-        return false;
-    };
-    // Lokaler Upstream ("."): kein Remote-Tracking-Ref, nie „gone“.
-    if remote == "." {
-        return false;
-    }
-    let Some(name) = merge.strip_prefix("refs/heads/") else {
+    // Ein lokaler Upstream (".") hat kein Remote-Tracking-Ref: nie „gone“
+    let Ok(Some((remote, name))) = branch_upstream(repo, branch) else {
         return false;
     };
     repo.find_reference(&format!("refs/remotes/{remote}/{name}"))

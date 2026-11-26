@@ -2,10 +2,7 @@
 
 use super::SettingsState;
 use crate::config::{AgentProfile, TerminalPreference};
-use crate::ui::icons::{
-    ICON_AIDER, ICON_CLAUDE, ICON_CODEX, ICON_COPILOT, ICON_CURSOR, ICON_FOLDER, ICON_GEMINI,
-    ICON_PLUS, ICON_TRASH, ICON_WARNING,
-};
+use crate::ui::icons::{agent_icon_for, ICON_FOLDER, ICON_PLUS, ICON_TRASH, ICON_WARNING};
 use crate::ui::theme::COLOR_MUTED;
 use egui::{Color32, RichText, Vec2};
 use std::path::PathBuf;
@@ -67,9 +64,10 @@ pub(super) fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
 
     let mut to_delete: Option<usize> = None;
     let mut to_duplicate: Option<usize> = None;
+    let mut make_active: Option<String> = None;
     for (idx, agent) in state.draft.agents.iter().enumerate() {
         let is_selected = Some(idx) == state.selected_agent_idx;
-        let is_active = Some(&agent.id) == state.draft.active_agent_id.as_ref();
+        let is_active = state.draft.is_agent_active(&agent.id);
         let visuals = ui.visuals();
         let frame = egui::Frame::new()
             .fill(visuals.widgets.inactive.bg_fill)
@@ -115,12 +113,20 @@ pub(super) fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         to_delete = Some(idx);
                     }
                     if ui.small_button("Aktiv").clicked() {
-                        state.draft.active_agent_id = Some(agent.id.clone());
+                        make_active = Some(agent.id.clone());
                     }
                 });
             });
         });
         ui.add_space(4.0);
+    }
+    if let Some(id) = make_active {
+        // An die erste Stelle der aktiven Agents (der erste ist der
+        // Standard-Agent); das alte Einzelfeld folgt der Liste
+        let active = &mut state.draft.active_agent_ids;
+        active.retain(|a| *a != id);
+        active.insert(0, id);
+        state.draft.active_agent_id = active.first().cloned();
     }
     if let Some(idx) = to_duplicate {
         if let Some(a) = state.draft.agents.get(idx).cloned() {
@@ -290,12 +296,13 @@ pub(super) fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         let is_custom = agent.icon.is_some();
                         let preview_size = Vec2::splat(18.0);
                         if let Some(icon_path) = &agent.icon {
-                            let pb = PathBuf::from(icon_path);
-                            if pb.exists() {
-                                let uri = format!(
-                                    "file://{}",
-                                    pb.display().to_string().replace('\\', "/")
-                                );
+                            // Prüfung im Hintergrund (läuft je Frame)
+                            let found = crate::path_probe::exists(
+                                ui.ctx(),
+                                std::path::Path::new(icon_path),
+                            );
+                            if found.unwrap_or(true) {
+                                let uri = crate::ui::icons::file_uri(icon_path);
                                 ui.add(egui::Image::new(uri).fit_to_exact_size(preview_size));
                             } else {
                                 ui.add(
@@ -311,16 +318,8 @@ pub(super) fn show_agents_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                             }
                         } else {
                             ui.add(
-                                egui::Image::new(match agent.id.as_str() {
-                                    "claude" => ICON_CLAUDE,
-                                    "codex" => ICON_CODEX,
-                                    "gemini" => ICON_GEMINI,
-                                    "copilot" => ICON_COPILOT,
-                                    "cursor" => ICON_CURSOR,
-                                    "aider" => ICON_AIDER,
-                                    _ => ICON_CLAUDE,
-                                })
-                                .fit_to_exact_size(preview_size),
+                                egui::Image::new(agent_icon_for(&agent.id))
+                                    .fit_to_exact_size(preview_size),
                             );
                             ui.label(
                                 RichText::new("(Default)")

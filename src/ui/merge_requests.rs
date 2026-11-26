@@ -41,12 +41,13 @@ use std::path::{Path, PathBuf};
 // einfärbt – resvg rendert `currentColor` sonst schwarz.
 use crate::ui::icons::mr::{
     ICON_ARROW_U, ICON_BRANCH, ICON_CHAT, ICON_CHAT_CHECK, ICON_CHAT_DOTS, ICON_CHECK,
-    ICON_CHECK_CIRCLE, ICON_CIRCLE_NOTCH, ICON_CLOCK, ICON_CODE, ICON_COPY, ICON_CROSS, ICON_DOTS,
+    ICON_CHECK_CIRCLE, ICON_CIRCLE_NOTCH, ICON_CLOCK, ICON_CODE, ICON_COPY, ICON_CROSS,
     ICON_DOWNLOAD, ICON_FOLDER, ICON_FOLDER_ARROW, ICON_FOLDER_PLUS, ICON_LOCK, ICON_MINUS_CIRCLE,
     ICON_OPEN_EXTERNAL, ICON_PLAY_CIRCLE, ICON_PROHIBIT, ICON_PULL_REQUEST, ICON_SEARCH,
     ICON_SKIP_CIRCLE, ICON_SORT, ICON_SPARKLE, ICON_TERMINAL, ICON_USER, ICON_WARNING,
     ICON_X_CIRCLE,
 };
+use crate::ui::icons::ICON_DOTS;
 
 /// Mindestbreite einer Spalte: zwei Spalten ab 2 × 420 + 12 = 852 px
 /// Inhaltsbreite (E8), damit B beim Mindestfenster zweispaltig bleibt.
@@ -1161,7 +1162,9 @@ fn merged_body(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrV
     for merged in &rows {
         show_merged_row(ui, v, merged, actions);
     }
-    if rows.is_empty() && list.errors.is_empty() {
+    // Wie in `mine_body`: ohne Daten (alle Hosts im Fehler oder abgemeldet)
+    // kein „Keine gemergten MRs“
+    if rows.is_empty() && list.errors.is_empty() && v.has_data {
         if list.mrs.is_empty() {
             let days = list.days.to_string();
             empty_block(ui, v, &tr_fmt(lang, "mr_empty_merged", &[&days]), None);
@@ -1468,25 +1471,41 @@ enum RowKind {
 }
 
 fn show_row(ui: &mut Ui, v: &View, mr: &MergeRequest, kind: RowKind, actions: &mut MrViewActions) {
-    let brief = v.input.clones.brief(&MrRefInfo::from_mr(mr), v.input.repos);
-    let button = checkout_button(&brief);
-    draw_row(ui, v, mr, None, kind, &button, actions);
+    visible_row(ui, v, mr, |ui| {
+        let brief = v.input.clones.brief(&MrRefInfo::from_mr(mr), v.input.repos);
+        let button = checkout_button(&brief);
+        draw_row(ui, v, mr, None, kind, &button, actions);
+    });
+}
+
+/// Baut eine Zeile nur im sichtbaren Bereich auf (`widgets::culled`): mit
+/// einigen hundert MRs kostete sonst jeder Frame alle Zeilen. Die Zeile,
+/// zu der gescrollt wird (`focus`), wird immer gezeichnet.
+fn visible_row(ui: &mut Ui, v: &View, mr: &MergeRequest, draw: impl FnOnce(&mut Ui)) {
+    let focused = v
+        .focus
+        .as_ref()
+        .is_some_and(|f| f.host_key == mr.host_key && f.id == mr.id);
+    let id = ui.id().with(("mr_row", &mr.host_key, &mr.id));
+    crate::ui::widgets::culled(ui, id, focused, draw);
 }
 
 /// Zeile „Gemergt“: Titel ruhiger mit Chip „Gemergt“, Projekt und Branches,
 /// „gemergt {Zeit} von {Name}“ · Pipeline · Approvals, nur Browser-Button.
 fn show_merged_row(ui: &mut Ui, v: &View, merged: &MergedMr, actions: &mut MrViewActions) {
-    // Kein Auschecken: der Button wird nicht gezeichnet
-    let button = ButtonKind::Menu;
-    draw_row(
-        ui,
-        v,
-        &merged.mr,
-        Some(merged),
-        RowKind::Merged,
-        &button,
-        actions,
-    );
+    visible_row(ui, v, &merged.mr, |ui| {
+        // Kein Auschecken: der Button wird nicht gezeichnet
+        let button = ButtonKind::Menu;
+        draw_row(
+            ui,
+            v,
+            &merged.mr,
+            Some(merged),
+            RowKind::Merged,
+            &button,
+            actions,
+        );
+    });
 }
 
 fn draw_row(

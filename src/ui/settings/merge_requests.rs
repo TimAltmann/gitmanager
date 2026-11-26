@@ -25,6 +25,7 @@ use crate::gitlab::service::{
     GlabRights, HostProbe, Protocol, SavedWhere, TokenCheck, TokenKind, TokenSource,
 };
 use crate::gitlab::time::format_date;
+use crate::gitlab::time::DAY;
 use crate::i18n::{count_text, tr, tr_fmt, Language};
 use crate::ui::theme::{mr_palette, MrPalette};
 use crate::ui::widgets::{self, icon_image, small};
@@ -47,7 +48,6 @@ use crate::ui::icons::ICON_TRASH;
 
 /// Warnung „Läuft in {n} Tagen ab“ ab so vielen Tagen vor dem Ablauf.
 const EXPIRY_WARN_DAYS: i64 = 14;
-const DAY: i64 = 86_400;
 /// Ab dieser Höhe scrollt die Repo-Tabelle
 const REPO_LIST_MAX_HEIGHT: f32 = 260.0;
 /// Shell-Metazeichen, die ein bloßer Programmname nicht enthalten darf

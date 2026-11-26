@@ -111,24 +111,45 @@ impl Field {
     }
 
     /// Pflichtargument
-    fn arg(mut self, name: &'static str, value: impl std::fmt::Display) -> Self {
-        self.args.push(Arg {
-            name,
-            value: value.to_string(),
-            optional: false,
-        });
-        self
+    fn arg(self, name: &'static str, value: impl std::fmt::Display) -> Self {
+        self.push_arg(name, value, false)
     }
 
     /// Argument, das beim Schema-Fallback entfallen darf
-    fn opt_arg(mut self, name: &'static str, value: impl std::fmt::Display) -> Self {
+    fn opt_arg(self, name: &'static str, value: impl std::fmt::Display) -> Self {
+        self.push_arg(name, value, true)
+    }
+
+    fn push_arg(
+        mut self,
+        name: &'static str,
+        value: impl std::fmt::Display,
+        optional: bool,
+    ) -> Self {
         self.args.push(Arg {
             name,
             value: value.to_string(),
-            optional: true,
+            optional,
         });
         self
     }
+}
+
+/// Hängt `alias: project(fullPath: $<path_var>) { items }` an die Abfrage
+/// und setzt die Pfad-Variable; die zweite Variable (Cursor, IID, Branches)
+/// ergänzt der Aufrufer.
+fn push_project(
+    mut query: Query,
+    alias: &str,
+    path_var: &str,
+    path: &str,
+    items: Vec<Item>,
+) -> Query {
+    let project = Field::object("project", &["Project"], items)
+        .alias(alias)
+        .arg("fullPath", format!("${path_var}"));
+    query.root.items.push(project.into());
+    query.var(path_var.to_string(), "ID!", Some(Value::from(path)))
 }
 
 /// Skalare Felder, durch Leerzeichen getrennt.
@@ -618,11 +639,7 @@ pub fn uninvolved_page(pages: &[(String, String)], me: &str) -> Vec<Query> {
                 let (p, c) = (format!("p{i}"), format!("c{i}"));
                 let mut items = scalars("fullPath");
                 items.push(project_mrs(Some(&c)).into());
-                let project = Field::object("project", &["Project"], items)
-                    .alias(p.clone())
-                    .arg("fullPath", format!("${p}"));
-                query.root.items.push(project.into());
-                query = query.var(p, "ID!", Some(Value::from(path.as_str()))).var(
+                query = push_project(query, &p, &p, path, items).var(
                     c,
                     "String",
                     Some(Value::from(cursor.as_str())),
@@ -658,11 +675,7 @@ pub fn recent_notes(mrs: &[(String, u64)]) -> Vec<Query> {
                 .arg("last", NOTES_LAST);
                 let mr = Field::object("mergeRequest", &["MergeRequest"], vec![notes.into()])
                     .arg("iid", format!("${n}"));
-                let project = Field::object("project", &["Project"], vec![mr.into()])
-                    .alias(format!("m{i}"))
-                    .arg("fullPath", format!("${p}"));
-                query.root.items.push(project.into());
-                query = query.var(p, "ID!", Some(Value::from(path.as_str()))).var(
+                query = push_project(query, &format!("m{i}"), &p, path, vec![mr.into()]).var(
                     n,
                     "String!",
                     Some(Value::from(iid.to_string())),
@@ -729,11 +742,7 @@ pub fn merged_by_branches(projects: &[(String, Vec<String>)]) -> Vec<Query> {
                 .arg("state", "merged")
                 .arg("sourceBranches", format!("${b}"))
                 .arg("first", 100);
-                let project = Field::object("project", &["Project"], vec![mrs.into()])
-                    .alias(format!("p{i}"))
-                    .arg("fullPath", format!("${p}"));
-                query.root.items.push(project.into());
-                query = query.var(p, "ID!", Some(Value::from(path.as_str()))).var(
+                query = push_project(query, &format!("p{i}"), &p, path, vec![mrs.into()]).var(
                     b,
                     "[String!]",
                     Some(Value::from(branches.clone())),

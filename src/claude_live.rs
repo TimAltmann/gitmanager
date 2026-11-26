@@ -36,6 +36,16 @@ impl LiveStatus {
         }
     }
 
+    /// Vorrang am Claude-Chip der Repo-Karte: „wartet“ vor „arbeitet“;
+    /// `Idle` (0) zählt nicht.
+    pub fn badge_priority(self) -> u8 {
+        match self {
+            Self::Waiting => 2,
+            Self::Busy | Self::Shell => 1,
+            Self::Idle => 0,
+        }
+    }
+
     /// Reihenfolge in der Liste: wartet, arbeitet, fertig
     pub fn rank(self) -> u8 {
         match self {
@@ -311,6 +321,11 @@ pub fn open_matches_search(o: &OpenSession, query: &str) -> bool {
             &o.title,
             &o.place,
             &o.live.cwd,
+            // Wie `session_matches_search`: auch der zugeordnete Worktree
+            &o.repo_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             o.branch.as_deref().unwrap_or(""),
             o.last_prompt.as_deref().unwrap_or(""),
             o.live.name.as_deref().unwrap_or(""),

@@ -15,16 +15,14 @@ use crate::gitlab::glab::GlabRunner;
 use crate::gitlab::remote::HostMap;
 use crate::gitlab::service;
 use crate::i18n::{tr, tr_fmt};
-use egui::{Color32, RichText};
+use egui::RichText;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
-const ORANGE: Color32 = Color32::from_rgb(220, 130, 40);
-const RED: Color32 = Color32::from_rgb(200, 60, 60);
-const GREEN: Color32 = Color32::from_rgb(60, 160, 80);
+use crate::ui::theme::{COLOR_CLEAN as GREEN, COLOR_ERROR as RED, COLOR_WARN as ORANGE};
 
 /// Offener Dialog und Kanal für die Ergebnisse der Worker.
 pub(super) struct CleanupUi {
@@ -57,6 +55,9 @@ pub(super) struct CleanupScan {
     pub gitlab_unavailable: bool,
     /// Such-Worker abgestürzt
     pub failed: bool,
+    /// Repos, deren `fetch --prune` scheiterte: dort können verwaiste
+    /// Branches unerkannt bleiben
+    pub fetch_failed: Vec<String>,
 }
 
 /// Ausgang eines Eintrags.
@@ -94,6 +95,8 @@ pub(super) struct CleanupDialog {
     pub candidates: Vec<CleanupCandidate>,
     pub gitlab_unavailable: bool,
     pub scan_failed: bool,
+    /// Repos mit gescheitertem Fetch (siehe `CleanupScan::fetch_failed`)
+    pub fetch_failed: Vec<String>,
     pub results: Vec<CleanupResult>,
 }
 
@@ -104,6 +107,7 @@ impl CleanupDialog {
             candidates: Vec::new(),
             gitlab_unavailable: false,
             scan_failed: false,
+            fetch_failed: Vec::new(),
             results: Vec::new(),
         }
     }
@@ -325,25 +329,32 @@ pub(super) fn find_candidates(
         candidates,
         gitlab_unavailable,
         failed: false,
+        fetch_failed: Vec::new(),
     }
 }
 
 /// Such-Worker: `fetch --prune` je Fetch-Ziel, Repos frisch lesen, suchen.
 fn scan(repos: Vec<RepoInfo>, hosts: HostMap, runner: Option<Arc<dyn GlabRunner>>) -> CleanupScan {
+    let mut fetch_failed = Vec::new();
     for target in git::fetch_targets(&repos) {
-        // Ohne Fetch fehlen nur „gone“-Treffer; Daten gehen nicht verloren
+        // Ohne Fetch fehlen nur „gone“-Treffer; Daten gehen nicht verloren.
+        // Der Dialog nennt die Repos, sonst wirkte „Nichts aufzuräumen“
+        // (offline, Anmeldung abgelaufen) wie ein sauberer Stand.
         if let Err(e) = git::fetch_all(&target) {
             eprintln!(
                 "Aufräumen: Fetch für {} fehlgeschlagen: {e:#}",
                 target.display()
             );
+            fetch_failed.push(super::short_repo_name(&target));
         }
     }
     let fresh: Vec<RepoInfo> = repos
         .into_iter()
         .filter_map(|r| git::get_repo_info(r.path))
         .collect();
-    find_candidates(&fresh, &hosts, runner.as_deref())
+    let mut found = find_candidates(&fresh, &hosts, runner.as_deref());
+    found.fetch_failed = fetch_failed;
+    found
 }
 
 /// Ein ausgewählter Eintrag, unmittelbar vor der Aktion erneut geprüft.
@@ -426,13 +437,7 @@ impl MyApp {
         if self.cleanup_ui.dialog.as_ref().is_some_and(|d| d.busy()) {
             return;
         }
-        let lang = self.config.language;
-        if self.auto_fetching {
-            self.set_status(tr(lang, "auto_fetch_running"));
-            return;
-        }
-        if self.git_busy.holds_refs() {
-            self.set_status(tr(lang, "fetch_busy"));
+        if self.refuse_while_busy() {
             return;
         }
         self.cleanup_ui.dialog = Some(CleanupDialog::scanning());
@@ -457,13 +462,7 @@ impl MyApp {
 
     /// „{n} entfernen“: ausgewählte Einträge nacheinander im Hintergrund.
     pub(super) fn confirm_cleanup(&mut self) {
-        let lang = self.config.language;
-        if self.auto_fetching {
-            self.set_status(tr(lang, "auto_fetch_running"));
-            return;
-        }
-        if self.git_busy.holds_refs() {
-            self.set_status(tr(lang, "fetch_busy"));
+        if self.refuse_while_busy() {
             return;
         }
         let Some(dialog) = self.cleanup_ui.dialog.as_mut() else {
@@ -528,6 +527,7 @@ impl MyApp {
                         }
                         dialog.gitlab_unavailable = found.gitlab_unavailable;
                         dialog.scan_failed = found.failed;
+                        dialog.fetch_failed = found.fetch_failed;
                     }
                     CleanupMsg::Done(results) => {
                         for r in &results {
@@ -636,6 +636,12 @@ fn show_candidates(ui: &mut egui::Ui, lang: crate::i18n::Language, dialog: &mut 
     }
     if dialog.gitlab_unavailable {
         ui.label(RichText::new(tr(lang, "cleanup_gitlab_unavailable")).color(ORANGE));
+        ui.add_space(4.0);
+    }
+    if !dialog.fetch_failed.is_empty() {
+        let repos = dialog.fetch_failed.join(", ");
+        let text = tr_fmt(lang, "cleanup_fetch_failed", &[&repos]);
+        ui.add(egui::Label::new(RichText::new(text).color(ORANGE)).wrap());
         ui.add_space(4.0);
     }
     if dialog.candidates.is_empty() {
@@ -941,6 +947,7 @@ mod tests {
                 candidates: Vec::new(),
                 gitlab_unavailable: true,
                 failed: false,
+                fetch_failed: Vec::new(),
             }))
             .unwrap();
         app.poll_cleanup(&egui::Context::default());
@@ -1174,6 +1181,7 @@ mod tests {
                 candidates: vec![c],
                 gitlab_unavailable: false,
                 failed: false,
+                fetch_failed: Vec::new(),
             }))
             .unwrap();
         app.poll_cleanup(&egui::Context::default());

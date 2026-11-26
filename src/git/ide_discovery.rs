@@ -24,13 +24,13 @@ fn rider_cache() -> &'static CachedPath {
     RIDER_PATH_CACHE.get_or_init(|| Mutex::new(None))
 }
 
-pub fn clear_vs_cache() {
+fn clear_vs_cache() {
     if let Some(m) = VS_PATH_CACHE.get() {
         *m.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
-pub fn clear_rider_cache() {
+fn clear_rider_cache() {
     if let Some(m) = RIDER_PATH_CACHE.get() {
         *m.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
@@ -109,11 +109,12 @@ pub fn is_program_available(program: &str) -> bool {
         } else {
             PathBuf::from("where")
         };
-        std::process::Command::new(where_cmd)
-            .arg(program)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        // Ohne Konsolenfenster: die Release-EXE hat keine Konsole, `where`
+        // ließe sonst bei jedem Agent-/Shell-Start kurz eine aufblitzen
+        let mut cmd = std::process::Command::new(where_cmd);
+        cmd.arg(program);
+        set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
+        cmd.output().map(|o| o.status.success()).unwrap_or(false)
     }
     #[cfg(not(windows))]
     {

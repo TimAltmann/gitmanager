@@ -4,14 +4,15 @@ use super::SettingsState;
 use crate::config::{IdeConfig, LanguageProfile};
 use crate::i18n::tr;
 use crate::ui::icons::{
-    ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_FOLDER, ICON_PLUS, ICON_RIDER, ICON_TRASH, ICON_VS,
-    ICON_VSCODE, ICON_WARNING,
+    ide_icon_for, ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_FOLDER, ICON_PLUS, ICON_TRASH,
+    ICON_WARNING,
 };
 use crate::ui::theme::COLOR_MUTED;
 use egui::{Color32, RichText, Vec2};
 use std::path::PathBuf;
 
 pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
+    state.poll_ide_detect();
     ui.label(
         RichText::new("Sprach-Profile verwalten")
             .size(13.0)
@@ -60,18 +61,7 @@ pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                     file_extension: ".txt".to_string(),
                     file_pattern: None,
                     max_scan_depth: 3,
-                    ides: vec![IdeConfig {
-                        id: "vscode".to_string(),
-                        display_name: "VS Code".to_string(),
-                        program: "code".to_string(),
-                        args: vec![".".to_string()],
-                        command: None,
-                        use_shell: false,
-                        allow_unsafe: false,
-                        no_args: false,
-
-                        icon: None,
-                    }],
+                    ides: vec![IdeConfig::vscode()],
                     default_ide_id: Some("vscode".to_string()),
                     ide_order: Vec::new(),
                     hidden_ide_ids: Vec::new(),
@@ -240,18 +230,7 @@ pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         file_extension: ext,
                         file_pattern: None,
                         max_scan_depth: 3,
-                        ides: vec![IdeConfig {
-                            id: "vscode".to_string(),
-                            display_name: "VS Code".to_string(),
-                            program: "code".to_string(),
-                            args: vec![".".to_string()],
-                            command: None,
-                            use_shell: false,
-                            allow_unsafe: false,
-                            no_args: false,
-
-                            icon: None,
-                        }],
+                        ides: vec![IdeConfig::vscode()],
                         default_ide_id: Some("vscode".to_string()),
                         ide_order: Vec::new(),
                         hidden_ide_ids: Vec::new(),
@@ -330,6 +309,7 @@ pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             ui.add_space(4.0);
 
             let mut to_remove_ide: Option<usize> = None;
+            let profile_id = profile.id.clone();
             for (ide_idx, ide) in profile.ides.iter_mut().enumerate() {
                 let visuals = ui.visuals();
                 egui::Frame::new()
@@ -361,13 +341,11 @@ pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui
-                                        .add(
-                                            egui::Button::image(
-                                                egui::Image::new(ICON_TRASH)
-                                                    .tint(ui.visuals().text_color())
-                                                    .fit_to_exact_size(Vec2::splat(14.0)),
-                                            )
-                                        )
+                                        .add(egui::Button::image(
+                                            egui::Image::new(ICON_TRASH)
+                                                .tint(ui.visuals().text_color())
+                                                .fit_to_exact_size(Vec2::splat(14.0)),
+                                        ))
                                         .on_hover_text("IDE entfernen")
                                         .clicked()
                                     {
@@ -396,47 +374,33 @@ pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         egui::TextEdit::singleline(&mut ide.program)
                                             .hint_text("code / devenv / rider"),
                                     );
-                                    let is_vs = matches!(
-                                        ide.id.as_str(),
-                                        "vs2022" | "vs" | "visualstudio"
-                                    );
+                                    let is_vs =
+                                        matches!(ide.id.as_str(), "vs2022" | "vs" | "visualstudio");
                                     let is_rider = matches!(ide.id.as_str(), "rider" | "jetbrains");
-                                    if (is_vs || is_rider)
-                                        && ui
-                                            .small_button("Auto erkennen")
+                                    if is_vs || is_rider {
+                                        let detecting = state.ide_detect.as_ref();
+                                        let this = detecting.is_some_and(|d| {
+                                            d.profile_id == profile_id && d.ide_id == ide.id
+                                        });
+                                        let button = egui::Button::new("Auto erkennen").small();
+                                        if ui
+                                            .add_enabled(detecting.is_none(), button)
                                             .on_hover_text(
                                                 "Pfad automatisch erkennen (vswhere / Toolbox)",
                                             )
                                             .clicked()
-                                    {
-                                            let detected = if is_vs {
-                                                crate::git::resolve_vs_path_force()
-                                            } else {
-                                                crate::git::resolve_rider_path_force()
-                                            };
-                                            if let Some(p) = detected {
-                                                ide.program = p.display().to_string();
-                                                state.auto_detect_toast = Some((
-                                                    format!("Erkannt: {}", ide.program),
-                                                    std::time::Instant::now(),
-                                                    false,
-                                                ));
-                                                state.error = None;
-                                                state.success = None;
-                                            } else {
-                                                state.auto_detect_toast = Some((
-                                                    if is_vs {
-                                                        "Visual Studio nicht gefunden (vswhere fehlt oder keine Installation)".to_string()
-                                                    } else {
-                                                        "Rider nicht gefunden (Toolbox / Program Files / PATH)".to_string()
-                                                    },
-                                                    std::time::Instant::now(),
-                                                    true,
-                                                ));
-                                                state.error = None;
-                                                state.success = None;
-                                            }
+                                        {
+                                            state.ide_detect = Some(super::IdeDetect::start(
+                                                ui.ctx(),
+                                                &profile_id,
+                                                &ide.id,
+                                                is_vs,
+                                            ));
                                         }
+                                        if this {
+                                            ui.spinner();
+                                        }
+                                    }
                                 });
                                 ui.end_row();
                                 ui.label("Args:");
@@ -456,7 +420,10 @@ pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         ide.args = if args_str.trim().is_empty() {
                                             Vec::new()
                                         } else {
-                                            args_str.split_whitespace().map(|s| s.to_string()).collect()
+                                            args_str
+                                                .split_whitespace()
+                                                .map(|s| s.to_string())
+                                                .collect()
                                         };
                                     }
                                     if ui.checkbox(&mut ide.no_args, "Kein Argument").changed() {
@@ -498,12 +465,13 @@ pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                     let is_custom = ide.icon.is_some();
                                     let preview_size = Vec2::splat(18.0);
                                     if let Some(icon_path) = &ide.icon {
-                                        let pb = PathBuf::from(icon_path);
-                                        if pb.exists() {
-                                            let uri = format!(
-                                                "file://{}",
-                                                pb.display().to_string().replace('\\', "/")
-                                            );
+                                        // Prüfung im Hintergrund (läuft je Frame)
+                                        let found = crate::path_probe::exists(
+                                            ui.ctx(),
+                                            std::path::Path::new(icon_path),
+                                        );
+                                        if found.unwrap_or(true) {
+                                            let uri = crate::ui::icons::file_uri(icon_path);
                                             ui.add(
                                                 egui::Image::new(uri)
                                                     .fit_to_exact_size(preview_size),
@@ -522,17 +490,7 @@ pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         }
                                     } else {
                                         // Default icon preview
-                                        let default_icon = match ide.id.as_str() {
-                                            "vs2022" | "vs" | "visualstudio" => {
-                                                ICON_VS
-                                            }
-                                            "rider" | "jetbrains" => {
-                                                ICON_RIDER
-                                            }
-                                            _ => {
-                                                ICON_VSCODE
-                                            }
-                                        };
+                                        let default_icon = ide_icon_for(&ide.id);
                                         ui.add(
                                             egui::Image::new(default_icon)
                                                 .fit_to_exact_size(preview_size),
@@ -544,25 +502,32 @@ pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                         );
                                     }
                                     if ui
-                                        .add(
-                                            egui::Button::image(
-                                                egui::Image::new(ICON_FOLDER)
-                                                    .tint(ui.visuals().text_color())
-                                                    .fit_to_exact_size(Vec2::splat(14.0)),
-                                            )
+                                        .add(egui::Button::image(
+                                            egui::Image::new(ICON_FOLDER)
+                                                .tint(ui.visuals().text_color())
+                                                .fit_to_exact_size(Vec2::splat(14.0)),
+                                        ))
+                                        .on_hover_text(
+                                            "Icon wählen (svg, png, ico, jpg - max 2 MB)",
                                         )
-                                        .on_hover_text("Icon wählen (svg, png, ico, jpg - max 2 MB)")
                                         .clicked()
                                     {
                                         if let Some(src) = rfd::FileDialog::new()
-                                            .add_filter("Icon", &["svg", "png", "ico", "jpg", "jpeg"])
+                                            .add_filter(
+                                                "Icon",
+                                                &["svg", "png", "ico", "jpg", "jpeg"],
+                                            )
                                             .pick_file()
                                         {
                                             let old = ide.icon.clone();
-                                            match crate::config::AppConfig::copy_icon_to_storage(&src) {
+                                            match crate::config::AppConfig::copy_icon_to_storage(
+                                                &src,
+                                            ) {
                                                 Ok(dest) => {
                                                     if let Some(old_path) = old {
-                                                        crate::config::AppConfig::remove_icon_file(&old_path);
+                                                        crate::config::AppConfig::remove_icon_file(
+                                                            &old_path,
+                                                        );
                                                     }
                                                     ide.icon = Some(dest.display().to_string());
                                                     state.error = None;
@@ -575,13 +540,14 @@ pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                                     }
                                     if is_custom
                                         && ui
-                                            .add(
-                                                egui::Button::image(
-                                                    egui::Image::new(ICON_TRASH).tint(ui.visuals().text_color())
-                                                        .fit_to_exact_size(Vec2::splat(14.0)),
-                                                )
+                                            .add(egui::Button::image(
+                                                egui::Image::new(ICON_TRASH)
+                                                    .tint(ui.visuals().text_color())
+                                                    .fit_to_exact_size(Vec2::splat(14.0)),
+                                            ))
+                                            .on_hover_text(
+                                                "Custom Icon entfernen (zurück zu Default)",
                                             )
-                                            .on_hover_text("Custom Icon entfernen (zurück zu Default)")
                                             .clicked()
                                     {
                                         if let Some(old) = ide.icon.take() {
@@ -603,7 +569,9 @@ pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                             let repo_path = std::path::Path::new(cwd_preview);
                             ide.effective_args()
                                 .iter()
-                                .map(|a| crate::git::substitute_placeholders(a, file_path, repo_path))
+                                .map(|a| {
+                                    crate::git::substitute_placeholders(a, file_path, repo_path)
+                                })
                                 .collect::<Vec<_>>()
                                 .join(" ")
                         };
@@ -624,10 +592,12 @@ pub(super) fn show_profiles_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
                         );
                         if ide.id == "vscode" && ide.args == vec![".".to_string()] {
                             ui.label(
-                                RichText::new("Hinweis: VS Code öffnet mit '.' das Repo-Root (cwd)")
-                                    .size(9.0)
-                                    .color(Color32::from_rgb(100, 120, 100))
-                                    .italics(),
+                                RichText::new(
+                                    "Hinweis: VS Code öffnet mit '.' das Repo-Root (cwd)",
+                                )
+                                .size(9.0)
+                                .color(Color32::from_rgb(100, 120, 100))
+                                .italics(),
                             );
                         }
                     });

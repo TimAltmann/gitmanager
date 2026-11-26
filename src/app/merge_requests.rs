@@ -589,8 +589,7 @@ impl MyApp {
         self.mr_last_refresh = Some(Instant::now());
         // E20: nur in der MR-Ansicht, nie im Banner oder Tray
         if self.main_view == MainView::MergeRequests {
-            self.status_message = Some(tr(self.config.language, reason_key));
-            self.status_message_time = Some(Instant::now());
+            self.set_status(tr(self.config.language, reason_key));
         }
         self.run_pending_mr_refresh();
     }
@@ -630,6 +629,9 @@ impl MyApp {
         let busy = self.mr_loading || self.mr_discovering || self.mr_more_pending > 0;
         if !busy && should_auto_fetch(self.mr_last_refresh, interval, Instant::now()) {
             self.start_mr_refresh();
+            // `poll_mr` lief in diesem Durchlauf schon: gleich wieder
+            // wecken, sonst läge das Ergebnis bis zum 60-s-Takt im Kanal
+            ctx.request_repaint();
         }
         // Weckt `logic()` für die nächste Prüfung
         ctx.request_repaint_after(Duration::from_secs(60));
@@ -788,6 +790,13 @@ impl MyApp {
 
     /// Statusleiste in der MR-Ansicht (Text, ist Statusmeldung).
     pub(super) fn mr_status_line(&self) -> (String, bool) {
+        // Ein Auschecken (Klon, Fetch) läuft oft länger als seine
+        // Statusmeldung steht: danach den laufenden Vorgang zeigen
+        if self.status_message.is_none() && !self.git_busy.scans_repos() {
+            if let Some(busy) = super::repo_busy_text(self.config.language, &self.git_busy) {
+                return (busy, false);
+            }
+        }
         mr_status_text(
             self.config.language,
             self.status_message.as_deref(),
@@ -808,7 +817,11 @@ impl MyApp {
         {
             let config = &self.config;
             let mru = |p: &Path| crate::ui::tray_popup::mru_timestamp(config, p);
-            let exists = |p: &Path| p.exists();
+            // Vorschlag für den Zielordner: Prüfung im Hintergrund (ein
+            // Review-Ordner auf einem schlafenden Laufwerk hielte den Klick
+            // sonst an). Unbekannt gilt als frei; einen belegten Ordner
+            // lehnt der Checkout-Worker ab.
+            let exists = |p: &Path| crate::path_probe::exists(&ctx, p).unwrap_or(false);
             let repos = &self.repos;
             let ide_for = |p: &Path| super::mr_checkout::ide_name_for(config, repos, p);
             let agents = config.get_active_agents();

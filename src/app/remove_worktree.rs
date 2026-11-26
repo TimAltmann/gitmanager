@@ -11,11 +11,11 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-/// Offener Dialog und Kanal für das Ergebnis des Workers.
+/// Offener Dialog und Kanal für die Ergebnisse der Worker.
 pub(super) struct RemoveUi {
     pub dialog: Option<RemoveDialog>,
-    tx: Sender<RemoveDone>,
-    rx: Receiver<RemoveDone>,
+    tx: Sender<RemoveMsg>,
+    rx: Receiver<RemoveMsg>,
 }
 
 impl Default for RemoveUi {
@@ -29,9 +29,32 @@ impl Default for RemoveUi {
     }
 }
 
-struct RemoveDone {
-    path: PathBuf,
-    result: anyhow::Result<()>,
+/// Ergebnisse der Worker des Dialogs.
+enum RemoveMsg {
+    /// Prüfung nach dem Öffnen (Branch-Sicherheit, erreichbare Commits)
+    Checked {
+        path: PathBuf,
+        safety: Option<BranchSafety>,
+        head_unreachable: bool,
+    },
+    /// Der Zustand hat sich seit dem Öffnen geändert: nichts entfernt, der
+    /// Dialog zeigt den neuen Stand und will eine neue Bestätigung
+    Changed(Box<RemoveDialog>),
+    Done {
+        path: PathBuf,
+        result: anyhow::Result<RemoveOutcome>,
+    },
+}
+
+/// Erfolgreiches Entfernen.
+#[derive(Debug, PartialEq, Eq)]
+enum RemoveOutcome {
+    Removed,
+    /// Worktree entfernt, der Branch blieb aber erhalten (Name, Grund)
+    BranchKept {
+        branch: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -42,35 +65,55 @@ pub(super) struct RemoveDialog {
     pub branch: Option<String>,
     pub dirty_files: usize,
     pub ahead: usize,
-    /// Detached HEAD mit nirgends erreichbaren Commits (einmal beim Öffnen
-    /// berechnet, nicht pro Frame)
+    /// Detached HEAD mit nirgends erreichbaren Commits
     pub head_unreachable: bool,
     pub safety: Option<BranchSafety>,
     pub delete_branch: bool,
     pub claude_running: bool,
+    /// `safety` und `head_unreachable` werden noch im Worker ermittelt
+    /// (Graph-Läufe, bei vielen Refs oder langsamer Platte spürbar)
+    pub checking: bool,
     pub running: bool,
 }
 
 impl RemoveDialog {
-    pub fn new(repo: &RepoInfo, claude_running: bool) -> Self {
-        let main = git::main_repo_of(&repo.common_dir);
-        let branch = (!repo.is_detached && !repo.branch.is_empty()).then(|| repo.branch.clone());
-        // Der MR-Status kommt erst über „Aufräumen“: hier ohne gemergte MR-Köpfe
-        let safety = branch
-            .as_deref()
-            .and_then(|b| git::branch_safety(&main, b, &[]));
+    /// Dialog aus dem Scan-Stand, ohne git-Zugriff; `safety` und
+    /// `head_unreachable` liefert [`Self::inspect`].
+    fn unchecked(repo: &RepoInfo, claude_running: bool) -> Self {
         Self {
             path: repo.path.clone(),
-            main,
-            branch,
+            main: git::main_repo_of(&repo.common_dir),
+            branch: (!repo.is_detached && !repo.branch.is_empty()).then(|| repo.branch.clone()),
             dirty_files: repo.dirty_files,
             ahead: repo.ahead,
-            head_unreachable: git::head_unreachable(&repo.path),
-            safety,
+            head_unreachable: false,
+            safety: None,
             delete_branch: false,
             claude_running,
+            checking: true,
             running: false,
         }
+    }
+
+    /// Mit frisch gelesenem Zustand (Worker): öffnet Repos und läuft durch
+    /// den Commit-Graphen.
+    pub fn new(repo: &RepoInfo, claude_running: bool) -> Self {
+        let mut dialog = Self::unchecked(repo, claude_running);
+        let (safety, head_unreachable) = dialog.inspect();
+        dialog.safety = safety;
+        dialog.head_unreachable = head_unreachable;
+        dialog.checking = false;
+        dialog
+    }
+
+    /// Branch-Sicherheit und „HEAD nirgends erreichbar“. Der MR-Status
+    /// kommt erst über „Aufräumen“: hier ohne gemergte MR-Köpfe.
+    fn inspect(&self) -> (Option<BranchSafety>, bool) {
+        let safety = self
+            .branch
+            .as_deref()
+            .and_then(|b| git::branch_safety(&self.main, b, &[]));
+        (safety, git::head_unreachable(&self.path))
     }
 
     /// Verlustgefahr: nur mit ausdrücklichem „Trotzdem entfernen“.
@@ -83,7 +126,7 @@ impl RemoveDialog {
         self.branch.is_some() && self.safety.is_some()
     }
 
-    /// Branch und `-D`-Flag für `git::remove_worktree`, falls gewünscht.
+    /// Branch und `-D`-Flag zum Löschen nach dem Entfernen, falls gewünscht.
     pub fn branch_to_delete(&self) -> Option<(&str, bool)> {
         let safety = self.safety?;
         if !self.delete_branch {
@@ -91,12 +134,57 @@ impl RemoveDialog {
         }
         Some((self.branch.as_deref()?, safety.needs_force_delete()))
     }
+
+    /// Weicht der frisch gelesene Zustand von dem ab, den der Nutzer
+    /// bestätigt hat?
+    fn differs_from(&self, fresh: &RemoveDialog) -> bool {
+        fresh.dirty_files != self.dirty_files
+            || fresh.ahead != self.ahead
+            || fresh.head_unreachable != self.head_unreachable
+            || fresh.safety != self.safety
+    }
+}
+
+/// Worker von „Entfernen“: Zustand neu lesen (zwischen Öffnen und Klick
+/// kann sich der Ordner geändert haben, z. B. durch Claude), dann entfernen
+/// und den Branch nur löschen, wenn er noch so sicher ist wie angezeigt.
+fn run_remove(confirmed: &RemoveDialog) -> RemoveMsg {
+    let path = confirmed.path.clone();
+    if let Some(info) = git::get_repo_info(path.clone()) {
+        let mut fresh = RemoveDialog::new(&info, confirmed.claude_running);
+        if confirmed.differs_from(&fresh) {
+            fresh.delete_branch = confirmed.delete_branch && fresh.can_delete_branch();
+            return RemoveMsg::Changed(Box::new(fresh));
+        }
+    }
+    let result = (|| {
+        git::remove_worktree(&path, &confirmed.main, confirmed.needs_force(), None)?;
+        let Some((branch, force_delete)) = confirmed.branch_to_delete() else {
+            return Ok(RemoveOutcome::Removed);
+        };
+        let kept = |reason: String| RemoveOutcome::BranchKept {
+            branch: branch.to_string(),
+            reason,
+        };
+        if git::branch_safety(&confirmed.main, branch, &[]) != confirmed.safety {
+            // Leerer Grund: „hat sich inzwischen geändert“ (übersetzt)
+            return Ok(kept(String::new()));
+        }
+        Ok(
+            match git::delete_local_branch(&confirmed.main, branch, force_delete) {
+                Ok(()) => RemoveOutcome::Removed,
+                Err(e) => kept(format!("{e:#}")),
+            },
+        )
+    })();
+    RemoveMsg::Done { path, result }
 }
 
 impl MyApp {
     pub(super) fn open_remove_worktree(&mut self, path: &Path) {
         // Läuft schon eine Entfernung, den laufenden Dialog nicht überschreiben
         if self.remove_ui.dialog.as_ref().is_some_and(|d| d.running) {
+            self.set_status(tr(self.config.language, "rm_wt_running"));
             return;
         }
         let Some(repo) = self
@@ -107,7 +195,24 @@ impl MyApp {
             return;
         };
         let claude = repo_badges::claude_running_at(&self.claude.live_any_place(), path);
-        self.remove_ui.dialog = Some(RemoveDialog::new(repo, claude));
+        // Sofort öffnen; die git-Prüfung läuft im Hintergrund
+        let dialog = RemoveDialog::unchecked(repo, claude);
+        let probe = dialog.clone();
+        self.remove_ui.dialog = Some(dialog);
+        let tx = self.remove_ui.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            // Nach einer Panic gilt der vorsichtige Stand: Branch nicht
+            // löschbar, Entfernen nur mit „Trotzdem“
+            let (safety, head_unreachable) =
+                catch_unwind(AssertUnwindSafe(|| probe.inspect())).unwrap_or((None, true));
+            let _ = tx.send(RemoveMsg::Checked {
+                path: probe.path,
+                safety,
+                head_unreachable,
+            });
+            ctx.request_repaint();
+        });
     }
 
     pub(super) fn show_remove_worktree_dialog(&mut self, ctx: &egui::Context) {
@@ -118,8 +223,10 @@ impl MyApp {
         let mut open = true;
         let mut confirm = false;
         let mut cancel = false;
-        let busy = (self.git_busy.holds_refs() && !dialog.running) || self.auto_fetching;
-        let red = Color32::from_rgb(200, 60, 60);
+        let busy = (self.git_busy.holds_refs() && !dialog.running)
+            || self.auto_fetching
+            || self.branch_switch.is_some();
+        let red = crate::ui::theme::COLOR_ERROR;
 
         egui::Window::new(tr(lang, "rm_wt_title"))
             .id(egui::Id::new("remove_worktree_dialog"))
@@ -149,7 +256,7 @@ impl MyApp {
                     if dialog.claude_running {
                         ui.label(
                             RichText::new(tr(lang, "rm_wt_claude"))
-                                .color(Color32::from_rgb(200, 120, 40)),
+                                .color(crate::ui::theme::COLOR_WARN),
                         );
                     }
                     if let Some(branch) = dialog.branch.clone() {
@@ -164,13 +271,15 @@ impl MyApp {
                         );
                         if !enabled {
                             dialog.delete_branch = false;
-                            resp.on_disabled_hover_text(tr(lang, "rm_wt_branch_unsafe"));
+                            if !dialog.checking {
+                                resp.on_disabled_hover_text(tr(lang, "rm_wt_branch_unsafe"));
+                            }
                         }
                     }
                 });
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    let enabled = !dialog.running && !busy;
+                    let enabled = !dialog.running && !dialog.checking && !busy;
                     let button = if dialog.needs_force() {
                         egui::Button::new(
                             RichText::new(tr(lang, "rm_wt_remove_anyway")).color(Color32::WHITE),
@@ -188,9 +297,19 @@ impl MyApp {
                     {
                         cancel = true;
                     }
-                    if dialog.running {
+                    // Warum „Entfernen“ gerade gesperrt ist
+                    let waiting = if dialog.running {
+                        Some("rm_wt_running")
+                    } else if dialog.checking {
+                        Some("rm_wt_checking")
+                    } else if busy {
+                        Some("wt_wait_busy")
+                    } else {
+                        None
+                    };
+                    if let Some(key) = waiting {
                         ui.spinner();
-                        ui.label(RichText::new(tr(lang, "rm_wt_running")).size(11.0));
+                        ui.label(RichText::new(tr(lang, key)).size(11.0));
                     }
                 });
             });
@@ -205,104 +324,126 @@ impl MyApp {
 
     /// Startet den Worker für den offenen Dialog.
     pub(super) fn confirm_remove_worktree(&mut self) {
-        let lang = self.config.language;
-        if self.auto_fetching {
-            self.set_status(tr(lang, "auto_fetch_running"));
-            return;
-        }
-        if self.git_busy.holds_refs() {
-            self.set_status(tr(lang, "fetch_busy"));
+        if self.refuse_while_busy() {
             return;
         }
         let Some(dialog) = self.remove_ui.dialog.as_mut() else {
             return;
         };
-        if dialog.running {
+        if dialog.running || dialog.checking {
             return;
         }
-        // Zustand zum Zeitpunkt der Bestätigung neu lesen: zwischen Öffnen
-        // und Klick kann sich der Ordner (z. B. durch Claude) geändert haben
-        if let Some(info) = git::get_repo_info(dialog.path.clone()) {
-            let mut fresh = RemoveDialog::new(&info, dialog.claude_running);
-            fresh.delete_branch = dialog.delete_branch && fresh.can_delete_branch();
-            if fresh.dirty_files != dialog.dirty_files
-                || fresh.ahead != dialog.ahead
-                || fresh.head_unreachable != dialog.head_unreachable
-                || fresh.safety != dialog.safety
-                || fresh.needs_force() != dialog.needs_force()
-            {
-                *dialog = fresh;
-                self.set_status(tr(lang, "rm_wt_changed"));
-                return;
-            }
-        }
         dialog.running = true;
-        let path = dialog.path.clone();
-        let main = dialog.main.clone();
-        let force = dialog.needs_force();
-        let branch = dialog
-            .branch_to_delete()
-            .map(|(b, force_delete)| (b.to_string(), force_delete));
-        let expected = dialog.safety;
-        self.set_git_busy(GitBusy::Remove { path: path.clone() });
+        let confirmed = dialog.clone();
+        self.set_git_busy(GitBusy::Remove {
+            path: confirmed.path.clone(),
+        });
         let tx = self.remove_ui.tx.clone();
+        let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             // Panic vor dem Senden darf `git_busy` nicht hängen lassen
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                git::remove_worktree(&path, &main, force, None)?;
-                // Branch erst löschen, wenn er noch genauso sicher ist wie angezeigt
-                if let Some((b, force_delete)) = &branch {
-                    if git::branch_safety(&main, b, &[]) != expected {
-                        anyhow::bail!(
-                            "branch '{b}' changed meanwhile and was not deleted; \
-                             the worktree itself was removed"
-                        );
+            let msg =
+                catch_unwind(AssertUnwindSafe(|| run_remove(&confirmed))).unwrap_or_else(|_| {
+                    eprintln!("Worktree-Entfernen-Thread abgestürzt");
+                    RemoveMsg::Done {
+                        path: confirmed.path.clone(),
+                        result: Err(anyhow::anyhow!("remove aborted")),
                     }
-                    git::delete_local_branch(&main, b, *force_delete)?;
-                }
-                Ok(())
-            }))
-            .unwrap_or_else(|_| {
-                eprintln!("Worktree-Entfernen-Thread abgestürzt");
-                Err(anyhow::anyhow!("remove aborted"))
-            });
-            let _ = tx.send(RemoveDone { path, result });
+                });
+            let _ = tx.send(msg);
+            ctx.request_repaint();
         });
     }
 
-    /// Ergebnis des Workers: Dialog schließen, melden, neu scannen.
+    /// Ergebnisse der Worker: Prüfung eintragen bzw. Dialog schließen,
+    /// melden, neu scannen.
     pub(super) fn poll_remove_worktree(&mut self, ctx: &egui::Context) {
-        while let Ok(done) = self.remove_ui.rx.try_recv() {
+        while let Ok(msg) = self.remove_ui.rx.try_recv() {
             let lang = self.config.language;
-            if matches!(&self.git_busy, GitBusy::Remove { path } if *path == done.path) {
-                self.set_git_busy(GitBusy::Idle);
-            }
-            if self
-                .remove_ui
-                .dialog
-                .as_ref()
-                .is_some_and(|d| d.path == done.path)
-            {
-                self.remove_ui.dialog = None;
-            }
-            let shown = done.path.display().to_string();
-            // Auch nach Fehler: ein halb entfernter Worktree soll sichtbar
-            // werden. Scan zuerst — er leert `self.error` beim Start.
-            self.start_scan();
-            match &done.result {
-                Ok(()) => self.set_status(tr_fmt(lang, "rm_wt_done", &[&shown])),
-                Err(e) => {
-                    eprintln!("Worktree entfernen fehlgeschlagen für {shown}: {e:#}");
-                    let text = tr_fmt(lang, "rm_wt_failed", &[&shown, &format!("{e:#}")]);
-                    // Banner bleibt über den Rescan hinweg stehen
-                    self.error = Some(text.clone());
-                    self.error_after_scan = Some(text);
+            match msg {
+                RemoveMsg::Checked {
+                    path,
+                    safety,
+                    head_unreachable,
+                } => {
+                    // Nur der noch offene, ungeprüfte Dialog dieses Ordners
+                    if let Some(d) = self
+                        .remove_ui
+                        .dialog
+                        .as_mut()
+                        .filter(|d| d.path == path && d.checking)
+                    {
+                        d.safety = safety;
+                        d.head_unreachable = head_unreachable;
+                        d.checking = false;
+                    }
+                }
+                RemoveMsg::Changed(fresh) => {
+                    self.release_remove(&fresh.path);
+                    if let Some(d) = self
+                        .remove_ui
+                        .dialog
+                        .as_mut()
+                        .filter(|d| d.path == fresh.path)
+                    {
+                        *d = *fresh;
+                    }
+                    self.set_status(tr(lang, "rm_wt_changed"));
+                }
+                RemoveMsg::Done { path, result } => {
+                    self.release_remove(&path);
+                    if self
+                        .remove_ui
+                        .dialog
+                        .as_ref()
+                        .is_some_and(|d| d.path == path)
+                    {
+                        self.remove_ui.dialog = None;
+                    }
+                    let shown = path.display().to_string();
+                    // Auch nach Fehler: ein halb entfernter Worktree soll
+                    // sichtbar werden. Scan zuerst — er leert `self.error`
+                    // beim Start.
+                    self.start_scan();
+                    let problem = match result {
+                        Ok(RemoveOutcome::Removed) => {
+                            self.set_status(tr_fmt(lang, "rm_wt_done", &[&shown]));
+                            None
+                        }
+                        // Der Worktree ist weg, nur der Branch nicht: kein
+                        // „fehlgeschlagen“
+                        Ok(RemoveOutcome::BranchKept { branch, reason }) => {
+                            let reason = if reason.is_empty() {
+                                tr(lang, "rm_wt_branch_changed")
+                            } else {
+                                reason
+                            };
+                            Some(tr_fmt(
+                                lang,
+                                "rm_wt_branch_kept",
+                                &[&shown, &branch, &reason],
+                            ))
+                        }
+                        Err(e) => {
+                            eprintln!("Worktree entfernen fehlgeschlagen für {shown}: {e:#}");
+                            Some(tr_fmt(lang, "rm_wt_failed", &[&shown, &format!("{e:#}")]))
+                        }
+                    };
+                    if let Some(text) = problem {
+                        // Banner bleibt über den Rescan hinweg stehen
+                        self.error = Some(text.clone());
+                        self.error_after_scan = Some(text);
+                    }
                 }
             }
             ctx.request_repaint();
         }
-        if matches!(self.git_busy, GitBusy::Remove { .. }) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
+    /// Ref-Sperre des Entfernens für diesen Ordner lösen.
+    fn release_remove(&mut self, path: &Path) {
+        if matches!(&self.git_busy, GitBusy::Remove { path: busy } if busy == path) {
+            self.set_git_busy(GitBusy::Idle);
         }
     }
 }
@@ -325,8 +466,28 @@ mod tests {
             safety: None,
             delete_branch: false,
             claude_running: false,
+            checking: false,
             running: false,
         }
+    }
+
+    /// Übernimmt Ergebnisse, bis die Prüfung nach dem Öffnen da ist und
+    /// kein Entfernen mehr läuft.
+    fn settle(app: &mut MyApp) {
+        let ctx = egui::Context::default();
+        for _ in 0..2000 {
+            app.poll_remove_worktree(&ctx);
+            let waiting = app
+                .remove_ui
+                .dialog
+                .as_ref()
+                .is_some_and(|d| d.checking || d.running);
+            if !waiting && !matches!(app.git_busy, GitBusy::Remove { .. }) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("Worker hängt");
     }
 
     #[test]
@@ -372,18 +533,15 @@ mod tests {
         app.open_remove_worktree(&wt);
         let d = app.remove_ui.dialog.as_ref().expect("dialog offen");
         assert_eq!(d.main, main);
-        assert!(!d.needs_force());
+        assert!(d.checking, "git-Prüfung läuft im Hintergrund");
+        // Vor dem Ergebnis der Prüfung startet nichts
+        app.confirm_remove_worktree();
+        assert_eq!(app.git_busy, GitBusy::Idle);
+        settle(&mut app);
+        assert!(!app.remove_ui.dialog.as_ref().unwrap().needs_force());
         app.confirm_remove_worktree();
         assert!(matches!(app.git_busy, GitBusy::Remove { .. }));
-
-        let ctx = egui::Context::default();
-        for _ in 0..200 {
-            app.poll_remove_worktree(&ctx);
-            if !matches!(app.git_busy, GitBusy::Remove { .. }) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        settle(&mut app);
         assert!(!wt.exists(), "Ordner entfernt");
         assert!(app.error.is_none(), "{:?}", app.error);
         assert!(app.remove_ui.dialog.is_none());
@@ -398,7 +556,7 @@ mod tests {
         app.set_git_busy(GitBusy::Remove { path: path.clone() });
         app.remove_ui
             .tx
-            .send(RemoveDone {
+            .send(RemoveMsg::Done {
                 path: path.clone(),
                 result: Err(anyhow::anyhow!("kaputt")),
             })
@@ -452,11 +610,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (mut app, _main, wt) = setup(tmp.path());
         app.open_remove_worktree(&wt);
+        settle(&mut app);
         assert!(!app.remove_ui.dialog.as_ref().unwrap().needs_force());
         std::fs::write(wt.join("neu.txt"), "x").unwrap();
         app.confirm_remove_worktree();
-        assert_eq!(app.git_busy, GitBusy::Idle, "nichts gestartet");
-        assert!(wt.exists());
+        settle(&mut app);
+        assert_eq!(app.git_busy, GitBusy::Idle, "Sperre wieder gelöst");
+        assert!(wt.exists(), "nichts entfernt");
         let d = app.remove_ui.dialog.as_ref().unwrap();
         assert!(d.needs_force() && !d.running);
         assert_eq!(
@@ -472,6 +632,7 @@ mod tests {
         // Default-Branch des Remotes simulieren: feat ist darin enthalten
         git(&main, &["update-ref", "refs/remotes/origin/main", "main"]);
         app.open_remove_worktree(&wt);
+        settle(&mut app);
         {
             let d = app.remove_ui.dialog.as_mut().unwrap();
             assert_eq!(d.safety, Some(BranchSafety::MergedIntoDefault));
@@ -479,6 +640,7 @@ mod tests {
         }
         git(&wt, &["commit", "-q", "--allow-empty", "-m", "neu"]);
         app.confirm_remove_worktree();
+        settle(&mut app);
         assert_eq!(app.git_busy, GitBusy::Idle);
         assert!(wt.exists());
         let d = app.remove_ui.dialog.as_ref().unwrap();
@@ -495,6 +657,7 @@ mod tests {
         app.open_remove_worktree(&main);
         assert!(app.remove_ui.dialog.is_none(), "kein verknüpfter Worktree");
         app.open_remove_worktree(&wt);
+        settle(&mut app);
         app.remove_ui.dialog.as_mut().unwrap().running = true;
         app.repos.push(RepoInfo::new(
             PathBuf::from("/x/other"),
@@ -508,9 +671,9 @@ mod tests {
         // Fremdes Ergebnis schließt den Dialog nicht
         app.remove_ui
             .tx
-            .send(RemoveDone {
+            .send(RemoveMsg::Done {
                 path: PathBuf::from("/x/else"),
-                result: Ok(()),
+                result: Ok(RemoveOutcome::Removed),
             })
             .unwrap();
         app.poll_remove_worktree(&egui::Context::default());

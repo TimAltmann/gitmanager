@@ -291,6 +291,9 @@ mod imp {
         }
     }
 
+    /// Zuletzt im Popup angewandtes Theme (siehe `show_tray_popup_viewport`).
+    static APPLIED_THEME: Mutex<Option<crate::config::Theme>> = Mutex::new(None);
+
     fn show_tray_popup_viewport(shared: &Arc<Mutex<TrayShared>>, ctx: &Context) {
         // Clone needed data (Arc clones are cheap; deep-clone only visible Top-N below)
         let (tray_rect, popup_opened_at) = {
@@ -370,6 +373,8 @@ mod imp {
         let popup_pos = tray_popup::calculate_popup_position(tray_rect, popup_size, screen_rect);
 
         let mut close_popup = false;
+        // Geschlossen, weil das Popup den Fokus verlor
+        let mut focus_lost = false;
         let mut tray_actions = TrayPopupActions::default();
         let viewport_id = ViewportId::from_hash_of("tray_popup");
         let builder = ViewportBuilder::default()
@@ -396,7 +401,16 @@ mod imp {
                     });
                     return;
                 }
-                crate::ui::theme::apply_theme(ctx, &config_arc.theme);
+                // Der Stil gilt für den ganzen Context (gesetzt in `MyApp::new`
+                // und beim Speichern der Einstellungen): hier nur nach einem
+                // Wechsel, nicht je Popup-Frame (klonte jedes Mal den Stil).
+                {
+                    let mut applied = APPLIED_THEME.lock().unwrap_or_else(|e| e.into_inner());
+                    if applied.as_ref() != Some(&config_arc.theme) {
+                        crate::ui::theme::apply_theme(ctx, &config_arc.theme);
+                        *applied = Some(config_arc.theme.clone());
+                    }
+                }
                 // install_image_loaders gehört einmalig in MyApp::new (F-19), nicht pro Frame
                 if ctx.input(|i| i.viewport().close_requested()) {
                     close_popup = true;
@@ -439,6 +453,7 @@ mod imp {
                     })
                 {
                     close_popup = true;
+                    focus_lost = true;
                 }
             });
         }));
@@ -451,7 +466,14 @@ mod imp {
 
         // Handle close (Task 6: leert auch die Branch-Filter)
         if close_popup {
-            lock_shared(shared).close_popup();
+            let mut guard = lock_shared(shared);
+            guard.close_popup();
+            if focus_lost {
+                // Klick aufs Tray-Icon bei offenem Popup: der Druck nimmt den
+                // Fokus (Popup zu), das Loslassen öffnete es sonst gleich
+                // wieder – wie ein Toggle entprellen.
+                guard.last_toggle_at = Some(Instant::now());
+            }
         } else {
             // Nur nicht-leere Filter sichtbarer Repos behalten (Map bleibt klein).
             branch_filters

@@ -93,9 +93,10 @@ impl MyApp {
                 if pulling {
                     self.agent_after_pull = Some((prompt.path, prompt.agent_id));
                 } else {
-                    // Pull gerade nicht möglich (Fetch/Scan läuft): nicht
-                    // hängen lassen, die Meldung dazu steht in der Statusleiste
-                    self.open_agent(&prompt.path, &prompt.agent_id);
+                    // Pull gerade nicht möglich (Fetch/Scan läuft, Meldung in
+                    // der Statusleiste): die Frage bleibt offen, statt den
+                    // Agenten stillschweigend ohne Pull zu starten
+                    self.mr_pull_prompt = Some(prompt);
                 }
             }
         }
@@ -270,14 +271,23 @@ mod tests {
         assert!(app.agent_after_pull.is_none());
     }
 
+    /// Pull gerade nicht möglich: die Frage bleibt offen (mit Meldung),
+    /// der Agent startet nicht stillschweigend ohne Pull.
     #[test]
-    fn pull_and_start_while_busy_starts_directly() {
+    fn pull_and_start_while_busy_keeps_asking() {
         let (dir, ..) = repo_two_commits();
         let mut app = test_app();
         app.auto_fetching = true;
         app.start_mr_agent(dir.path(), "claude", 1, None);
         app.answer_mr_pull_prompt(Answer::PullAndStart);
-        assert!(app.mr_pull_prompt.is_none());
+        assert!(app.mr_pull_prompt.is_some());
         assert!(app.agent_after_pull.is_none());
+        assert_eq!(
+            app.status_message,
+            Some(tr(app.config.language, "auto_fetch_running"))
+        );
+        // „Ohne Pull starten“ bleibt möglich
+        app.answer_mr_pull_prompt(Answer::StartWithoutPull);
+        assert!(app.mr_pull_prompt.is_none());
     }
 }

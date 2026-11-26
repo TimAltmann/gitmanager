@@ -10,11 +10,9 @@ use crate::ui::theme::COLOR_MUTED;
 use egui::{Color32, RichText, Ui, Vec2};
 use std::collections::HashMap;
 
-// Icons via egui include_image! (Simple Icons CC0 + Phosphor for folder)
 use crate::ui::icons::{
-    ICON_AIDER, ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CLAUDE, ICON_CODEX, ICON_COPILOT,
-    ICON_CURSOR, ICON_GEMINI, ICON_GIT_BRANCH, ICON_GIT_COMMIT, ICON_PLUS, ICON_REFRESH,
-    ICON_RIDER, ICON_SEARCH, ICON_TRASH, ICON_VS, ICON_VSCODE,
+    ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CLAUDE, ICON_GIT_BRANCH, ICON_GIT_COMMIT, ICON_PLUS,
+    ICON_REFRESH, ICON_SEARCH, ICON_TRASH,
 };
 
 /// Tooltip-Text für den Branch-Button. Der Rückstand steht im ↓-Chip
@@ -25,50 +23,6 @@ pub fn branch_button_tooltip(lang: crate::i18n::Language, branch: &str, detached
     } else {
         format!("{} – {}", branch, tr(lang, "branch_switch_tooltip"))
     }
-}
-
-fn ide_icon_for(ide_id: &str) -> egui::ImageSource<'static> {
-    match ide_id {
-        "vs2022" | "vs" | "visualstudio" => ICON_VS,
-        "rider" | "jetbrains" => ICON_RIDER,
-        "vscode" => ICON_VSCODE,
-        _ => ICON_VSCODE,
-    }
-}
-
-fn agent_icon_for(agent_id: &str) -> egui::ImageSource<'static> {
-    match agent_id {
-        "claude" => ICON_CLAUDE,
-        "codex" => ICON_CODEX,
-        "gemini" => ICON_GEMINI,
-        "copilot" => ICON_COPILOT,
-        "cursor" => ICON_CURSOR,
-        "aider" => ICON_AIDER,
-        _ => ICON_CLAUDE,
-    }
-}
-
-pub(crate) fn ide_image(ide: &crate::config::IdeConfig) -> egui::Image<'static> {
-    if let Some(path) = &ide.icon {
-        let pb = std::path::PathBuf::from(path);
-        if pb.exists() {
-            // Nutze file:// URI – wird von egui_extras async geladen und gecached, kein blockierendes read() im UI-Thread
-            let uri = format!("file://{}", pb.display().to_string().replace('\\', "/"));
-            return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(18.0));
-        }
-    }
-    egui::Image::new(ide_icon_for(&ide.id)).fit_to_exact_size(Vec2::splat(18.0))
-}
-
-pub(crate) fn agent_image(agent: &crate::config::AgentProfile) -> egui::Image<'static> {
-    if let Some(path) = &agent.icon {
-        let pb = std::path::PathBuf::from(path);
-        if pb.exists() {
-            let uri = format!("file://{}", pb.display().to_string().replace('\\', "/"));
-            return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(18.0));
-        }
-    }
-    egui::Image::new(agent_icon_for(&agent.id)).fit_to_exact_size(Vec2::splat(18.0))
 }
 
 /// Helper: Dropdown-Button mit rechtsbündigem Chevron *innerhalb* des Buttons.
@@ -99,21 +53,7 @@ fn dropdown_button(
 }
 
 pub fn filter_branches(branches: &[String], filter: &str, limit: usize) -> Vec<String> {
-    if limit == 0 {
-        return Vec::new();
-    }
-    let filter_lower = filter.to_lowercase();
-    let mut out = Vec::new();
-    for b in branches {
-        if !filter_lower.is_empty() && !b.to_lowercase().contains(&filter_lower) {
-            continue;
-        }
-        out.push(b.clone());
-        if out.len() >= limit {
-            break;
-        }
-    }
-    out
+    crate::ui::tray_popup::tray_branch_match_counts(branches, filter, limit).0
 }
 
 /// Task 4: Sortierung der Hauptliste im View (nicht im Scanner).
@@ -196,6 +136,8 @@ pub struct RepoListContext<'a> {
     pub claude: &'a HashMap<PathBuf, LiveStatus>,
     /// Ordner, in dem gerade ein Pull läuft (Spinner im ↓-Chip)
     pub pulling: Option<&'a Path>,
+    /// Ordner, dessen Branch gerade gewechselt wird (Spinner am Branch)
+    pub switching: Option<&'a Path>,
     /// Jetzt (Unix-Sekunden) für „vor 2 Std.“
     pub now: i64,
     /// Fetch-Lauf hält die Refs (Branch-Popup: Refresh gesperrt, Spinner)
@@ -214,6 +156,7 @@ impl RepoListContext<'static> {
             mrs: &MRS,
             claude: &CLAUDE,
             pulling: None,
+            switching: None,
             now: 0,
             fetching: false,
         }
@@ -355,7 +298,12 @@ pub fn show_repo_list(
                         for &i in indices.iter() {
                             let repo = &mut repos[i];
                             let highlight = highlight.filter(|h| h.path == repo.path);
-                            show_repo_row(ui, repo, config, actions, highlight, cx);
+                            // Nur sichtbare Karten aufbauen; die Zielkarte von
+                            // „In Repo-Liste zeigen“ immer (sie wird angesprungen)
+                            let id = egui::Id::new(("repo_card", &repo.path));
+                            crate::ui::widgets::culled(ui, id, highlight.is_some(), |ui| {
+                                show_repo_row(ui, repo, config, actions, highlight, cx);
+                            });
                             ui.add_space(6.0);
                         }
                     });
@@ -496,12 +444,16 @@ fn show_repo_row(
                         } else {
                             ui.visuals().text_color()
                         };
-                        ui.add(
-                            egui::Image::new(branch_icon)
-                                .fit_to_exact_size(Vec2::splat(14.0))
-                                .tint(icon_tint),
-                        )
-                        .on_hover_text(branch_tooltip.clone());
+                        if cx.switching.is_some_and(|path| path == repo.path) {
+                            ui.add(egui::Spinner::new().size(14.0));
+                        } else {
+                            ui.add(
+                                egui::Image::new(branch_icon)
+                                    .fit_to_exact_size(Vec2::splat(14.0))
+                                    .tint(icon_tint),
+                            )
+                            .on_hover_text(branch_tooltip.clone());
+                        }
                         let branch_color = if repo.is_detached {
                             Color32::from_rgb(200, 120, 40)
                         } else {
@@ -620,8 +572,13 @@ fn show_repo_row(
                                     .max_height(220.0)
                                     .show(ui, |ui| {
                                         let limit = config.branch_display_limit.clamp(50, 500);
-                                        let filtered =
-                                            filter_branches(&repo.branches, &branch_filter, limit);
+                                        // Treffer und Gesamtzahl in einem Durchlauf
+                                        let (filtered, total_matching) =
+                                            crate::ui::tray_popup::tray_branch_match_counts(
+                                                &repo.branches,
+                                                &branch_filter,
+                                                limit,
+                                            );
                                         for b in &filtered {
                                             let is_current = b == &repo.branch;
                                             let label = if is_current {
@@ -636,37 +593,16 @@ fn show_repo_row(
                                                 close_popup = true;
                                             }
                                         }
-                                        if filtered.len() >= limit {
-                                            let total_matching = repo
-                                                .branches
-                                                .iter()
-                                                .filter(|b| {
-                                                    branch_filter.is_empty()
-                                                        || b.to_lowercase()
-                                                            .contains(&branch_filter.to_lowercase())
-                                                })
-                                                .count();
-                                            let remaining =
-                                                total_matching.saturating_sub(filtered.len());
-                                            if remaining > 0 {
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "... und {} mehr (filtere)",
-                                                        remaining
-                                                    ))
-                                                    .weak()
-                                                    .size(10.0),
-                                                );
-                                            } else if repo.branches.len() > filtered.len() {
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "... und {} mehr (filtere)",
-                                                        repo.branches.len() - filtered.len()
-                                                    ))
-                                                    .weak()
-                                                    .size(10.0),
-                                                );
-                                            }
+                                        // Rest nur über den Filter erreichbar
+                                        if let Some(hint) =
+                                            crate::ui::tray_popup::tray_branch_overflow_hint(
+                                                config.language,
+                                                total_matching,
+                                                filtered.len(),
+                                                true,
+                                            )
+                                        {
+                                            ui.label(RichText::new(hint).weak().size(10.0));
                                         }
                                         if repo.branches.is_empty() {
                                             ui.label(
@@ -714,14 +650,6 @@ fn show_repo_row(
                     }
                     if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
                         close_popup = true;
-                    }
-                    // Wenn Window geschlossen (z.B. durch Klick außerhalb des egui Bereichs), open wird false
-                    if let Some(r) = win_resp {
-                        // r.response enthält den Frame – nicht direkt nutzen
-                        // Wir halten popup offen, es sei denn close_popup
-                        let _ = r;
-                    } else {
-                        // Window not shown due to earlier return? keep open
                     }
                     // Persist filter während Popup offen
                     branch_filter_changed = branch_filter_changed || do_fetch;
@@ -1137,34 +1065,6 @@ mod tests {
     use crate::config::AppConfig;
 
     use std::path::{Path, PathBuf};
-
-    #[test]
-    fn ide_icon_for_mapping() {
-        let _ = ide_icon_for("vs2022");
-        let _ = ide_icon_for("vs");
-        let _ = ide_icon_for("visualstudio");
-        let _ = ide_icon_for("rider");
-        let _ = ide_icon_for("jetbrains");
-        let _ = ide_icon_for("vscode");
-        let _ = ide_icon_for("unknown");
-        let vscode = ide_icon_for("vscode");
-        let unknown = ide_icon_for("unknown_id_xyz");
-        assert!(!format!("{:?}", vscode).is_empty());
-        assert!(!format!("{:?}", unknown).is_empty());
-    }
-
-    #[test]
-    fn agent_icon_for_mapping() {
-        for id in [
-            "claude", "codex", "gemini", "copilot", "cursor", "aider", "unknown",
-        ] {
-            let _ = agent_icon_for(id);
-        }
-        let claude = agent_icon_for("claude");
-        let unknown = agent_icon_for("unknown_xyz");
-        assert!(!format!("{:?}", claude).is_empty());
-        assert!(!format!("{:?}", unknown).is_empty());
-    }
 
     #[test]
     fn repo_list_actions_default() {
@@ -1980,6 +1880,7 @@ mod tests {
             mrs: &mrs,
             claude: &claude,
             pulling: None,
+            switching: None,
             now: 0,
             fetching: false,
         };
@@ -2003,6 +1904,7 @@ mod tests {
             mrs: &mrs,
             claude: &claude,
             pulling: None,
+            switching: None,
             now: 0,
             fetching: false,
         };

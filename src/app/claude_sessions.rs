@@ -1,7 +1,7 @@
 //! Ansicht „Claude Sessions“: Zustand, Hintergrund-Scan, Live-Status der
 //! laufenden Instanzen, Fortsetzen und Terminal-Fokus.
 
-use super::mr_checkout::ide_source;
+use super::mr_checkout::ide_profile_path;
 use super::{MainView, MyApp};
 use crate::claude_live::{
     build_open, claude_live_dir, focus_session_window, process_alive, read_live_sessions,
@@ -17,13 +17,12 @@ use crate::claude_sessions::{
     SessionScan,
 };
 use crate::config::AgentProfile;
-use crate::git::launch_agent;
 use crate::i18n::{tr, tr_fmt};
 use crate::ui::claude_sessions::{show_claude_sessions, ClaudeSessionActions, ViewData};
 use crate::ui::new_claude_session::{show_new_claude_contents, DialogOutcome, NewClaudeDialog};
 use egui::Ui;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -247,6 +246,7 @@ impl MyApp {
         let repos = self.repos.clone();
         let cache = Arc::clone(&self.claude.cache);
         let tx = self.claude.tx.clone();
+        let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let scan = match claude_projects_dir() {
                 Some(dir) => {
@@ -256,6 +256,7 @@ impl MyApp {
                 None => SessionScan::default(),
             };
             let _ = tx.send((generation, scan));
+            ctx.request_repaint();
         });
     }
 
@@ -300,7 +301,7 @@ impl MyApp {
 
     /// Abstand der Live-Abfragen: kürzer, solange die Ansicht offen ist.
     fn live_poll_interval(&self) -> Duration {
-        if self.main_view == MainView::ClaudeSessions {
+        if self.window_visible && self.main_view == MainView::ClaudeSessions {
             LIVE_POLL_VISIBLE
         } else {
             LIVE_POLL_HIDDEN
@@ -311,11 +312,14 @@ impl MyApp {
         self.claude.live_inflight = true;
         self.claude.last_live_poll = Some(Instant::now());
         let tx = self.claude.live_tx.clone();
+        let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let live = claude_live_dir()
                 .filter(|dir| dir.is_dir())
                 .map(|dir| read_live_sessions(&dir, process_alive));
             let _ = tx.send(live);
+            // Sonst läge der Stand bis zum nächsten Abfrage-Takt im Kanal
+            ctx.request_repaint();
         });
     }
 
@@ -383,11 +387,18 @@ impl MyApp {
         while let Ok((pid, click)) = self.claude.notify_click_rx.try_recv() {
             match click {
                 ToastClick::Terminal => {
-                    // Klappt das nicht, blinkt wenigstens das Terminal in der Taskleiste
-                    let _ = focus_session_window(pid);
+                    // Nur solange die Session noch läuft: ein später
+                    // angeklickter Toast träfe sonst einen neu vergebenen PID.
+                    // Klappt das Fokussieren nicht, blinkt wenigstens das
+                    // Terminal in der Taskleiste.
+                    if self.claude.live.iter().any(|l| l.pid == pid) {
+                        let _ = focus_session_window(pid);
+                    }
                 }
                 ToastClick::Show => {
-                    self.main_view = MainView::ClaudeSessions;
+                    // Über `set_main_view`: der erste Wechsel in die Ansicht
+                    // startet den Session-Scan
+                    self.set_main_view(MainView::ClaudeSessions);
                     self.show_main_window(ctx);
                 }
             }
@@ -466,9 +477,6 @@ impl MyApp {
                 claude.previews.insert(u.id, items);
             }
         }
-        let Some(projects) = claude_projects_dir() else {
-            return;
-        };
         for id in &claude.expanded {
             let meta = claude
                 .preview_meta
@@ -489,13 +497,23 @@ impl MyApp {
             claude.preview_seq += 1;
             let seq = claude.preview_seq;
             meta.inflight = Some(seq);
-            let (projects, id, file, mtime) =
-                (projects.clone(), id.clone(), meta.file.clone(), meta.mtime);
+            let (id, file, mtime) = (id.clone(), meta.file.clone(), meta.mtime);
             let have_items = claude.previews.contains_key(&id);
             let tx = claude.preview_tx.clone();
             let ctx = ctx.clone();
             std::thread::spawn(move || {
-                let _ = tx.send((seq, check_preview(&projects, id, file, mtime, have_items)));
+                // Auch der Ordner erst hier (Dateizugriff, je Frame zu teuer);
+                // ohne ihn eine leere Vorschau statt eines ewigen Spinners
+                let update = match claude_projects_dir() {
+                    Some(projects) => check_preview(&projects, id, file, mtime, have_items),
+                    None => PreviewUpdate {
+                        id,
+                        file,
+                        mtime: None,
+                        items: Some(Vec::new()),
+                    },
+                };
+                let _ = tx.send((seq, update));
                 ctx.request_repaint();
             });
         }
@@ -510,7 +528,7 @@ impl MyApp {
                 .repo_path
                 .clone()
                 .unwrap_or_else(|| PathBuf::from(&o.live.cwd));
-            o.profile_path = Some(ide_source(&self.config, &self.repos, &dir, None).0);
+            o.profile_path = Some(ide_profile_path(&self.config, &self.repos, &dir, None));
         }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -518,7 +536,8 @@ impl MyApp {
         let data = ViewData {
             open: &open,
             entries: &self.claude.scan.entries,
-            scanning: self.claude.scanning,
+            // Vor dem ersten Repo-Scan gäbe es noch nichts zuzuordnen
+            scanning: self.claude.scanning || self.git_busy.scans_repos(),
             config: &self.config,
             now_ms,
             expanded: &self.claude.expanded,
@@ -537,23 +556,19 @@ impl MyApp {
         }
         if let Some(id) = actions.toggle_favorite {
             self.config.toggle_favorite_session(&id);
-            if let Err(e) = self.config.save() {
-                self.note_config_save_error(&e);
-            }
+            self.save_config();
         }
         if let Some((cwd, id)) = actions.resume {
             self.resume_claude_session(&cwd, &id);
         }
         if let Some((base, relative)) = actions.toggle_favorite_solution {
             self.config.toggle_favorite_solution(&base, &relative);
-            if let Err(e) = self.config.save() {
-                self.note_config_save_error(&e);
-            }
+            self.save_config();
         }
         if let Some((dir, ide_id, file)) = actions.ide_open {
             // Datei kommt aus dem Solution-Menü der Ansicht; IDE aus dem
             // Profil des Repos bzw. bei einem Worktree des Basis-Klons
-            let (profile, _) = ide_source(&self.config, &self.repos, &dir, None);
+            let profile = ide_profile_path(&self.config, &self.repos, &dir, None);
             self.open_ide_in(&dir, &profile, &ide_id, &file);
         }
         if let Some(path) = actions.shell_open {
@@ -565,8 +580,7 @@ impl MyApp {
         if let Some(pid) = actions.focus {
             // Im UI-Thread: nur der Vordergrund-Prozess darf den Fokus abgeben
             if !focus_session_window(pid) {
-                self.status_message = Some(tr(self.config.language, "claude_focus_failed"));
-                self.status_message_time = Some(Instant::now());
+                self.set_status(tr(self.config.language, "claude_focus_failed"));
             }
         }
     }
@@ -672,27 +686,7 @@ impl MyApp {
     }
 
     fn launch_claude(&mut self, profile: AgentProfile, cwd: &str) {
-        let lang = self.config.language;
-        let term_pref = profile
-            .terminal_override
-            .clone()
-            .unwrap_or_else(|| self.config.terminal.preference.clone());
-        self.status_message = Some(tr_fmt(
-            lang,
-            "starting_agent_in",
-            &[&profile.display_name, cwd],
-        ));
-        self.status_message_time = Some(Instant::now());
-        let path = PathBuf::from(cwd);
-        let err_tx = self.launch_err_tx.clone();
-        std::thread::spawn(move || {
-            if let Err(e) = launch_agent(&profile, &path, &term_pref) {
-                let _ = err_tx.send(format!(
-                    "Agent '{}' konnte nicht gestartet werden: {e:#}",
-                    profile.display_name
-                ));
-            }
-        });
+        self.spawn_agent(profile, Path::new(cwd));
     }
 }
 

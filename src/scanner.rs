@@ -113,30 +113,33 @@ pub fn scan_repos(config: &AppConfig) -> Vec<RepoInfo> {
     all_repos
 }
 
-/// Scannt innerhalb eines Repos nach Solution-/Zieldateien gemäß Profil
-pub fn scan_solutions_for_repo(repo_path: &Path, profile: &LanguageProfile) -> Vec<SolutionFile> {
-    let depth = profile.max_scan_depth.min(4);
-    let mut solutions = Vec::new();
-    let walker = WalkDir::new(repo_path)
-        .max_depth(depth)
+/// Einträge unter `root` bis `max_depth` (Wurzel = 0), ohne Abstieg in
+/// `.git` und ignorierte Ordner (`is_ignored_dir`); Links werden nicht
+/// verfolgt, unlesbare Einträge übersprungen. Versteckte Ordner bleiben
+/// drin: Repos liegen auch dort.
+fn walk_dirs(root: &Path, max_depth: usize) -> impl Iterator<Item = walkdir::DirEntry> {
+    WalkDir::new(root)
+        .max_depth(max_depth)
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
             if e.depth() == 0 {
                 return true;
             }
-            if let Some(name) = e.file_name().to_str() {
-                if name == ".git" {
-                    return false;
-                }
-                if e.file_type().is_dir() && is_ignored_dir(name) {
-                    return false;
-                }
+            match e.file_name().to_str() {
+                Some(".git") => false,
+                Some(name) => !(e.file_type().is_dir() && is_ignored_dir(name)),
+                None => true,
             }
-            true
-        });
+        })
+        .filter_map(|e| e.ok())
+}
 
-    for entry in walker.filter_map(|e| e.ok()) {
+/// Scannt innerhalb eines Repos nach Solution-/Zieldateien gemäß Profil
+pub fn scan_solutions_for_repo(repo_path: &Path, profile: &LanguageProfile) -> Vec<SolutionFile> {
+    let depth = profile.max_scan_depth.min(4);
+    let mut solutions = Vec::new();
+    for entry in walk_dirs(repo_path, depth) {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -163,33 +166,7 @@ fn scan_single_root(root: &Path, max_depth: usize) -> Vec<RepoInfo> {
 
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    // WalkDir iteriert rekursiv, filter_entry verhindert Abstieg in ignorierte/.git Ordner
-    let walker = WalkDir::new(root)
-        .max_depth(walk_max_depth)
-        .min_depth(0)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            // Verhindere Abstieg in .git und ignorierte Dirs
-            if e.depth() == 0 {
-                return true;
-            }
-            if let Some(name) = e.file_name().to_str() {
-                if name == ".git" {
-                    return false;
-                }
-                if e.file_type().is_dir() && is_ignored_dir(name) {
-                    return false;
-                }
-                // Versteckte Ordner (außer .git das schon behandelt) optional ignorieren?
-                // Wir ignorieren nicht generell, da viele Repos in versteckten Pfaden liegen könnten
-                // Aber: .cache, .local etc. können riesig sein - bei max_depth >3 relevant
-                // Für max_depth <=2 ignorieren wir sie nicht, da sie direkte Kinder sein könnten
-            }
-            true
-        });
-
-    for entry in walker.filter_map(|e| e.ok()) {
+    for entry in walk_dirs(root, walk_max_depth) {
         let path = entry.path().to_path_buf();
         // Nur Verzeichnisse betrachten
         if !entry.file_type().is_dir() {

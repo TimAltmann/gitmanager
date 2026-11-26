@@ -94,16 +94,7 @@ pub fn parse_preview(bytes: &[u8], cut: bool, max: usize) -> Vec<PreviewItem> {
 
 /// Text einer Nutzerfrage; Werkzeugergebnisse und Systemtexte (`<…>`) nicht.
 fn user_text(v: &Value) -> Option<String> {
-    let text = match v.pointer("/message/content")? {
-        Value::String(s) => s.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|p| p.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join(" "),
-        _ => return None,
-    };
+    let text = crate::claude_sessions::message_text(v)?;
     let t = text.trim();
     (!t.is_empty() && !t.starts_with('<')).then(|| t.to_string())
 }
@@ -129,14 +120,10 @@ fn tool_text(p: &Value) -> String {
 
 /// Eine Zeile, höchstens `MAX_CHARS` Zeichen.
 fn item(role: PreviewRole, text: &str) -> PreviewItem {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let text = if flat.chars().count() > MAX_CHARS {
-        let cut: String = flat.chars().take(MAX_CHARS).collect();
-        format!("{}…", cut.trim_end())
-    } else {
-        flat
-    };
-    PreviewItem { role, text }
+    PreviewItem {
+        role,
+        text: crate::text::snippet(text, MAX_CHARS),
+    }
 }
 
 #[cfg(test)]

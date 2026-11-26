@@ -532,7 +532,7 @@ pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
     info.remotes = read_remotes(&repo);
     info.common_dir = canonical_key_path(repo.commondir());
     info.dirty_files = dirty_files;
-    info.worktrees = read_worktree_heads(&repo);
+    info.worktrees = other_worktrees(&repo);
     info.is_linked_worktree = repo.is_worktree();
     info.state = repo_state_of(&repo, dirty_files);
     info.last_commit = last_commit_of(&repo);
@@ -540,11 +540,11 @@ pub fn get_repo_info(path: PathBuf) -> Option<RepoInfo> {
 }
 
 /// K1: die übrigen Worktrees desselben Repos mit ihrem Branch – bei einem
-/// verknüpften Worktree der Haupt-Worktree, dazu die verknüpften aus
-/// `Repository::worktrees()` außer dem eigenen. Liest wie
-/// [`branch_checked_out_elsewhere`] nur Dateien unter `commondir` (ein
-/// `readdir` je Repo); verwaiste Einträge fehlen.
-fn read_worktree_heads(repo: &Repository) -> Vec<WorktreeHead> {
+/// verknüpften Worktree der Haupt-Worktree (nicht bei Bare), dazu die
+/// verknüpften außer dem eigenen, nach Admin-Ordner sortiert. Liest nur
+/// Dateien unter `commondir` (ein `readdir` je Repo); verwaiste Einträge
+/// (Ordner gelöscht, nicht gesperrt) fehlen wie bei `git worktree prune`.
+pub(super) fn other_worktrees(repo: &Repository) -> Vec<WorktreeHead> {
     let branch_of = |git_dir: &Path| {
         head_symref(git_dir).and_then(|r| r.strip_prefix("refs/heads/").map(str::to_string))
     };
@@ -554,22 +554,20 @@ fn read_worktree_heads(repo: &Repository) -> Vec<WorktreeHead> {
         let main = Repository::open(common).ok();
         if let Some(workdir) = main.as_ref().and_then(|r| r.workdir()) {
             heads.push(WorktreeHead {
-                // Ohne abschließenden Separator wie bei `branch_checked_out_elsewhere`
+                // Ohne abschließenden Separator (`…/c1/` → `…/c1`)
                 path: workdir.components().collect(),
                 branch: branch_of(common),
             });
         }
     }
-    let Ok(names) = repo.worktrees() else {
+    let Ok(entries) = std::fs::read_dir(common.join("worktrees")) else {
         return heads;
     };
-    if names.is_empty() {
-        return heads;
-    }
+    let mut admins: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    admins.sort();
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let own = canon(repo.path());
-    for name in names.iter().filter_map(|n| n.ok().flatten()) {
-        let admin = common.join("worktrees").join(name);
+    for admin in admins {
         if canon(&admin) == own {
             continue;
         }

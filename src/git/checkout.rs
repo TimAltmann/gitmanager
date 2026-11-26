@@ -1,6 +1,6 @@
 //! Branch-Wechsel im Arbeitsverzeichnis (auch mit Stash).
 
-use super::{has_merge_conflicts, is_merge_in_progress};
+use super::{has_merge_conflicts, is_merge_in_progress, other_worktrees};
 use git2::{BranchType, Repository};
 use std::path::{Component, Path, PathBuf};
 
@@ -107,32 +107,13 @@ impl std::fmt::Display for BranchSwitchBlocked {
 impl std::error::Error for BranchSwitchBlocked {}
 
 /// E15: Ist `branch` (Kurzname) in einem anderen Worktree desselben Repos
-/// als HEAD ausgecheckt? Liefert dessen Pfad. Liest `<commondir>/HEAD`
-/// (Haupt-Worktree, nicht bei Bare) und `<commondir>/worktrees/*/HEAD`
-/// direkt; der eigene Worktree zählt nicht. Verwaiste Einträge (Ordner
-/// gelöscht, nicht gesperrt) zählen wie bei `git worktree prune` nicht.
+/// als HEAD ausgecheckt? Liefert dessen Pfad; der eigene Worktree zählt
+/// nicht (siehe [`other_worktrees`]).
 pub(crate) fn branch_checked_out_elsewhere(repo: &Repository, branch: &str) -> Option<PathBuf> {
-    let wanted = format!("refs/heads/{branch}");
-    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let own = canon(repo.path());
-    let common = repo.commondir();
-    if canon(common) != own && head_symref(common).as_deref() == Some(wanted.as_str()) {
-        let main = Repository::open(common).ok();
-        if let Some(workdir) = main.as_ref().and_then(|r| r.workdir()) {
-            // Ohne abschließenden Separator (`…/c1/` → `…/c1`) für die Meldung.
-            return Some(workdir.components().collect());
-        }
-    }
-    let entries = std::fs::read_dir(common.join("worktrees")).ok()?;
-    for admin in entries.flatten().map(|e| e.path()) {
-        if canon(&admin) == own || head_symref(&admin).as_deref() != Some(wanted.as_str()) {
-            continue;
-        }
-        if let Some(path) = linked_worktree_path(&admin) {
-            return Some(path);
-        }
-    }
-    None
+    other_worktrees(repo)
+        .into_iter()
+        .find(|w| w.branch.as_deref() == Some(branch))
+        .map(|w| w.path)
 }
 
 /// Symbolischer HEAD eines Git-Verzeichnisses (`ref: refs/heads/x` →
@@ -474,6 +455,16 @@ pub struct StashSwitch {
     pub pop_failed: Option<StashPopFailed>,
 }
 
+/// Anzahl der Stashes (0, wenn sie sich nicht lesen lassen).
+fn stash_count(repo: &mut Repository) -> usize {
+    let mut count = 0;
+    let _ = repo.stash_foreach(|_, _, _| {
+        count += 1;
+        true
+    });
+    count
+}
+
 /// Stash + Checkout (für Dirty-Dialog Option)
 pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<StashSwitch> {
     // E15: deterministische Abbrüche (Merge/Rebase, Branch fehlt, anderer
@@ -493,16 +484,26 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<Stas
     let stash_flags = git2::StashFlags::INCLUDE_UNTRACKED;
     let stash_msg = format!("autostash vor Wechsel zu {branch_name}");
     // stash_save gibt Oid zurück, Fehler wenn nichts zu stashen
-    let stash_result = repo.stash_save(&sig, &stash_msg, Some(stash_flags));
-    if let Err(e) = &stash_result {
-        // Wenn nichts zu stashen (keine Änderungen), ist das ok – trotzdem checkout
-        if e.code() != git2::ErrorCode::NotFound {
-            // NotFound bedeutet "nothing to stash" bei manchen libgit2 Versionen
-            eprintln!("Stash warnung: {e}");
+    // Vorhandene Stashes zählen: scheitert `stash_save` nach dem Anlegen
+    // des Stashes (libgit2 schreibt `refs/stash`, bevor es das
+    // Arbeitsverzeichnis zurücksetzt – eine von IDE oder Virenscanner
+    // gesperrte Datei genügt), liegen die Änderungen im Stash, obwohl ein
+    // Fehler zurückkommt.
+    let stashes_before = stash_count(&mut repo);
+    let stashed = match repo.stash_save(&sig, &stash_msg, Some(stash_flags)) {
+        Ok(_) => true,
+        // „Nichts zu stashen“ (keine Änderungen): trotzdem wechseln
+        Err(e) if e.code() == git2::ErrorCode::NotFound => false,
+        Err(e) => {
+            let hint = if stash_count(&mut repo) > stashes_before {
+                " – ein Teil der Änderungen liegt bereits unter stash@{0}"
+            } else {
+                ""
+            };
+            anyhow::bail!("Stash fehlgeschlagen: {e}{hint}");
         }
-    }
+    };
     // Jetzt checkout
-    let stashed = stash_result.is_ok();
     match checkout_branch(path, branch_name) {
         Ok(outcome) => {
             // Nur poppen wenn tatsächlich gestasht wurde — sonst würde
@@ -531,11 +532,16 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<Stas
             })
         }
         Err(e) => {
-            // Checkout fehlgeschlagen → versuche stash wiederherzustellen
-            if stash_result.is_ok() {
-                let repo2 = Repository::open(path).ok();
-                if let Some(mut r) = repo2 {
-                    let _ = r.stash_pop(0, None);
+            // Checkout fehlgeschlagen → Stash wiederherstellen; gelingt
+            // das nicht, muss der Nutzer wissen, wo seine Änderungen liegen
+            if stashed {
+                let restored = Repository::open(path)
+                    .and_then(|mut r| r.stash_pop(0, None))
+                    .map_err(|pe| format!("{pe}"));
+                if let Err(pe) = restored {
+                    return Err(e.context(format!(
+                        "Änderungen liegen weiter unter stash@{{0}} (Wiederherstellen fehlgeschlagen: {pe})"
+                    )));
                 }
             }
             Err(e)

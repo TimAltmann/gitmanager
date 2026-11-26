@@ -57,6 +57,8 @@ pub struct SettingsState {
     pub error: Option<String>,
     pub success: Option<String>,
     pub auto_detect_toast: Option<(String, std::time::Instant, bool)>,
+    /// Laufende Suche von „Auto erkennen“ (Tab „Profile“)
+    ide_detect: Option<IdeDetect>,
     selected_tab: SettingsTab,
     selected_profile_idx: Option<usize>,
     selected_agent_idx: Option<usize>,
@@ -70,31 +72,288 @@ pub struct SettingsState {
     mr: merge_requests::MrSettingsState,
 }
 
+/// „Auto erkennen“ für eine IDE: `vswhere` bzw. die Suche in der Toolbox
+/// laufen in einem Thread (ohne Zeitlimit, im UI-Thread stünde das Fenster).
+struct IdeDetect {
+    profile_id: String,
+    ide_id: String,
+    is_vs: bool,
+    rx: std::sync::mpsc::Receiver<Option<std::path::PathBuf>>,
+}
+
+impl IdeDetect {
+    fn start(ctx: &egui::Context, profile_id: &str, ide_id: &str, is_vs: bool) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let found = if is_vs {
+                crate::git::resolve_vs_path_force()
+            } else {
+                crate::git::resolve_rider_path_force()
+            };
+            let _ = tx.send(found);
+            ctx.request_repaint();
+        });
+        Self {
+            profile_id: profile_id.to_string(),
+            ide_id: ide_id.to_string(),
+            is_vs,
+            rx,
+        }
+    }
+}
+
+impl SettingsState {
+    /// Ergebnis von „Auto erkennen“ in den Entwurf übernehmen.
+    fn poll_ide_detect(&mut self) {
+        let Some(detect) = &self.ide_detect else {
+            return;
+        };
+        let found = match detect.rx.try_recv() {
+            Ok(found) => found,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            // Thread ohne Ergebnis beendet (Panic): wie „nicht gefunden“
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        };
+        let Some(detect) = self.ide_detect.take() else {
+            return;
+        };
+        let ide = self
+            .draft
+            .profiles
+            .iter_mut()
+            .filter(|p| p.id == detect.profile_id)
+            .flat_map(|p| &mut p.ides)
+            .find(|ide| ide.id == detect.ide_id);
+        let (text, is_error) = match (found, ide) {
+            (Some(path), Some(ide)) => {
+                ide.program = path.display().to_string();
+                (format!("Erkannt: {}", ide.program), false)
+            }
+            (None, _) if detect.is_vs => (
+                "Visual Studio nicht gefunden (vswhere fehlt oder keine Installation)".to_string(),
+                true,
+            ),
+            (None, _) => (
+                "Rider nicht gefunden (Toolbox / Program Files / PATH)".to_string(),
+                true,
+            ),
+            // IDE inzwischen entfernt oder umbenannt
+            (Some(_), None) => return,
+        };
+        self.auto_detect_toast = Some((text, std::time::Instant::now(), is_error));
+        self.error = None;
+        self.success = None;
+    }
+}
+
+/// Beim Start erkanntes Programm einer IDE (Visual Studio, Rider), deren
+/// Eintrag nur den bloßen Programmnamen trägt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedIde {
+    pub profile_id: String,
+    pub ide_id: String,
+    /// Programm zum Zeitpunkt der Suche
+    pub previous: String,
+    /// Gefundener Pfad (anfangs gleich `previous`)
+    pub program: String,
+}
+
+impl DetectedIde {
+    /// IDE-Einträge, für die sich die Suche lohnt.
+    pub fn candidates(config: &AppConfig) -> Vec<Self> {
+        let mut out = Vec::new();
+        for profile in &config.profiles {
+            for ide in &profile.ides {
+                let wanted = (ide.id == "vs2022" && crate::git::is_vs_program(&ide.program))
+                    || (ide.id == "rider" && crate::git::is_rider_program(&ide.program));
+                if wanted {
+                    out.push(Self {
+                        profile_id: profile.id.clone(),
+                        ide_id: ide.id.clone(),
+                        previous: ide.program.clone(),
+                        program: ide.program.clone(),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Trägt den Pfad ein, wenn dort noch das Programm von vorhin steht
+    /// (inzwischen Geändertes bleibt). `true`, wenn etwas geändert wurde.
+    pub fn apply(&self, config: &mut AppConfig) -> bool {
+        let ide = config
+            .profiles
+            .iter_mut()
+            .filter(|p| p.id == self.profile_id)
+            .flat_map(|p| &mut p.ides)
+            .find(|ide| ide.id == self.ide_id && ide.program == self.previous);
+        match ide {
+            Some(ide) if ide.program != self.program => {
+                ide.program = self.program.clone();
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Wirksame Reihenfolge: gespeicherte IDs, soweit es sie noch gibt, dann
+/// die fehlenden aus `all`. Mit `keep_unknown` bleiben IDs außerhalb von
+/// `all` am Ende erhalten (Tray-Icons neuerer Versionen).
+fn normalize_icon_order(order: &[String], all: &[String], keep_unknown: bool) -> Vec<String> {
+    let mut effective: Vec<String> = Vec::with_capacity(all.len());
+    let known = order.iter().filter(|id| all.contains(id));
+    let unknown = order.iter().filter(|id| keep_unknown && !all.contains(id));
+    for id in known.chain(all).chain(unknown) {
+        if !effective.contains(id) {
+            effective.push(id.clone());
+        }
+    }
+    effective
+}
+
 fn ensure_icon_orders(profile: &mut LanguageProfile, agents: &[AgentProfile]) {
-    // IDE order: fehlende ergänzen, entfernte entfernen, Reihenfolge behalten
-    let all_ids: Vec<String> = profile.ides.iter().map(|i| i.id.clone()).collect();
-    if profile.ide_order.is_empty() && !all_ids.is_empty() {
-        profile.ide_order = all_ids.clone();
-    } else {
-        for id in &all_ids {
-            if !profile.ide_order.contains(id) {
-                profile.ide_order.push(id.clone());
-            }
+    let ide_ids: Vec<String> = profile.ides.iter().map(|i| i.id.clone()).collect();
+    profile.ide_order = normalize_icon_order(&profile.ide_order, &ide_ids, false);
+    let agent_ids: Vec<String> = agents.iter().map(|a| a.id.clone()).collect();
+    profile.agent_order = normalize_icon_order(&profile.agent_order, &agent_ids, false);
+}
+
+/// Klick in einer Zeile der Icon-Listen (Tabs „Icons“ und „Tray Icons“).
+enum IconRowAction {
+    ToggleHidden,
+    /// Um so viele Plätze verschieben (-1 hoch, +1 runter)
+    Move(isize),
+}
+
+/// Zeile einer Icon-Liste: Auge (ein-/ausblenden), Name, rechts ↑/↓.
+fn icon_order_row(
+    ui: &mut egui::Ui,
+    lang: Language,
+    label: &str,
+    is_hidden: bool,
+    idx: usize,
+    len: usize,
+) -> Option<IconRowAction> {
+    use crate::ui::icons::{ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_EYE, ICON_EYE_OFF};
+    let mut action = None;
+    ui.horizontal(|ui| {
+        let color = if is_hidden {
+            ui.visuals().weak_text_color()
+        } else {
+            ui.visuals().text_color()
+        };
+        let icon = |source| {
+            egui::Image::new(source)
+                .fit_to_exact_size(Vec2::splat(14.0))
+                .tint(color)
+        };
+        let eye = if is_hidden { ICON_EYE_OFF } else { ICON_EYE };
+        if ui
+            .add(egui::Button::image(icon(eye)))
+            .on_hover_text(tr(lang, "icons_toggle_visibility"))
+            .clicked()
+        {
+            action = Some(IconRowAction::ToggleHidden);
         }
-        profile.ide_order.retain(|id| all_ids.contains(id));
-    }
-    // Agent order: analog, basierend auf allen globalen Agents
-    let all_agent_ids: Vec<String> = agents.iter().map(|a| a.id.clone()).collect();
-    if profile.agent_order.is_empty() && !all_agent_ids.is_empty() {
-        profile.agent_order = all_agent_ids.clone();
-    } else {
-        for id in &all_agent_ids {
-            if !profile.agent_order.contains(id) {
-                profile.agent_order.push(id.clone());
+        ui.label(RichText::new(label).size(11.0).color(color));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let tint = ui.visuals().text_color();
+            let arrow = |source| {
+                egui::Button::image(
+                    egui::Image::new(source)
+                        .fit_to_exact_size(Vec2::splat(14.0))
+                        .tint(tint),
+                )
+            };
+            if ui
+                .add_enabled(idx + 1 < len, arrow(ICON_CHEVRON_DOWN))
+                .clicked()
+            {
+                action = Some(IconRowAction::Move(1));
             }
-        }
-        profile.agent_order.retain(|id| all_agent_ids.contains(id));
+            if ui.add_enabled(idx > 0, arrow(ICON_CHEVRON_UP)).clicked() {
+                action = Some(IconRowAction::Move(-1));
+            }
+        });
+    });
+    ui.add_space(2.0);
+    action
+}
+
+/// Verschiebt den Eintrag `idx` der wirksamen Reihenfolge um `delta` und
+/// speichert sie. Immer von `effective` aus: die gespeicherte Liste kann
+/// kürzer oder anders sortiert sein als die gezeigte (neue IDE, entfernter
+/// Agent), ein Tausch nach deren Index träfe falsche Einträge.
+fn move_in_order(order: &mut Vec<String>, effective: &[String], idx: usize, delta: isize) {
+    let Some(target) = idx.checked_add_signed(delta) else {
+        return;
+    };
+    if idx < effective.len() && target < effective.len() {
+        *order = effective.to_vec();
+        order.swap(idx, target);
     }
+}
+
+/// ID in der Liste der ausgeblendeten umschalten (sortiert, ohne Dubletten).
+fn toggle_hidden(hidden: &mut Vec<String>, id: &str) {
+    if let Some(i) = hidden.iter().position(|h| h == id) {
+        hidden.remove(i);
+    } else {
+        hidden.push(id.to_string());
+        hidden.sort();
+        hidden.dedup();
+    }
+}
+
+/// „Ausgeblendet: a, b“ unter einer Icon-Liste.
+fn hidden_info(ui: &mut egui::Ui, lang: Language, hidden: &[String]) {
+    let ids = if hidden.is_empty() {
+        "—".to_string()
+    } else {
+        hidden.join(", ")
+    };
+    ui.label(
+        RichText::new(format!("{}: {ids}", tr(lang, "icons_hidden_info")))
+            .size(10.0)
+            .color(ui.visuals().weak_text_color()),
+    );
+}
+
+/// Limit 5–50 als Slider und Zahlenfeld mit Zusammenfassung darunter
+/// (Repos bzw. Branches im Tray-Popup).
+fn tray_limit_control(
+    ui: &mut egui::Ui,
+    lang: Language,
+    value: &mut usize,
+    unit: &str,
+    summary_key: &str,
+) {
+    const RANGE: std::ops::RangeInclusive<usize> = 5..=50;
+    *value = (*value).clamp(*RANGE.start(), *RANGE.end());
+    let weak = ui.visuals().weak_text_color();
+    ui.horizontal(|ui| {
+        ui.label(tr(lang, "tray_limit_label"));
+        ui.add(egui::Slider::new(value, RANGE).text(unit).step_by(1.0));
+    });
+    ui.horizontal(|ui| {
+        ui.label(tr(lang, "tray_direct_label"));
+        ui.add(egui::DragValue::new(value).range(RANGE).speed(1.0));
+        ui.label(
+            RichText::new(tr_fmt(lang, "limit_current", &[&value.to_string()]))
+                .size(11.0)
+                .color(weak),
+        );
+    });
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(tr_fmt(lang, summary_key, &[&value.to_string()]))
+            .size(10.0)
+            .color(weak)
+            .italics(),
+    );
 }
 
 impl SettingsState {
@@ -109,6 +368,7 @@ impl SettingsState {
             error: None,
             success: None,
             auto_detect_toast: None,
+            ide_detect: None,
             selected_tab: SettingsTab::General,
             selected_profile_idx: if cfg.profiles.is_empty() {
                 None
@@ -122,38 +382,6 @@ impl SettingsState {
             new_agent_program: String::new(),
             prev_ide_args: Default::default(),
             mr: Default::default(),
-        }
-    }
-
-    /// Merged nur auto-erkannte VS/Rider Pfade aus neuer Config in den bestehenden Draft,
-    /// ohne sonstige Benutzer-Änderungen zu verwerfen.
-    pub fn merge_auto_detected(&mut self, new_cfg: &AppConfig) {
-        for new_profile in &new_cfg.profiles {
-            if let Some(draft_profile) = self
-                .draft
-                .profiles
-                .iter_mut()
-                .find(|p| p.id == new_profile.id)
-            {
-                for new_ide in &new_profile.ides {
-                    if let Some(draft_ide) =
-                        draft_profile.ides.iter_mut().find(|i| i.id == new_ide.id)
-                    {
-                        let is_vs = new_ide.id == "vs2022";
-                        let is_rider = new_ide.id == "rider";
-                        if (is_vs || is_rider) && draft_ide.program != new_ide.program {
-                            draft_ide.program = new_ide.program.clone();
-                        }
-                    }
-                }
-            }
-        }
-        // Branch-Limit NICHT automatisch übernehmen: würde Slider-Änderungen im offenen Settings-Draft clobbern.
-        // Auto-Erkennung ändert nur VS/Rider Programme, nicht das Limit. Limit wird erst beim nächsten
-        // Laden (from_config) oder explizitem Save übernommen.
-        // Agents haben sich nicht via Auto-Erkennung geändert, aber sicherstellen dass Orders vollständig
-        for profile in &mut self.draft.profiles {
-            ensure_icon_orders(profile, &self.draft.agents);
         }
     }
 
@@ -378,21 +606,11 @@ pub fn show_settings_window(
                                     if valid {
                                         // Wie beim Laden bereinigen (Listen, Intervall, Pfade)
                                         state.draft.merge_requests.normalize();
-                                        match state.draft.clone().save() {
-                                            Ok(()) => {
-                                                state.error = None;
-                                                state.success = Some(tr(lang, "saved_scan_restart"));
-                                                *on_save = Some(state.draft.clone());
-                                            }
-                                            Err(e) => {
-                                                state.error = Some(tr_fmt(
-                                                    lang,
-                                                    "save_failed",
-                                                    &[&format!("{e:#}")],
-                                                ));
-                                                state.success = None;
-                                            }
-                                        }
+                                        // Geschrieben wird in der App (im
+                                        // Hintergrund, mit den Laufzeitfeldern
+                                        // der aktuellen Config)
+                                        state.error = None;
+                                        *on_save = Some(state.draft.clone());
                                     } else {
                                         state.success = None;
                                     }
@@ -728,6 +946,90 @@ fn show_appearance_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ids(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn detected_ide_only_replaces_the_program_it_saw() {
+        let mut config = AppConfig::default();
+        let profile_id = config.profiles[0].id.clone();
+        let ide = config.profiles[0]
+            .ides
+            .iter_mut()
+            .find(|i| i.id == "vs2022")
+            .expect("Default-Profil hat Visual Studio");
+        ide.program = "devenv".to_string();
+        let mut found = DetectedIde::candidates(&config)
+            .into_iter()
+            .find(|d| d.ide_id == "vs2022" && d.profile_id == profile_id)
+            .expect("Kandidat");
+        found.program = r"C:\VS\devenv.exe".to_string();
+        // Inzwischen von Hand geändert: bleibt
+        let mut edited = config.clone();
+        edited.profiles[0]
+            .ides
+            .iter_mut()
+            .find(|i| i.id == "vs2022")
+            .unwrap()
+            .program = r"D:\eigen\devenv.exe".to_string();
+        assert!(!found.apply(&mut edited));
+        assert!(found.apply(&mut config));
+        assert!(!found.apply(&mut config), "zweites Mal ohne Änderung");
+        let program = &config.profiles[0]
+            .ides
+            .iter()
+            .find(|i| i.id == "vs2022")
+            .unwrap()
+            .program;
+        assert_eq!(program, r"C:\VS\devenv.exe");
+    }
+
+    #[test]
+    fn normalize_icon_order_keeps_order_and_completes() {
+        let all = ids(&["a", "b", "c"]);
+        assert_eq!(normalize_icon_order(&[], &all, false), all);
+        // Entfernte raus, fehlende hinten an, Dubletten nur einmal
+        let stored = ids(&["c", "weg", "a", "c"]);
+        assert_eq!(
+            normalize_icon_order(&stored, &all, false),
+            ids(&["c", "a", "b"])
+        );
+        // Tray: unbekannte IDs bleiben am Ende erhalten
+        assert_eq!(
+            normalize_icon_order(&stored, &all, true),
+            ids(&["c", "a", "b", "weg"])
+        );
+    }
+
+    /// Die gespeicherte Reihenfolge ist kürzer als die gezeigte (neue IDE):
+    /// der Tausch darf weder abstürzen noch falsche Einträge treffen.
+    #[test]
+    fn move_in_order_uses_the_shown_order() {
+        let effective = ids(&["a", "b", "neu"]);
+        let mut order = ids(&["a", "b"]);
+        move_in_order(&mut order, &effective, 2, -1);
+        assert_eq!(order, ids(&["a", "neu", "b"]));
+        // Über den Rand hinaus: nichts ändert sich
+        let mut order = ids(&["a", "b"]);
+        move_in_order(&mut order, &effective, 0, -1);
+        move_in_order(&mut order, &effective, 2, 1);
+        assert_eq!(order, ids(&["a", "b"]));
+        // Leere gespeicherte Reihenfolge
+        let mut order = Vec::new();
+        move_in_order(&mut order, &effective, 0, 1);
+        assert_eq!(order, ids(&["b", "a", "neu"]));
+    }
+
+    #[test]
+    fn toggle_hidden_adds_sorted_and_removes() {
+        let mut hidden = ids(&["b"]);
+        toggle_hidden(&mut hidden, "a");
+        assert_eq!(hidden, ids(&["a", "b"]));
+        toggle_hidden(&mut hidden, "b");
+        assert_eq!(hidden, ids(&["a"]));
+    }
     use crate::config::{AppConfig, IdeConfig, LanguageProfile, TerminalPreference};
 
     #[test]

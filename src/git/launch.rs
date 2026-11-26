@@ -81,116 +81,79 @@ pub(super) fn quote_if_needed(s: &str) -> String {
     }
 }
 
-pub(super) fn escape_for_powershell(s: &str) -> String {
-    let needs_quote = s.contains(' ')
-        || s.contains('\'')
-        || s.contains('"')
-        || s.contains('&')
-        || s.contains('|')
-        || s.contains(';')
-        || s.contains('>')
-        || s.contains('<')
-        || s.contains('^')
-        || s.contains('`')
-        || s.contains('$');
-    if needs_quote {
-        format!("'{}'", s.replace('\'', "''"))
+/// Setzt `s` in `quote`, wenn `force` gilt oder eines der `meta`-Zeichen
+/// vorkommt; ein inneres `quote` wird verdoppelt.
+fn shell_escape(s: &str, quote: char, meta: &[char], force: bool) -> String {
+    if force || s.contains(meta) {
+        let doubled = format!("{quote}{quote}");
+        format!("{quote}{}{quote}", s.replace(quote, &doubled))
     } else {
         s.to_string()
     }
+}
+
+pub(super) fn escape_for_powershell(s: &str) -> String {
+    const META: &[char] = &[' ', '\'', '"', '&', '|', ';', '>', '<', '^', '`', '$'];
+    shell_escape(s, '\'', META, false)
 }
 
 #[cfg(not(test))]
 fn escape_for_powershell_force(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    shell_escape(s, '\'', &[], true)
 }
 
+/// Für `cmd /K`
 fn escape_for_cmd(s: &str) -> String {
-    // Für cmd /K: wrap in double quotes if contains space or shell meta, escape inner quotes
-    let needs_quote = s.contains(' ')
-        || s.contains('&')
-        || s.contains('|')
-        || s.contains('<')
-        || s.contains('>')
-        || s.contains('^')
-        || s.contains('"');
-    if needs_quote {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
+    shell_escape(s, '"', &[' ', '&', '|', '<', '>', '^', '"'], false)
+}
+
+/// Agent ohne Args: die fertige `command`-Zeile (Platzhalter ersetzt), sonst
+/// das vom Aufrufer aufbereitete Programm.
+fn agent_without_args(agent: &AgentProfile, repo_path: &Path, program: String) -> String {
+    match &agent.command {
+        Some(cmd) => substitute_placeholders(cmd, repo_path, repo_path),
+        None => program,
     }
 }
 
-fn has_placeholders(s: &str) -> bool {
-    s.contains("{file}") || s.contains("{dir}") || s.contains("{repo}")
-}
-
-fn build_agent_command<F>(
+fn build_agent_command(
     agent: &AgentProfile,
     repo_path: &Path,
-    escape_fn: F,
+    escape_fn: fn(&str) -> String,
     prefix: &str,
-    substitute_args: bool,
-) -> String
-where
-    F: Fn(&str) -> String,
-{
-    if !agent.args.is_empty() {
-        let escaped_program = escape_fn(&agent.program);
-        let args_str = agent
-            .args
-            .iter()
-            .map(|a| {
-                let substituted = if substitute_args {
-                    substitute_placeholders(a, repo_path, repo_path)
-                } else {
-                    a.clone()
-                };
-                escape_fn(&substituted)
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        if args_str.is_empty() {
-            format!("{prefix}{escaped_program}")
-        } else {
-            format!("{prefix}{escaped_program} {args_str}")
-        }
-    } else if let Some(cmd) = &agent.command {
-        if has_placeholders(cmd) {
-            substitute_placeholders(cmd, repo_path, repo_path)
-        } else {
-            cmd.clone()
-        }
+) -> String {
+    let program = format!("{prefix}{}", escape_fn(&agent.program));
+    if agent.args.is_empty() {
+        return agent_without_args(agent, repo_path, program);
+    }
+    let args_str = agent
+        .args
+        .iter()
+        .map(|a| escape_fn(&substitute_placeholders(a, repo_path, repo_path)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if args_str.is_empty() {
+        program
     } else {
-        format!("{}{}", prefix, escape_fn(&agent.program))
+        format!("{program} {args_str}")
     }
 }
 
 fn build_agent_cmd_raw(agent: &AgentProfile, repo_path: &Path) -> String {
-    // Wird nur für TerminalPreference::Custom via `cmd.arg(&agent_cmd_raw)` verwendet
-    // (`src/git.rs:841`). `Command::arg` übergibt ohne Shell-Parsing – zusätzliche
+    // Nur für `TerminalPreference::Custom` (`cmd.arg(&agent_cmd_raw)` in
+    // `launch_agent`). `Command::arg` übergibt ohne Shell-Parsing – zusätzliche
     // Quotes würden literal Teil des Arguments (z. B. `"C:\Program Files\..."`).
-    // Daher program NICHT quoten (ursprüngliches Verhalten: `program.clone()`).
-    if !agent.args.is_empty() {
-        let args_str = agent
-            .args
-            .iter()
-            .map(|a| {
-                let substituted = substitute_placeholders(a, repo_path, repo_path);
-                quote_if_needed(&substituted)
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("{} {}", agent.program, args_str)
-    } else if let Some(cmd) = &agent.command {
-        if has_placeholders(cmd) {
-            substitute_placeholders(cmd, repo_path, repo_path)
-        } else {
-            cmd.clone()
-        }
-    } else {
-        agent.program.clone()
+    // Daher program NICHT quoten.
+    if agent.args.is_empty() {
+        return agent_without_args(agent, repo_path, agent.program.clone());
     }
+    let args_str = agent
+        .args
+        .iter()
+        .map(|a| quote_if_needed(&substitute_placeholders(a, repo_path, repo_path)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{} {}", agent.program, args_str)
 }
 
 pub(super) fn build_powershell_script(agent: &AgentProfile, repo_path: &Path) -> String {
@@ -198,11 +161,11 @@ pub(super) fn build_powershell_script(agent: &AgentProfile, repo_path: &Path) ->
     let needs_amp =
         prog.contains(' ') || prog.contains('\\') || prog.contains('/') || prog.contains('\'');
     let prefix = if needs_amp { "& " } else { "" };
-    build_agent_command(agent, repo_path, escape_for_powershell, prefix, true)
+    build_agent_command(agent, repo_path, escape_for_powershell, prefix)
 }
 
 fn build_cmd_agent_string(agent: &AgentProfile, repo_path: &Path) -> String {
-    build_agent_command(agent, repo_path, escape_for_cmd, "", true)
+    build_agent_command(agent, repo_path, escape_for_cmd, "")
 }
 
 /// Öffnet eine Datei/Ordner mit einer IDE-Konfiguration
@@ -242,19 +205,12 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
     // Bei use_shell=false werden args via Command::args ohne Shell-Parsing übergeben – Zeichen wie '&' in Pfaden
     // wie "C:\Users\Tom & Jerry\app.sln" sind dann harmlos und dürfen nicht blockiert werden.
     // Bei use_shell=true wird via cmd /C gestartet und Shell-Zeichen müssen blockiert werden.
-    let shell_chars = ['&', '|', ';', '>', '<'];
     if ide.use_shell && !ide.allow_unsafe {
-        for a in &args {
-            if a.chars().any(|c| shell_chars.contains(&c)) {
-                anyhow::bail!("Ungültige Zeichen in IDE-Args (shell-Zeichen) – aktiviere allow_unsafe wenn beabsichtigt: {a}");
-            }
-        }
-        if effective_program.chars().any(|c| shell_chars.contains(&c)) {
-            anyhow::bail!(
-                "Ungültige Zeichen in IDE-Programm (shell-Zeichen) – aktiviere allow_unsafe wenn beabsichtigt: {}",
-                effective_program
-            );
-        }
+        reject_shell_chars(
+            &args,
+            &effective_program,
+            "(shell-Zeichen) – aktiviere allow_unsafe wenn beabsichtigt",
+        )?;
     }
 
     #[cfg(test)]
@@ -275,17 +231,11 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
                 // Fallback via cmd /C verwendet eine Shell – daher bei !allow_unsafe Shell-Zeichen blockieren,
                 // unabhängig von use_shell, da hier immer eine Shell involviert ist.
                 if !ide.allow_unsafe {
-                    for a in &args {
-                        if a.chars().any(|c| shell_chars.contains(&c)) {
-                            anyhow::bail!("Ungültige Zeichen in IDE-Args für Shell-Fallback (allow_unsafe erforderlich): {a}");
-                        }
-                    }
-                    if effective_program.chars().any(|c| shell_chars.contains(&c)) {
-                        anyhow::bail!(
-                            "Ungültige Zeichen in IDE-Programm für Shell-Fallback (allow_unsafe erforderlich): {}",
-                            effective_program
-                        );
-                    }
+                    reject_shell_chars(
+                        &args,
+                        &effective_program,
+                        "für Shell-Fallback (allow_unsafe erforderlich)",
+                    )?;
                 }
                 let mut shell_args = vec!["/C".to_string(), effective_program.clone()];
                 shell_args.extend(args.clone());
@@ -319,105 +269,85 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
     }
 }
 
-#[cfg(not(test))]
-fn spawn_wt(repo_str: &str, cmd_string: &str, repo_path: &Path) -> anyhow::Result<()> {
-    let mut cmd = std::process::Command::new("wt");
-    cmd.args(["-d", repo_str, "--", "cmd", "/k", cmd_string]);
-    cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, process::CREATE_NEW_CONSOLE);
-    cmd.spawn_locked()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("Windows Terminal starten fehlgeschlagen: {e}"))
-}
-
-#[cfg(not(test))]
-fn spawn_powershell(ps_script: &str, repo_path: &Path) -> anyhow::Result<()> {
-    let has_pwsh = is_program_available("pwsh");
-    let ps = if has_pwsh { "pwsh" } else { "powershell" };
-    let mut cmd = std::process::Command::new(ps);
-    if has_pwsh {
-        cmd.args([
-            "-NoLogo",
-            "-NoExit",
-            "-WorkingDirectory",
-            &repo_path.display().to_string(),
-            "-Command",
-            ps_script,
-        ]);
-    } else {
-        let repo_escaped = escape_for_powershell_force(&repo_path.display().to_string());
-        let full_script = format!("Set-Location {}; {}", repo_escaped, ps_script);
-        cmd.args(["-NoLogo", "-NoExit", "-Command", &full_script]);
+/// Shell-Zeichen in Args und Programm ablehnen, bevor eine Shell sie
+/// auswertet; `hint` ergänzt die Meldung um den Weg (`use_shell` bzw.
+/// `cmd /C`-Fallback).
+fn reject_shell_chars(args: &[String], program: &str, hint: &str) -> anyhow::Result<()> {
+    const SHELL_CHARS: &[char] = &['&', '|', ';', '>', '<'];
+    if let Some(arg) = args.iter().find(|a| a.contains(SHELL_CHARS)) {
+        anyhow::bail!("Ungültige Zeichen in IDE-Args {hint}: {arg}");
     }
-    cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, process::CREATE_NEW_CONSOLE);
-    cmd.spawn_locked()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("Powershell starten fehlgeschlagen: {e}"))
-}
-
-#[cfg(not(test))]
-fn spawn_powershell_shell(repo_path: &Path) -> anyhow::Result<()> {
-    let has_pwsh = is_program_available("pwsh");
-    let ps = if has_pwsh { "pwsh" } else { "powershell" };
-    let mut cmd = std::process::Command::new(ps);
-    if has_pwsh {
-        cmd.args([
-            "-NoLogo",
-            "-NoExit",
-            "-WorkingDirectory",
-            &repo_path.display().to_string(),
-        ]);
-    } else {
-        cmd.args([
-            "-NoLogo",
-            "-NoExit",
-            "-Command",
-            &format!(
-                "Set-Location {}",
-                escape_for_powershell_force(&repo_path.display().to_string())
-            ),
-        ]);
+    if program.contains(SHELL_CHARS) {
+        anyhow::bail!("Ungültige Zeichen in IDE-Programm {hint}: {program}");
     }
-    cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, process::CREATE_NEW_CONSOLE);
-    cmd.spawn_locked()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("Powershell starten fehlgeschlagen: {e}"))
+    Ok(())
 }
 
+/// Gemeinsamer Abschluss der Terminal-Starts: Arbeitsordner, Fenster-Flags,
+/// Start und Fehlertext („{what} starten fehlgeschlagen“).
 #[cfg(not(test))]
-fn spawn_wt_shell(repo_path: &Path) -> anyhow::Result<()> {
-    let repo_str = repo_path.display().to_string();
+fn spawn_in(
+    mut cmd: std::process::Command,
+    repo_path: &Path,
+    creation_flags: u32,
+    what: &str,
+) -> anyhow::Result<()> {
+    cmd.current_dir(repo_path);
+    set_creation_flags(&mut cmd, creation_flags);
+    cmd.spawn_locked()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{what} starten fehlgeschlagen: {e}"))
+}
+
+/// Windows Terminal im Repo; mit `agent` läuft darin `cmd /k <agent>`.
+#[cfg(not(test))]
+fn spawn_wt(agent: Option<&str>, repo_path: &Path) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new("wt");
-    cmd.args(["-d", &repo_str]);
-    cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, process::CREATE_NEW_CONSOLE);
-    cmd.spawn_locked()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("Windows Terminal starten fehlgeschlagen: {e}"))
+    cmd.arg("-d").arg(repo_path);
+    if let Some(agent) = agent {
+        cmd.args(["--", "cmd", "/k", agent]);
+    }
+    spawn_in(
+        cmd,
+        repo_path,
+        process::CREATE_NEW_CONSOLE,
+        "Windows Terminal",
+    )
 }
 
+/// PowerShell im Repo (`pwsh` bevorzugt); mit `script` läuft es darin.
 #[cfg(not(test))]
-fn spawn_cmd_shell(repo_str: &str, repo_path: &Path) -> anyhow::Result<()> {
-    let mut cmd = std::process::Command::new("cmd");
-    cmd.args(["/C", "start", "", "/D", repo_str, "cmd", "/K", ""]);
-    cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
-    cmd.spawn_locked()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("cmd starten fehlgeschlagen: {e}"))
+fn spawn_powershell(script: Option<&str>, repo_path: &Path) -> anyhow::Result<()> {
+    let has_pwsh = is_program_available("pwsh");
+    let mut cmd = std::process::Command::new(if has_pwsh { "pwsh" } else { "powershell" });
+    cmd.args(["-NoLogo", "-NoExit"]);
+    if has_pwsh {
+        cmd.arg("-WorkingDirectory").arg(repo_path);
+        if let Some(script) = script {
+            cmd.args(["-Command", script]);
+        }
+    } else {
+        // Windows PowerShell 5 kennt `-WorkingDirectory` nicht
+        let mut full = format!(
+            "Set-Location {}",
+            escape_for_powershell_force(&repo_path.display().to_string())
+        );
+        if let Some(script) = script {
+            full.push_str("; ");
+            full.push_str(script);
+        }
+        cmd.args(["-Command", &full]);
+    }
+    spawn_in(cmd, repo_path, process::CREATE_NEW_CONSOLE, "Powershell")
 }
 
+/// Neues `cmd`-Fenster im Repo; `agent` (leer = nur die Shell) läuft darin.
 #[cfg(not(test))]
-fn spawn_cmd(agent_string: &str, repo_str: &str, repo_path: &Path) -> anyhow::Result<()> {
+fn spawn_cmd(agent: &str, repo_path: &Path) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new("cmd");
-    cmd.args(["/C", "start", "", "/D", repo_str, "cmd", "/K", agent_string]);
-    cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
-    cmd.spawn_locked()
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("cmd starten fehlgeschlagen: {e}"))
+    cmd.args(["/C", "start", "", "/D"]).arg(repo_path);
+    cmd.args(["cmd", "/K", agent]);
+    spawn_in(cmd, repo_path, CREATE_NO_WINDOW, "cmd")
 }
 
 /// Öffnet ein Terminal und startet einen Agenten darin
@@ -430,53 +360,38 @@ pub fn launch_agent(
     let ps_script = build_powershell_script(agent, repo_path);
     let cmd_agent_string = build_cmd_agent_string(agent, repo_path);
     let agent_cmd_raw = build_agent_cmd_raw(agent, repo_path);
-    let repo_str = repo_path.display().to_string();
 
     #[cfg(test)]
     {
-        let _ = (
-            &ps_script,
-            &cmd_agent_string,
-            &agent_cmd_raw,
-            &repo_str,
-            &pref,
-        );
+        let _ = (&ps_script, &cmd_agent_string, &agent_cmd_raw, &pref);
         Ok(())
     }
 
     #[cfg(not(test))]
     {
+        let wt = || spawn_wt(Some(&cmd_agent_string), repo_path);
+        let powershell = || spawn_powershell(Some(&ps_script), repo_path);
+        let cmd = || spawn_cmd(&cmd_agent_string, repo_path);
         let has_wt = is_program_available("wt");
-
         match pref {
-            TerminalPreference::WindowsTerminal if has_wt => {
-                spawn_wt(&repo_str, &cmd_agent_string, repo_path)
-            }
-            TerminalPreference::Powershell => spawn_powershell(&ps_script, repo_path),
-            TerminalPreference::Cmd => spawn_cmd(&cmd_agent_string, &repo_str, repo_path),
-            TerminalPreference::Auto if !has_wt => spawn_powershell(&ps_script, repo_path)
-                .or_else(|_| spawn_cmd(&cmd_agent_string, &repo_str, repo_path)),
-            TerminalPreference::Auto => spawn_wt(&repo_str, &cmd_agent_string, repo_path)
-                .or_else(|_| spawn_powershell(&ps_script, repo_path))
-                .or_else(|_| spawn_cmd(&cmd_agent_string, &repo_str, repo_path)),
+            TerminalPreference::WindowsTerminal if has_wt => wt(),
+            TerminalPreference::Powershell => powershell(),
+            TerminalPreference::Auto if !has_wt => powershell().or_else(|_| cmd()),
+            TerminalPreference::Auto => wt().or_else(|_| powershell()).or_else(|_| cmd()),
             TerminalPreference::Custom(custom) => {
-                let mut cmd = std::process::Command::new(custom);
-                if !agent.args.is_empty() {
-                    cmd.arg(&agent.program);
-                    for a in &agent.args {
-                        let substituted = substitute_placeholders(a, repo_path, repo_path);
-                        cmd.arg(substituted);
-                    }
+                let mut command = std::process::Command::new(custom);
+                if agent.args.is_empty() {
+                    command.arg(&agent_cmd_raw);
                 } else {
-                    cmd.arg(&agent_cmd_raw);
+                    command.arg(&agent.program);
+                    for a in &agent.args {
+                        command.arg(substitute_placeholders(a, repo_path, repo_path));
+                    }
                 }
-                cmd.current_dir(repo_path);
-                set_creation_flags(&mut cmd, process::CREATE_NEW_CONSOLE);
-                cmd.spawn_locked().map(|_| ()).map_err(|e| {
-                    anyhow::anyhow!("Custom Terminal '{}' starten fehlgeschlagen: {e}", custom)
-                })
+                spawn_custom(command, custom, repo_path)
             }
-            _ => spawn_cmd(&cmd_agent_string, &repo_str, repo_path),
+            // `Cmd` und Windows Terminal ohne `wt`
+            _ => cmd(),
         }
     }
 }
@@ -490,27 +405,31 @@ pub fn open_shell(repo_path: &Path, terminal_pref: &TerminalPreference) -> anyho
     }
     #[cfg(not(test))]
     {
+        let wt = || spawn_wt(None, repo_path);
+        let powershell = || spawn_powershell(None, repo_path);
+        let cmd = || spawn_cmd("", repo_path);
         let has_wt = is_program_available("wt");
-        let repo_str = repo_path.display().to_string();
         match terminal_pref {
-            TerminalPreference::WindowsTerminal if has_wt => spawn_wt_shell(repo_path),
-            TerminalPreference::Powershell => spawn_powershell_shell(repo_path),
-            TerminalPreference::Cmd => spawn_cmd_shell(&repo_str, repo_path),
-            TerminalPreference::Auto if !has_wt => {
-                spawn_powershell_shell(repo_path).or_else(|_| spawn_cmd_shell(&repo_str, repo_path))
-            }
-            TerminalPreference::Auto => spawn_wt_shell(repo_path)
-                .or_else(|_| spawn_powershell_shell(repo_path))
-                .or_else(|_| spawn_cmd_shell(&repo_str, repo_path)),
+            TerminalPreference::WindowsTerminal if has_wt => wt(),
+            TerminalPreference::Powershell => powershell(),
+            TerminalPreference::Auto if !has_wt => powershell().or_else(|_| cmd()),
+            TerminalPreference::Auto => wt().or_else(|_| powershell()).or_else(|_| cmd()),
             TerminalPreference::Custom(custom) => {
-                let mut cmd = std::process::Command::new(custom);
-                cmd.current_dir(repo_path);
-                set_creation_flags(&mut cmd, process::CREATE_NEW_CONSOLE);
-                cmd.spawn_locked().map(|_| ()).map_err(|e| {
-                    anyhow::anyhow!("Custom Terminal '{}' starten fehlgeschlagen: {e}", custom)
-                })
+                spawn_custom(std::process::Command::new(custom), custom, repo_path)
             }
-            _ => spawn_cmd_shell(&repo_str, repo_path),
+            // `Cmd` und Windows Terminal ohne `wt`
+            _ => cmd(),
         }
     }
+}
+
+/// Eigenes Terminalprogramm aus den Einstellungen.
+#[cfg(not(test))]
+fn spawn_custom(cmd: std::process::Command, custom: &str, repo_path: &Path) -> anyhow::Result<()> {
+    spawn_in(
+        cmd,
+        repo_path,
+        process::CREATE_NEW_CONSOLE,
+        &format!("Custom Terminal '{custom}'"),
+    )
 }

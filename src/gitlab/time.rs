@@ -100,7 +100,7 @@ pub fn relative_time(ts: i64, now: i64, lang: Language) -> String {
     }
 }
 
-const DAY: i64 = 86_400;
+pub(crate) const DAY: i64 = 86_400;
 
 /// Nur ASCII-Ziffern (kein Vorzeichen wie bei `str::parse`).
 fn digits(s: &str) -> Option<i64> {

@@ -7,8 +7,8 @@
 //! `self.error` und damit ins Banner beider Ansichten (E20).
 
 use super::mr_pull_prompt::MrAgentStart;
+use super::ICON_WARNING;
 use super::{fetch_error_i18n_key, fetch_error_parts, GitBusy, MainView, MyApp, ScanResult};
-use super::{ICON_CROSS, ICON_WARNING};
 use crate::config::{AfterAction, AppConfig};
 use crate::git::{self, CheckoutError, MrPrep, MrPrepOutcome, RepoInfo};
 use crate::gitlab::checkout::{find_checked_out, path_key, MrCheckoutPlan, MrRefInfo, ProjectRef};
@@ -17,7 +17,7 @@ use crate::i18n::{tr, tr_fmt, Language};
 use crate::ui::merge_requests::{MrCheckoutChoice, MrCheckoutKind, OpenTarget};
 use crate::ui::repo_list::RepoHighlight;
 use crate::ui::theme::mr_palette;
-use egui::{vec2, Button, Frame, Image, Margin, RichText, Stroke, Ui, WidgetInfo, WidgetType};
+use egui::{Frame, Margin, RichText, Stroke, Ui};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -166,6 +166,7 @@ impl MyApp {
                     eprintln!("MR-Checkout-Thread abgestürzt (panic vor send)");
                     ScanResult::FetchAborted {
                         reason_key: "fetch_aborted",
+                        is_auto: false,
                     }
                 }
             };
@@ -243,8 +244,7 @@ impl MyApp {
             Ok(prep) => prep,
             Err(failure) => {
                 self.error = Some(failure_text(lang, iid, &failure));
-                self.status_message = None;
-                self.status_message_time = None;
+                self.clear_status();
                 return;
             }
         };
@@ -322,6 +322,11 @@ impl MyApp {
     ) {
         self.start_scan();
         let then = self.run_after_checkout(path, base, after);
+        // „Danach öffnen“ läuft während des eben gestarteten Rescans: sein
+        // Fehler (Agent fehlt …) soll das Scan-Ergebnis überstehen
+        if self.error.is_some() {
+            self.error_after_scan = self.error.clone();
+        }
         self.set_status(with_then(message, then));
     }
 
@@ -347,8 +352,14 @@ impl MyApp {
             tr_fmt(lang, "mr_already_head", &[&shown])
         };
         if let AfterAction::Agent(id) = after {
-            self.start_scan();
-            let then = match self.start_mr_agent(path, id, behind, mr_head) {
+            let start = self.start_mr_agent(path, id, behind, mr_head);
+            // Solange die Frage „Vorher pullen?“ offen ist, kein Scan: der
+            // hielte die Refs und der Pull würde abgelehnt (der Pull scannt
+            // danach selbst).
+            if !matches!(start, MrAgentStart::Asking) {
+                self.start_scan();
+            }
+            let then = match start {
                 MrAgentStart::Asking => Some(tr(lang, "mr_then_pull_ask")),
                 MrAgentStart::Started => self
                     .agent_by_id(id)
@@ -401,12 +412,22 @@ impl MyApp {
     /// Eintrag per Dedup verdrängt), entfällt samt „Danach öffnen“ – sonst
     /// feuerte er bei einem späteren, manuellen Wechsel auf denselben Branch.
     pub(super) fn drop_stale_mr_switch(&mut self) {
-        let waiting = match (&self.mr_switch, &self.branch_dialog) {
-            (Some(switch), Some(dlg)) => {
-                same_dir(&switch.clone, &dlg.repo_path) && switch.local_branch == dlg.target_branch
-            }
-            _ => false,
+        let Some(switch) = &self.mr_switch else {
+            return;
         };
+        let is_this = |path: &Path, branch: &str| {
+            same_dir(&switch.clone, path) && switch.local_branch == branch
+        };
+        // Noch unterwegs: in der Queue, im Worker oder im Dialog
+        let waiting = self
+            .pending_branch_switches
+            .iter()
+            .chain(&self.branch_switch)
+            .any(|(path, branch)| is_this(path, branch))
+            || self
+                .branch_dialog
+                .as_ref()
+                .is_some_and(|dlg| is_this(&dlg.repo_path, &dlg.target_branch));
         if !waiting {
             self.mr_switch = None;
         }
@@ -447,9 +468,10 @@ impl MyApp {
                 self.open_shell(path);
                 Some(tr(lang, "mr_then_shell"))
             }
-            AfterAction::Explorer => self
-                .open_explorer(path)
-                .then(|| tr(lang, "mr_then_explorer")),
+            AfterAction::Explorer => {
+                self.open_explorer(path);
+                Some(tr(lang, "mr_then_explorer"))
+            }
             AfterAction::Ide => {
                 // Dieselbe Auflösung wie nach dem Rescan: Zusatz und
                 // gestartete IDE stimmen überein. Ohne IDE im wirksamen
@@ -561,41 +583,23 @@ impl MyApp {
             return;
         };
         let p = mr_palette(&self.config.theme, ui.visuals());
-        let close = tr(self.config.language, "close");
-        let mut closed = false;
-        Frame::new()
+        let frame = Frame::new()
             .fill(p.notice_bg)
             .stroke(Stroke::new(1.0, p.notice_stroke))
             .corner_radius(6)
-            .inner_margin(Margin::symmetric(10, 8))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        Image::new(ICON_WARNING)
-                            .fit_to_exact_size(vec2(16.0, 16.0))
-                            .tint(p.notice_text),
-                    );
-                    ui.label(RichText::new(&text).size(12.0).color(p.notice_text));
-                    let resp = ui.add(Button::image(
-                        Image::new(ICON_CROSS)
-                            .fit_to_exact_size(vec2(12.0, 12.0))
-                            .tint(p.notice_text),
-                    ));
-                    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &close));
-                    if resp.on_hover_text(close.as_str()).clicked() {
-                        closed = true;
-                    }
-                });
-            });
+            .inner_margin(Margin::symmetric(10, 8));
+        let closed = crate::ui::widgets::banner(
+            ui,
+            frame,
+            ICON_WARNING,
+            RichText::new(&text).size(12.0).color(p.notice_text),
+            p.notice_text,
+            &tr(self.config.language, "close"),
+        );
         ui.add_space(8.0);
         if closed {
             self.mr_notice = None;
         }
-    }
-
-    pub(super) fn set_status(&mut self, message: String) {
-        self.status_message = Some(message);
-        self.status_message_time = Some(Instant::now());
     }
 }
 
@@ -741,15 +745,22 @@ fn resolve_ide(
     })
 }
 
-/// Ordner, dessen Profil die IDE liefert, und Solution/Projektdatei für
-/// `path` (siehe [`resolve_ide`]); auch für die Buttons offener Claude
-/// Sessions.
-pub(super) fn ide_source(
+/// Woher Profil und Solution für die IDE eines Ordners kommen.
+enum IdeOrigin<'r> {
+    /// Der Ordner ist selbst ein gescanntes Repo
+    Scanned(&'r RepoInfo),
+    /// Worktree eines gescannten Repos (oder vor dem Rescan: `base`)
+    Base(&'r RepoInfo),
+    /// Weder noch: aktives Profil, der Ordner selbst
+    Folder,
+}
+
+fn ide_origin<'r>(
     config: &AppConfig,
-    repos: &[RepoInfo],
+    repos: &'r [RepoInfo],
     path: &Path,
     base: Option<&Path>,
-) -> (PathBuf, Option<PathBuf>) {
+) -> IdeOrigin<'r> {
     let scanned = |p: &Path| repos.iter().find(|r| same_dir(&r.path, p));
     // Bekannter Worktree eines gescannten Repos: auch unter einem Suchpfad,
     // aber zu tief für den Scan (z. B. `C:\Code\worktrees\x` bei Tiefe 1)
@@ -758,25 +769,55 @@ pub(super) fn ide_source(
             .iter()
             .find(|r| r.worktrees.iter().any(|w| same_dir(&w.path, path)))
     };
-    let from_base = |base: &RepoInfo| {
-        let file = base
-            .selected_solution
-            .as_ref()
-            .and_then(|s| s.strip_prefix(&base.path).ok())
-            .map(|rel| path.join(rel))
-            .filter(|f| f.is_file());
-        (base.path.clone(), file)
-    };
     if let Some(repo) = scanned(path) {
-        (repo.path.clone(), repo.selected_solution.clone())
+        IdeOrigin::Scanned(repo)
     } else if let Some(base) = owner() {
-        from_base(base)
+        IdeOrigin::Base(base)
     } else if in_search_roots(config, path) {
-        (path.to_path_buf(), None)
+        IdeOrigin::Folder
     } else if let Some(base) = base.and_then(scanned) {
-        from_base(base)
+        IdeOrigin::Base(base)
     } else {
-        (path.to_path_buf(), None)
+        IdeOrigin::Folder
+    }
+}
+
+/// Ordner, dessen Profil die IDE für `path` liefert (siehe
+/// [`resolve_ide`]). Ohne Dateizugriff: die Ansichten fragen je Frame.
+pub(super) fn ide_profile_path(
+    config: &AppConfig,
+    repos: &[RepoInfo],
+    path: &Path,
+    base: Option<&Path>,
+) -> PathBuf {
+    match ide_origin(config, repos, path, base) {
+        IdeOrigin::Scanned(repo) | IdeOrigin::Base(repo) => repo.path.clone(),
+        IdeOrigin::Folder => path.to_path_buf(),
+    }
+}
+
+/// Ordner, dessen Profil die IDE liefert, und Solution/Projektdatei für
+/// `path` (siehe [`resolve_ide`]); auch für die Buttons offener Claude
+/// Sessions. Prüft die Datei im Worktree (`is_file`): nur beim Öffnen
+/// aufrufen, nicht je Frame.
+pub(super) fn ide_source(
+    config: &AppConfig,
+    repos: &[RepoInfo],
+    path: &Path,
+    base: Option<&Path>,
+) -> (PathBuf, Option<PathBuf>) {
+    match ide_origin(config, repos, path, base) {
+        IdeOrigin::Scanned(repo) => (repo.path.clone(), repo.selected_solution.clone()),
+        IdeOrigin::Base(base) => {
+            let file = base
+                .selected_solution
+                .as_ref()
+                .and_then(|s| s.strip_prefix(&base.path).ok())
+                .map(|rel| path.join(rel))
+                .filter(|f| f.is_file());
+            (base.path.clone(), file)
+        }
+        IdeOrigin::Folder => (path.to_path_buf(), None),
     }
 }
 
@@ -784,7 +825,10 @@ pub(super) fn ide_source(
 /// (`open_existing`): dieselbe Auflösung, also auch ein Profil-Override des
 /// Repos; `None` = keine IDE im wirksamen Profil.
 pub(super) fn ide_name_for(config: &AppConfig, repos: &[RepoInfo], path: &Path) -> Option<String> {
-    resolve_ide(config, repos, path, None).map(|ide| ide.name)
+    let profile_path = ide_profile_path(config, repos, path, None);
+    let profile = config.get_effective_profile_for_repo(&profile_path);
+    let ide = profile.visible_ides().into_iter().next()?;
+    Some(ide.display_name.clone())
 }
 
 /// Liegt `path` unter einem Suchpfad? Dann liefert ihn der Rescan als
@@ -914,16 +958,7 @@ mod tests {
     /// Übernimmt Scan-Ergebnisse, bis weder Auschecken noch Scan laufen
     /// (höchstens 10 s).
     fn settle(app: &mut MyApp) {
-        let ctx = egui::Context::default();
-        let until = Instant::now() + Duration::from_secs(10);
-        loop {
-            app.poll_scan(&ctx);
-            if !app.git_busy.holds_refs() {
-                return;
-            }
-            assert!(Instant::now() < until, "Checkout-Worker hängt");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        crate::app::tests::settle_git(app);
     }
 
     /// Upstream mit `main` und dem MR-Branch `feature/x` (ein Commit
@@ -974,7 +1009,7 @@ mod tests {
     fn open_methods_behave_like_repo_card() {
         let mut app = test_app();
         let path = PathBuf::from("/tmp/gm-open/app");
-        assert!(app.open_explorer(&path));
+        app.open_explorer(&path);
         assert_eq!(
             app.status_message.as_deref(),
             Some("Explorer opened: /tmp/gm-open/app")
@@ -1421,7 +1456,7 @@ mod tests {
         settle(&mut app);
         let dlg = app.branch_dialog.as_ref().expect("Dialog");
         let (path, branch) = (dlg.repo_path.clone(), dlg.target_branch.clone());
-        app.execute_branch_switch(path, branch, false, true);
+        crate::app::tests::switch_branch(&mut app, &path, &branch, crate::app::SwitchMode::Stash);
         assert!(app.error.is_none(), "{:?}", app.error);
         assert_eq!(head_of(&clone), "feature/x");
         assert_eq!(
@@ -1451,7 +1486,7 @@ mod tests {
         settle(&mut app);
         let dlg = app.branch_dialog.as_ref().expect("Dialog");
         let (path, branch) = (dlg.repo_path.clone(), dlg.target_branch.clone());
-        app.execute_branch_switch(path, branch, false, true);
+        crate::app::tests::switch_branch(&mut app, &path, &branch, crate::app::SwitchMode::Stash);
         assert_eq!(head_of(&clone), "feature/x");
         assert!(app.mr_switch.is_none());
         assert_eq!(
@@ -1568,6 +1603,7 @@ mod tests {
         app.scan_tx
             .send(ScanResult::FetchAborted {
                 reason_key: "fetch_aborted",
+                is_auto: false,
             })
             .unwrap();
         app.poll_scan(&egui::Context::default());
@@ -1765,9 +1801,10 @@ mod tests {
         assert!(app.pending_after_checkout.is_none());
     }
 
-    /// Ein MR-Wechsel, dessen Dialog ersetzt oder durch einen anderen
-    /// Wechsel geschlossen wird, entfällt: ein späterer manueller Wechsel
-    /// auf denselben Branch startet kein „Danach öffnen“.
+    /// Ein MR-Wechsel, dessen Dialog ersetzt oder geschlossen wird,
+    /// entfällt: ein späterer manueller Wechsel auf denselben Branch startet
+    /// kein „Danach öffnen“. Ein sauberer Wechsel in einem anderen Klon
+    /// lässt den Dialog dagegen stehen.
     #[test]
     fn stale_mr_switch_is_dropped() {
         let dir = tempdir().unwrap();
@@ -1781,21 +1818,21 @@ mod tests {
         let mut other_info = clone_info(&other, "main");
         other_info.dirty = true;
         let mut app = app_with(vec![info, other_info]);
-        let ctx = egui::Context::default();
         app.start_mr_checkout(switch(&clone, AfterAction::Shell));
         settle(&mut app);
         assert!(app.mr_switch.is_some(), "wartet im Dialog");
         // Wechsel im anderen Klon mit Änderungen ersetzt den Dialog
         app.pending_branch_switches
             .push((other.clone(), "main".to_string()));
-        app.poll_scan(&ctx);
+        settle(&mut app);
         assert_eq!(
             app.branch_dialog.as_ref().map(|d| &d.repo_path),
             Some(&other)
         );
         assert!(app.mr_switch.is_none(), "Dialog ersetzt");
         app.close_branch_dialog();
-        // Sauberer Wechsel im anderen Klon schließt den offenen MR-Dialog
+        // Sauberer Wechsel im anderen Klon: der MR-Dialog bleibt, samt
+        // wartendem MR-Wechsel
         app.start_mr_checkout(switch(&clone, AfterAction::Shell));
         settle(&mut app);
         assert!(app.mr_switch.is_some());
@@ -1804,12 +1841,25 @@ mod tests {
         }
         app.pending_branch_switches
             .push((other.clone(), "main".to_string()));
-        app.poll_scan(&ctx);
-        assert!(app.branch_dialog.is_none());
-        assert!(app.mr_switch.is_none(), "Dialog geschlossen");
         settle(&mut app);
+        assert_eq!(
+            app.branch_dialog.as_ref().map(|d| &d.repo_path),
+            Some(&clone),
+            "fremder Wechsel schließt den Dialog nicht"
+        );
+        assert!(app.mr_switch.is_some());
+        app.close_branch_dialog();
+        assert!(app.mr_switch.is_none(), "Dialog geschlossen");
+        for repo in app.repos.iter_mut().filter(|r| r.path == clone) {
+            repo.dirty = false;
+        }
         // Späterer manueller Wechsel auf den MR-Branch: nur die Standardmeldung
-        app.execute_branch_switch(clone.clone(), "feature/x".to_string(), false, false);
+        crate::app::tests::switch_branch(
+            &mut app,
+            &clone,
+            "feature/x",
+            crate::app::SwitchMode::Ask,
+        );
         assert!(app.error.is_none(), "{:?}", app.error);
         assert_eq!(
             app.status_message,

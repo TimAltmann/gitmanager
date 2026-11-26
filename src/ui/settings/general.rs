@@ -55,19 +55,19 @@ pub(super) fn show_general_tab(
         ui.add_space(8.0);
     }
 
-    let mut to_remove: Option<PathBuf> = None;
-    for root in &state.draft.roots.clone() {
+    let mut to_remove: Option<usize> = None;
+    for idx in 0..state.draft.roots.len() {
         ui.horizontal(|ui| {
-            let mut path_str = root.display().to_string();
+            // Der Text kommt je Frame aus dem Pfad: jede Änderung gleich
+            // zurückschreiben, sonst verschwände das getippte Zeichen wieder
+            let mut path_str = state.draft.roots[idx].display().to_string();
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut path_str)
                     .hint_text("Pfad zum Suchordner")
                     .desired_width(ui.available_width() - 90.0),
             );
-            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                if let Some(idx) = state.draft.roots.iter().position(|p| p == root) {
-                    state.draft.roots[idx] = PathBuf::from(path_str.clone());
-                }
+            if resp.changed() {
+                state.draft.roots[idx] = PathBuf::from(path_str);
             }
             if ui
                 .add(egui::Button::image(
@@ -78,7 +78,7 @@ pub(super) fn show_general_tab(
                 .on_hover_text("Entfernen")
                 .clicked()
             {
-                to_remove = Some(root.clone());
+                to_remove = Some(idx);
             }
             if ui
                 .add(egui::Button::image(
@@ -90,14 +90,15 @@ pub(super) fn show_general_tab(
                 .clicked()
             {
                 if let Some(new_path) = rfd::FileDialog::new().pick_folder() {
-                    if let Some(idx) = state.draft.roots.iter().position(|p| p == root) {
-                        state.draft.roots[idx] = new_path;
-                    }
+                    state.draft.roots[idx] = new_path;
                 }
             }
         });
         ui.add_space(4.0);
-        if !root.exists() {
+        let root = &state.draft.roots[idx];
+        // Prüfung im Hintergrund: ein `stat` je Frame hielte das Fenster an,
+        // sobald ein Suchpfad auf einem nicht erreichbaren Laufwerk liegt
+        if crate::path_probe::exists(ui.ctx(), root) == Some(false) {
             ui.horizontal(|ui| {
                 ui.add(
                     egui::Image::new(ICON_WARNING)
@@ -113,8 +114,9 @@ pub(super) fn show_general_tab(
             ui.add_space(4.0);
         }
     }
-    if let Some(p) = to_remove {
-        state.draft.remove_root(&p);
+    if let Some(idx) = to_remove {
+        let root = state.draft.roots[idx].clone();
+        state.draft.remove_root(&root);
     }
 
     ui.add_space(12.0);

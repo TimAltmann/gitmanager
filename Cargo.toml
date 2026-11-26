@@ -22,7 +22,9 @@ eframe = { version = "0.36", default-features = false, features = [
     "x11",
 ] }
 egui = "0.36"
-egui_extras = { version = "0.36", features = ["svg"] }
+# `file` + `image`: eigene IDE-/Agent-Icons kommen als `file://`-URI (png,
+# ico, jpg, svg); ohne die beiden Loader zeichnete egui nur ein Warnzeichen
+egui_extras = { version = "0.36", features = ["svg", "file", "image"] }
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https", "ssh"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

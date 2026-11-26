@@ -37,6 +37,28 @@ pub fn fast_forward(path: &Path) -> anyhow::Result<FfOutcome> {
     fast_forward_inner(path, || {})
 }
 
+/// Upstream eines Branches als (Remote, Branch dort) aus
+/// `branch.<name>.remote` und `.merge`. `None` ohne Upstream, bei lokalem
+/// Upstream (`.`, kein Remote-Tracking-Ref) und bei einem Merge-Ref
+/// außerhalb von `refs/heads/`.
+pub(super) fn branch_upstream(
+    repo: &Repository,
+    branch: &str,
+) -> anyhow::Result<Option<(String, String)>> {
+    let cfg = repo.config()?;
+    let remote = cfg.get_string(&format!("branch.{branch}.remote")).ok();
+    let merge = cfg.get_string(&format!("branch.{branch}.merge")).ok();
+    let (Some(remote), Some(merge)) = (remote, merge) else {
+        return Ok(None);
+    };
+    if remote == "." {
+        return Ok(None);
+    }
+    Ok(merge
+        .strip_prefix("refs/heads/")
+        .map(|name| (remote, name.to_string())))
+}
+
 /// Wie [`fast_forward`]; `after_fetch` läuft direkt nach dem Fetch (Tests
 /// simulieren damit Änderungen während des Abrufs).
 pub(super) fn fast_forward_inner(
@@ -49,19 +71,9 @@ pub(super) fn fast_forward_inner(
     if detached {
         return Ok(FfOutcome::Detached);
     }
-    let cfg = repo.config()?;
-    let remote = cfg.get_string(&format!("branch.{branch}.remote")).ok();
-    let merge = cfg.get_string(&format!("branch.{branch}.merge")).ok();
-    let (Some(remote), Some(merge)) = (remote, merge) else {
+    let Some((remote, merge_branch)) = branch_upstream(&repo, &branch)? else {
         return Ok(FfOutcome::NoUpstream);
     };
-    let Some(merge_branch) = merge.strip_prefix("refs/heads/") else {
-        return Ok(FfOutcome::NoUpstream);
-    };
-    // Lokaler Remote ("."): kein Tracking-Ref zum Fetchen.
-    if remote == "." {
-        return Ok(FfOutcome::NoUpstream);
-    }
     let refname = format!("refs/heads/{branch}");
     // Stand vor dem Fetch merken: danach wird nur umgesetzt, wenn HEAD und
     // Branch noch genau so stehen (Compare-and-Swap).

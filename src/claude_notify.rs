@@ -8,6 +8,7 @@
 
 use crate::claude_live::{LiveSession, LiveStatus};
 use crate::claude_preview::{PreviewItem, PreviewRole};
+use crate::text::{snippet, xml_escape};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -105,25 +106,19 @@ fn click_of(action: &str) -> ToastClick {
     }
 }
 
+/// Gemeinsames Gerüst beider Toasts (Vorlage `ToastGeneric`): Kopfzeile,
+/// die drei Textzeilen (Titel, Zeile, Zuschreibung) und das runde `logo`.
+/// Texte werden hier escapet; `actions` sind fertige `<action>`-Elemente,
+/// `audio` ein fertiges `<audio>`-Element oder leer.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn xml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-#[cfg_attr(not(windows), allow(dead_code))]
-/// Toast-XML (Vorlage `ToastGeneric`); `logo` = rundes Logo mit Statusring.
-pub fn toast_xml(toast: &Toast, logo: Option<&Path>) -> String {
+fn toast_shell(
+    header_id: &str,
+    header: &str,
+    [title, line, attribution]: [&str; 3],
+    logo: Option<&Path>,
+    actions: &str,
+    audio: &str,
+) -> String {
     let e = xml_escape;
     let image = logo.map_or_else(String::new, |p| {
         format!(
@@ -131,6 +126,19 @@ pub fn toast_xml(toast: &Toast, logo: Option<&Path>) -> String {
             e(&p.display().to_string())
         )
     });
+    format!(
+        r#"<toast launch="{ACTION_TERMINAL}" useButtonStyle="true"><header id="{header_id}" title="{header}" arguments="{ACTION_SHOW}"/><visual><binding template="ToastGeneric"><text>{title}</text><text>{line}</text><text placement="attribution">{attribution}</text>{image}</binding></visual><actions>{actions}</actions>{audio}</toast>"#,
+        header_id = e(header_id),
+        header = e(header),
+        title = e(title),
+        line = e(line),
+        attribution = e(attribution),
+    )
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+/// Toast-XML (Vorlage `ToastGeneric`); `logo` = rundes Logo mit Statusring.
+pub fn toast_xml(toast: &Toast, logo: Option<&Path>) -> String {
     let line = toast.snippet.as_deref().unwrap_or(&toast.status);
     // Grüner „Erfolg“-Stil nur für fertig; für wartet gibt Windows keine
     // passende Farbe her
@@ -142,14 +150,18 @@ pub fn toast_xml(toast: &Toast, logo: Option<&Path>) -> String {
         NotifyKind::Waiting => r#"<audio src="ms-winsoundevent:Notification.Reminder"/>"#,
         NotifyKind::Done => "",
     };
-    format!(
-        r#"<toast launch="{ACTION_TERMINAL}" useButtonStyle="true"><header id="{HEADER_ID}" title="{header}" arguments="{ACTION_SHOW}"/><visual><binding template="ToastGeneric"><text>{title}</text><text>{line}</text><text placement="attribution">{attribution}</text>{image}</binding></visual><actions><action content="{terminal}" arguments="{ACTION_TERMINAL}"{terminal_style}/><action content="{show}" arguments="{ACTION_SHOW}"/></actions>{audio}</toast>"#,
-        header = e(&toast.header),
-        title = e(&toast.title),
-        line = e(line),
-        attribution = e(&toast.attribution),
-        terminal = e(&toast.button_terminal),
-        show = e(&toast.button_show),
+    let actions = format!(
+        r#"<action content="{terminal}" arguments="{ACTION_TERMINAL}"{terminal_style}/><action content="{show}" arguments="{ACTION_SHOW}"/>"#,
+        terminal = xml_escape(&toast.button_terminal),
+        show = xml_escape(&toast.button_show),
+    );
+    toast_shell(
+        HEADER_ID,
+        &toast.header,
+        [&toast.title, line, &toast.attribution],
+        logo,
+        &actions,
+        audio,
     )
 }
 
@@ -173,22 +185,18 @@ pub struct SimpleToast {
 #[cfg_attr(not(windows), allow(dead_code))]
 /// Toast-XML für [`SimpleToast`]; `logo` = rundes Logo (Personen-Avatar).
 pub fn simple_toast_xml(toast: &SimpleToast, logo: Option<&Path>) -> String {
-    let e = xml_escape;
-    let image = logo.map_or_else(String::new, |p| {
-        format!(
-            r#"<image placement="appLogoOverride" hint-crop="circle" src="file:///{}"/>"#,
-            e(&p.display().to_string())
-        )
-    });
-    format!(
-        r#"<toast launch="{ACTION_TERMINAL}" useButtonStyle="true"><header id="{header_id}" title="{header}" arguments="{ACTION_SHOW}"/><visual><binding template="ToastGeneric"><text>{title}</text><text>{line}</text><text placement="attribution">{attribution}</text>{image}</binding></visual><actions><action content="{open}" arguments="{ACTION_TERMINAL}"/><action content="{show}" arguments="{ACTION_SHOW}"/></actions></toast>"#,
-        header_id = e(toast.header_id),
-        header = e(&toast.header),
-        title = e(&toast.title),
-        line = e(&toast.line),
-        attribution = e(&toast.attribution),
-        open = e(&toast.button_open),
-        show = e(&toast.button_show),
+    let actions = format!(
+        r#"<action content="{open}" arguments="{ACTION_TERMINAL}"/><action content="{show}" arguments="{ACTION_SHOW}"/>"#,
+        open = xml_escape(&toast.button_open),
+        show = xml_escape(&toast.button_show),
+    );
+    toast_shell(
+        toast.header_id,
+        &toast.header,
+        [&toast.title, &toast.line, &toast.attribution],
+        logo,
+        &actions,
+        "",
     )
 }
 
@@ -202,8 +210,8 @@ pub fn show_simple_notification(
     win::show_simple(toast, on_click);
 }
 
-/// Zeichen der Vorschau in der Benachrichtigung
-const SNIPPET_CHARS: usize = 160;
+/// Zeichen der Vorschau bzw. des Kommentars in der Benachrichtigung
+pub(crate) const SNIPPET_CHARS: usize = 160;
 
 /// Letzte Antwort bzw. letzter Werkzeugaufruf von Claude, einzeilig und
 /// gekürzt; Markdown-Zeichen entfernt.
@@ -214,16 +222,8 @@ pub fn snippet_of(items: &[PreviewItem]) -> Option<String> {
         .chars()
         .filter(|c| !matches!(c, '`' | '*' | '#'))
         .collect();
-    let flat = plain.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.is_empty() {
-        return None;
-    }
-    Some(if flat.chars().count() > SNIPPET_CHARS {
-        let cut: String = flat.chars().take(SNIPPET_CHARS).collect();
-        format!("{}…", cut.trim_end())
-    } else {
-        flat
-    })
+    let short = snippet(&plain, SNIPPET_CHARS);
+    (!short.is_empty()).then_some(short)
 }
 
 /// Zeigt eine Benachrichtigung; `on_click` läuft beim Klick darauf (in
