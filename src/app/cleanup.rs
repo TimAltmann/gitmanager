@@ -1200,7 +1200,7 @@ mod tests {
         };
         app.repo_mrs.insert(
             PathBuf::from("/x/wt"),
-            super::super::repo_badges::MrBadge::from_mr(&mr, true),
+            crate::gitlab::badge::MrBadge::from_mr(&mr, true),
         );
         let c = deliver_scan(&mut app, clean_wt_candidate());
         assert!(!c.selected && !c.delete_branch, "{c:?}");

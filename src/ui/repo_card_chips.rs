@@ -8,10 +8,10 @@ use egui::{
     Response, RichText, Sense, Stroke, Ui, Vec2, WidgetInfo, WidgetType,
 };
 
-use crate::app::repo_badges::MrBadge;
 use crate::claude_live::LiveStatus;
 use crate::config::{AppConfig, HostAlias, IdeConfig, LanguageProfile};
 use crate::git::{InProgressKind, RepoInfo, RepoState};
+use crate::gitlab::badge::MrBadge;
 use crate::gitlab::model::PipelineState;
 use crate::gitlab::remote::RemoteScheme;
 use crate::gitlab::time::relative_time;
@@ -914,7 +914,7 @@ mod tests {
 
     #[test]
     fn mr_chip_text_shows_iid_and_approvals() {
-        use crate::app::repo_badges::MrBadge;
+        use crate::gitlab::badge::MrBadge;
         use crate::gitlab::model::PipelineState;
         let mut badge = MrBadge {
             host_key: "h".into(),

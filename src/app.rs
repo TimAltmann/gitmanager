@@ -449,7 +449,7 @@ pub struct MyApp {
     /// „In Repo-Liste zeigen“: hervorgehobene Karte und seit wann
     repo_highlight: Option<(RepoHighlight, std::time::Instant)>,
     /// Offener MR je Repo-Ordner für den Chip der Repo-Karte
-    repo_mrs: HashMap<PathBuf, repo_badges::MrBadge>,
+    repo_mrs: HashMap<PathBuf, crate::gitlab::badge::MrBadge>,
     /// Lokale Erkennung (E16) für diese Hosts erneut, auch wenn bekannt
     mr_rediscover: std::collections::BTreeSet<String>,
     /// Einstellungs-Tab „Merge Requests“: Worker-Ergebnisse kommen auch

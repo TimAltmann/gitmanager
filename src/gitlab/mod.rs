@@ -3,6 +3,7 @@
 //! Prüfung, Token) und Checkout-Menü (K1).
 
 pub mod activity;
+pub mod badge;
 pub mod checkout;
 pub mod glab;
 pub mod graphql;

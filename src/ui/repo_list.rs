@@ -1,8 +1,8 @@
-use crate::app::repo_badges::MrBadge;
 use crate::claude_live::LiveStatus;
 use crate::claude_sessions::matches_words;
 use crate::config::AppConfig;
 use crate::git::RepoInfo;
+use crate::gitlab::badge::MrBadge;
 use crate::i18n::{tr, tr_fmt};
 use crate::ui::repo_card_chips::{favorite_star, show_bottom_row, show_chip_row};
 use crate::ui::search_field::search_field;
@@ -1955,7 +1955,7 @@ mod tests {
 
     #[test]
     fn mr_chip_click_sets_open_mr() {
-        use crate::app::repo_badges::MrBadge;
+        use crate::gitlab::badge::MrBadge;
         use crate::gitlab::model::PipelineState;
         use crate::ui::repo_card_chips::mr_chip_text;
         let config = card_config();
