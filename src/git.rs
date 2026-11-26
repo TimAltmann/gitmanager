@@ -2803,7 +2803,7 @@ fn canonical_key_path(path: &Path) -> PathBuf {
     };
     #[cfg(windows)]
     {
-        return strip_verbatim(&canon);
+        strip_verbatim(&canon)
     }
     #[cfg(not(windows))]
     {
