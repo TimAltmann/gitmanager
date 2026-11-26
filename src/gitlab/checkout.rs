@@ -683,10 +683,9 @@ impl Taken<'_> {
     }
 }
 
-/// Vergleichsschlüssel für Pfade: ohne abschließenden Separator, unter
-/// Windows ohne Groß-/Kleinschreibung (`AppConfig::repo_state_key`).
+/// Vergleichsschlüssel für Pfade, siehe [`AppConfig::path_key`].
 pub fn path_key(path: &Path) -> String {
-    AppConfig::repo_state_key(&path.components().collect::<PathBuf>())
+    AppConfig::path_key(path)
 }
 
 /// URL für „Neuer Klon …“ ohne lokalen Klon des Projekts: nach dem Muster

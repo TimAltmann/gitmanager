@@ -1764,22 +1764,23 @@ impl AppConfig {
         }
     }
 
-    /// Favoriten-Schlüssel: Komponenten normalisiert (kein abschließender
-    /// Slash), auf Windows zusätzlich ohne Groß-/Kleinschreibung.
-    fn favorite_key(path: &Path) -> String {
+    /// Vergleichsschlüssel für Pfade (Favoriten, Checkout-Ziele): Komponenten
+    /// normalisiert (kein abschließender Separator), auf Windows zusätzlich
+    /// ohne Groß-/Kleinschreibung.
+    pub fn path_key(path: &Path) -> String {
         Self::repo_state_key(&path.components().collect::<PathBuf>())
     }
 
     /// Ist das Repo/der Worktree als Favorit markiert?
     pub fn is_favorite_repo(&self, path: &Path) -> bool {
-        let key = Self::favorite_key(path);
+        let key = Self::path_key(path);
         self.favorite_repos.contains(&key)
     }
 
     /// Favorit setzen bzw. entfernen. Aufrufer sortieren die Liste neu
     /// (`repo_sort_dirty`).
     pub fn toggle_favorite_repo(&mut self, path: &Path) {
-        let key = Self::favorite_key(path);
+        let key = Self::path_key(path);
         if let Some(i) = self.favorite_repos.iter().position(|k| *k == key) {
             self.favorite_repos.remove(i);
         } else {
