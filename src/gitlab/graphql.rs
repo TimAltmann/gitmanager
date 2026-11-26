@@ -641,8 +641,11 @@ pub fn uninvolved_page(pages: &[(String, String)], me: &str) -> Vec<Query> {
                 let mut items = scalars("fullPath");
                 items.push(project_mrs(Some(&c)).into());
                 let project = Field::object("project", &["Project"], items);
-                query = push_project_alias(query, &p, &p, path, project)
-                    .var(c, "String", Some(Value::from(cursor.as_str())));
+                query = push_project_alias(query, &p, &p, path, project).var(
+                    c,
+                    "String",
+                    Some(Value::from(cursor.as_str())),
+                );
             }
             query
                 .var("me", "String", Some(Value::from(me)))
@@ -675,8 +678,11 @@ pub fn recent_notes(mrs: &[(String, u64)]) -> Vec<Query> {
                 let mr = Field::object("mergeRequest", &["MergeRequest"], vec![notes.into()])
                     .arg("iid", format!("${n}"));
                 let project = Field::object("project", &["Project"], vec![mr.into()]);
-                query = push_project_alias(query, format!("m{i}"), &p, path, project)
-                    .var(n, "String!", Some(Value::from(iid.to_string())));
+                query = push_project_alias(query, format!("m{i}"), &p, path, project).var(
+                    n,
+                    "String!",
+                    Some(Value::from(iid.to_string())),
+                );
             }
             query
         })
@@ -740,8 +746,11 @@ pub fn merged_by_branches(projects: &[(String, Vec<String>)]) -> Vec<Query> {
                 .arg("sourceBranches", format!("${b}"))
                 .arg("first", 100);
                 let project = Field::object("project", &["Project"], vec![mrs.into()]);
-                query = push_project_alias(query, &p, &p, path, project)
-                    .var(b, "[String!]", Some(Value::from(branches.clone())));
+                query = push_project_alias(query, &p, &p, path, project).var(
+                    b,
+                    "[String!]",
+                    Some(Value::from(branches.clone())),
+                );
             }
             query
         })

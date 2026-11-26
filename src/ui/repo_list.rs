@@ -5,8 +5,8 @@ use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt};
 use crate::ui::icons::{
-    ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CLAUDE, ICON_GIT_BRANCH,
-    ICON_GIT_COMMIT, ICON_PLUS, ICON_REFRESH, ICON_SEARCH, ICON_TRASH,
+    ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CLAUDE, ICON_GIT_BRANCH, ICON_GIT_COMMIT, ICON_PLUS,
+    ICON_REFRESH, ICON_SEARCH, ICON_TRASH,
 };
 use crate::ui::repo_card_chips::{favorite_star, show_bottom_row, show_chip_row};
 use crate::ui::search_field::search_field;

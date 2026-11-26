@@ -2710,15 +2710,11 @@ fn icon_order_row(
             toggle = true;
         }
         let visuals = ui.visuals();
-        ui.label(
-            RichText::new(label)
-                .size(11.0)
-                .color(if is_hidden {
-                    visuals.weak_text_color()
-                } else {
-                    visuals.text_color()
-                }),
-        );
+        ui.label(RichText::new(label).size(11.0).color(if is_hidden {
+            visuals.weak_text_color()
+        } else {
+            visuals.text_color()
+        }));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add(egui::Button::image(
@@ -3160,7 +3156,11 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         state.draft.tray_icons.hidden_icon_ids.sort();
         state.draft.tray_icons.hidden_icon_ids.dedup();
     }
-    apply_icon_order_move(tray_move, &mut state.draft.tray_icons.icon_order, &effective);
+    apply_icon_order_move(
+        tray_move,
+        &mut state.draft.tray_icons.icon_order,
+        &effective,
+    );
 
     ui.add_space(8.0);
 

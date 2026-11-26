@@ -2861,7 +2861,13 @@ fn shell_escape(s: &str, quote: char, doubled: &str, meta: &[char], force: bool)
 }
 
 fn escape_for_powershell(s: &str) -> String {
-    shell_escape(s, '\'', "''", &[' ', '\'', '"', '&', '|', ';', '>', '<', '^', '`', '$'], false)
+    shell_escape(
+        s,
+        '\'',
+        "''",
+        &[' ', '\'', '"', '&', '|', ';', '>', '<', '^', '`', '$'],
+        false,
+    )
 }
 
 #[cfg(not(test))]
@@ -3306,7 +3312,12 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
 /// Gemeinsames Command-Finish für alle Spawn-Helfer: working-directory,
 /// Creation-Flags, spawn_locked und einheitliche Fehlermeldung.
 #[cfg(not(test))]
-pub(crate) fn spawn_finish(cmd: &mut std::process::Command, repo_path: &Path, creation_flags: u32, what: &str) -> anyhow::Result<()> {
+pub(crate) fn spawn_finish(
+    cmd: &mut std::process::Command,
+    repo_path: &Path,
+    creation_flags: u32,
+    what: &str,
+) -> anyhow::Result<()> {
     cmd.current_dir(repo_path);
     set_creation_flags(cmd, creation_flags);
     cmd.spawn_locked()

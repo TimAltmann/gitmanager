@@ -1237,7 +1237,10 @@ pub(super) mod tests {
         FakeReply::error(GlabError::NotFound)
     }
 
-    pub(crate) fn config_get(host: &'static str, key: &'static str) -> impl Fn(&GlabRequest) -> bool + Send {
+    pub(crate) fn config_get(
+        host: &'static str,
+        key: &'static str,
+    ) -> impl Fn(&GlabRequest) -> bool + Send {
         move |r: &GlabRequest| {
             r.args.first().is_some_and(|a| a == "config")
                 && r.args.last().is_some_and(|k| k == key)

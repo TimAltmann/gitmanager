@@ -20,12 +20,12 @@ use crate::gitlab::remote::{
     RemoteRef, RemoteScheme,
 };
 use crate::gitlab::secret::SecretString;
-use crate::gitlab::time::DAY;
 use crate::gitlab::service::{
     error_text, is_auth_error, login_key, token_create_url, AccessState, GitManagerRights,
     GlabRights, HostProbe, Protocol, SavedWhere, TokenCheck, TokenKind, TokenSource,
 };
 use crate::gitlab::time::format_date;
+use crate::gitlab::time::DAY;
 use crate::i18n::{count_text, tr, tr_fmt, Language};
 use crate::ui::theme::{mr_palette, MrPalette};
 use egui::text_edit::TextEditState;
@@ -40,11 +40,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 // Icons: Phosphor Regular wie in der MR-Ansicht (weiß, per `tint` gefärbt)
 use crate::ui::icons::{
-    ICON_MR_CHECK_CIRCLE as ICON_CHECK_CIRCLE, ICON_MR_COPY as ICON_COPY,
+    icon_image, ICON_MR_CHECK_CIRCLE as ICON_CHECK_CIRCLE, ICON_MR_COPY as ICON_COPY,
     ICON_MR_LOCK as ICON_LOCK, ICON_MR_MINUS_CIRCLE as ICON_MINUS_CIRCLE,
     ICON_MR_OPEN_EXTERNAL as ICON_OPEN_EXTERNAL, ICON_MR_WARNING as ICON_WARNING,
     ICON_MR_X_CIRCLE as ICON_X_CIRCLE, ICON_TRASH,
-    icon_image,
 };
 
 /// Warnung „Läuft in {n} Tagen ab“ ab so vielen Tagen vor dem Ablauf.

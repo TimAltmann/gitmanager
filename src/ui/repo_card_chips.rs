@@ -17,13 +17,11 @@ use crate::gitlab::remote::RemoteScheme;
 use crate::gitlab::time::relative_time;
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::ui::icons::{
-    ICON_ARROW_DOWN, ICON_ARROW_UP, ICON_DOTS, ICON_FOLDER,
-    ICON_MR_CHECK as ICON_CHECK, ICON_MR_COPY as ICON_COPY,
-    ICON_MR_DOWNLOAD as ICON_PULL, ICON_MR_FOLDER_PLUS as ICON_FOLDER_PLUS,
-    ICON_MR_OPEN_EXTERNAL as ICON_BROWSER,
+    agent_image, ide_image, ICON_ARROW_DOWN, ICON_ARROW_UP, ICON_DOTS, ICON_FOLDER,
+    ICON_MR_CHECK as ICON_CHECK, ICON_MR_COPY as ICON_COPY, ICON_MR_DOWNLOAD as ICON_PULL,
+    ICON_MR_FOLDER_PLUS as ICON_FOLDER_PLUS, ICON_MR_OPEN_EXTERNAL as ICON_BROWSER,
     ICON_MR_PULL_REQUEST as ICON_MR, ICON_MR_SPARKLE as ICON_SPARKLE,
     ICON_MR_WARNING as ICON_WARNING, ICON_STAR, ICON_STAR_FILL, ICON_TERMINAL, ICON_TRASH,
-    agent_image, ide_image,
 };
 use crate::ui::merge_requests::pipeline_icon;
 use crate::ui::repo_list::{RepoListActions, RepoListContext};

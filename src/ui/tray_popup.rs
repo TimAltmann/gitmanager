@@ -2,9 +2,8 @@ use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::ui::icons::{
-    ICON_CROSS, ICON_FOLDER, ICON_GEAR,
+    agent_image_sized, ide_image_sized, ICON_CROSS, ICON_FOLDER, ICON_GEAR,
     ICON_MR_PULL_REQUEST as ICON_PULL_REQUEST, ICON_REFRESH, ICON_TERMINAL,
-    agent_image_sized, ide_image_sized,
 };
 use crate::ui::theme::mr_palette;
 use egui::{AtomLayoutResponse, Color32, RichText, Vec2};
@@ -1620,11 +1619,17 @@ mod tests {
         let present = dir.join("present_xyz123.png");
         std::fs::write(&present, b"x").unwrap();
         let missing = dir.join("missing_xyz123.png");
-        assert!(crate::ui::icons::icon_exists_cached(present.to_str().unwrap()));
-        assert!(!crate::ui::icons::icon_exists_cached(missing.to_str().unwrap()));
+        assert!(crate::ui::icons::icon_exists_cached(
+            present.to_str().unwrap()
+        ));
+        assert!(!crate::ui::icons::icon_exists_cached(
+            missing.to_str().unwrap()
+        ));
         // Gecacht: nach Löschen weiterhin true (kein erneuter stat).
         std::fs::remove_file(&present).unwrap();
-        assert!(crate::ui::icons::icon_exists_cached(present.to_str().unwrap()));
+        assert!(crate::ui::icons::icon_exists_cached(
+            present.to_str().unwrap()
+        ));
         let _ = std::fs::remove_dir(&dir);
     }
 

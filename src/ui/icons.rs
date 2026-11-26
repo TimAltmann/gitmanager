@@ -18,20 +18,16 @@ pub const ICON_GEAR: ImageSource = egui::include_image!("../../assets/icons/gear
 pub const ICON_WARNING: ImageSource = egui::include_image!("../../assets/icons/warning.svg");
 pub const ICON_CHEVRON_DOWN: ImageSource =
     egui::include_image!("../../assets/icons/chevron-down.svg");
-pub const ICON_CHEVRON_UP: ImageSource =
-    egui::include_image!("../../assets/icons/chevron-up.svg");
+pub const ICON_CHEVRON_UP: ImageSource = egui::include_image!("../../assets/icons/chevron-up.svg");
 pub const ICON_STAR: ImageSource = egui::include_image!("../../assets/icons/star.svg");
 pub const ICON_STAR_FILL: ImageSource = egui::include_image!("../../assets/icons/star-fill.svg");
 pub const ICON_EYE: ImageSource = egui::include_image!("../../assets/icons/eye.svg");
 pub const ICON_EYE_OFF: ImageSource = egui::include_image!("../../assets/icons/eye-off.svg");
-pub const ICON_GIT_BRANCH: ImageSource =
-    egui::include_image!("../../assets/icons/git-branch.svg");
-pub const ICON_GIT_COMMIT: ImageSource =
-    egui::include_image!("../../assets/icons/git-commit.svg");
+pub const ICON_GIT_BRANCH: ImageSource = egui::include_image!("../../assets/icons/git-branch.svg");
+pub const ICON_GIT_COMMIT: ImageSource = egui::include_image!("../../assets/icons/git-commit.svg");
 pub const ICON_DOTS: ImageSource = egui::include_image!("../../assets/icons/dots-three.svg");
 pub const ICON_ARROW_UP: ImageSource = egui::include_image!("../../assets/icons/arrow-up.svg");
-pub const ICON_ARROW_DOWN: ImageSource =
-    egui::include_image!("../../assets/icons/arrow-down.svg");
+pub const ICON_ARROW_DOWN: ImageSource = egui::include_image!("../../assets/icons/arrow-down.svg");
 
 // --- IDE & Agent Icons (assets/icons/) ---
 pub const ICON_VSCODE: ImageSource = egui::include_image!("../../assets/icons/vscode.svg");
@@ -51,8 +47,7 @@ pub const ICON_MR_X_CIRCLE: ImageSource =
     egui::include_image!("../../assets/icons/mr/x-circle.svg");
 pub const ICON_MR_CIRCLE_NOTCH: ImageSource =
     egui::include_image!("../../assets/icons/mr/circle-notch.svg");
-pub const ICON_MR_CLOCK: ImageSource =
-    egui::include_image!("../../assets/icons/mr/clock.svg");
+pub const ICON_MR_CLOCK: ImageSource = egui::include_image!("../../assets/icons/mr/clock.svg");
 pub const ICON_MR_MINUS_CIRCLE: ImageSource =
     egui::include_image!("../../assets/icons/mr/minus-circle.svg");
 pub const ICON_MR_PROHIBIT: ImageSource =
@@ -61,18 +56,15 @@ pub const ICON_MR_SKIP_CIRCLE: ImageSource =
     egui::include_image!("../../assets/icons/mr/skip-forward-circle.svg");
 pub const ICON_MR_PLAY_CIRCLE: ImageSource =
     egui::include_image!("../../assets/icons/mr/play-circle.svg");
-pub const ICON_MR_CHAT: ImageSource =
-    egui::include_image!("../../assets/icons/mr/chat-circle.svg");
+pub const ICON_MR_CHAT: ImageSource = egui::include_image!("../../assets/icons/mr/chat-circle.svg");
 pub const ICON_MR_CHAT_DOTS: ImageSource =
     egui::include_image!("../../assets/icons/mr/chat-circle-dots.svg");
 pub const ICON_MR_CHAT_CHECK: ImageSource =
     egui::include_image!("../../assets/icons/mr/chat-circle-check.svg");
-pub const ICON_MR_CHECK: ImageSource =
-    egui::include_image!("../../assets/icons/mr/check.svg");
+pub const ICON_MR_CHECK: ImageSource = egui::include_image!("../../assets/icons/mr/check.svg");
 pub const ICON_MR_ARROW_U: ImageSource =
     egui::include_image!("../../assets/icons/mr/arrow-u-up-left.svg");
-pub const ICON_MR_USER: ImageSource =
-    egui::include_image!("../../assets/icons/mr/user.svg");
+pub const ICON_MR_USER: ImageSource = egui::include_image!("../../assets/icons/mr/user.svg");
 pub const ICON_MR_SORT: ImageSource =
     egui::include_image!("../../assets/icons/mr/sort-descending.svg");
 pub const ICON_MR_OPEN_EXTERNAL: ImageSource =
@@ -83,29 +75,23 @@ pub const ICON_MR_BRANCH: ImageSource =
     egui::include_image!("../../assets/icons/mr/git-branch.svg");
 pub const ICON_MR_TERMINAL: ImageSource =
     egui::include_image!("../../assets/icons/mr/terminal-window.svg");
-pub const ICON_MR_LOCK: ImageSource =
-    egui::include_image!("../../assets/icons/mr/lock-simple.svg");
-pub const ICON_MR_COPY: ImageSource =
-    egui::include_image!("../../assets/icons/mr/copy.svg");
+pub const ICON_MR_LOCK: ImageSource = egui::include_image!("../../assets/icons/mr/lock-simple.svg");
+pub const ICON_MR_COPY: ImageSource = egui::include_image!("../../assets/icons/mr/copy.svg");
 pub const ICON_MR_FOLDER_PLUS: ImageSource =
     egui::include_image!("../../assets/icons/mr/folder-plus.svg");
 pub const ICON_MR_DOWNLOAD: ImageSource =
     egui::include_image!("../../assets/icons/mr/download-simple.svg");
 pub const ICON_MR_DOTS: ImageSource = egui::include_image!("../../assets/icons/dots-three.svg");
-pub const ICON_MR_FOLDER: ImageSource =
-    egui::include_image!("../../assets/icons/mr/folder.svg");
+pub const ICON_MR_FOLDER: ImageSource = egui::include_image!("../../assets/icons/mr/folder.svg");
 pub const ICON_MR_FOLDER_ARROW: ImageSource =
     egui::include_image!("../../assets/icons/mr/folder-arrow.svg");
-pub const ICON_MR_CODE: ImageSource =
-    egui::include_image!("../../assets/icons/mr/code.svg");
-pub const ICON_MR_SPARKLE: ImageSource =
-    egui::include_image!("../../assets/icons/mr/sparkle.svg");
+pub const ICON_MR_CODE: ImageSource = egui::include_image!("../../assets/icons/mr/code.svg");
+pub const ICON_MR_SPARKLE: ImageSource = egui::include_image!("../../assets/icons/mr/sparkle.svg");
 pub const ICON_MR_WARNING: ImageSource =
     egui::include_image!("../../assets/icons/mr/warning-circle.svg");
 pub const ICON_MR_SEARCH: ImageSource =
     egui::include_image!("../../assets/icons/mr/magnifying-glass.svg");
-pub const ICON_MR_CROSS: ImageSource =
-    egui::include_image!("../../assets/icons/mr/x.svg");
+pub const ICON_MR_CROSS: ImageSource = egui::include_image!("../../assets/icons/mr/x.svg");
 
 /// Liefert das Icon für eine IDE-ID ("vs", "rider", "vscode", etc.).
 pub fn ide_icon_for(ide_id: &str) -> ImageSource<'static> {

@@ -1565,13 +1565,7 @@ fn rest_project(
     prepare: Prepare<'_>,
 ) -> Result<AccessState, GlabErrorKind> {
     let endpoint = format!("projects/{}", encode_path(path));
-    let (code, json) = rest_api(
-        runner,
-        host,
-        endpoint,
-        prepare,
-        &[301, 302, 307, 308, 404],
-    )?;
+    let (code, json) = rest_api(runner, host, endpoint, prepare, &[301, 302, 307, 308, 404])?;
     match code {
         Some(200) => Ok(json.map_or(AccessState::Unknown, |json| rest_state(&json, path))),
         Some(301 | 302 | 307 | 308) => Ok(AccessState::Renamed { to: String::new() }),
