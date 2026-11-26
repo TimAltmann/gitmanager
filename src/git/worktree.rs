@@ -43,7 +43,7 @@ pub struct MrPrep {
 }
 
 /// K1: typisierte Fehler beim Auschecken eines MR. Display bleibt Deutsch wie
-/// die übrigen git.rs-Fehler; die UI lokalisiert per Match bzw. Downcast.
+/// die übrigen git-Fehler; die UI lokalisiert per Match bzw. Downcast.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckoutError {
     /// Branch ist HEAD in einem anderen Worktree (oder im Basis-Klon selbst)

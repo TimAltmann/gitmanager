@@ -1,7 +1,7 @@
 //! Auschecken eines MR-Branches nach K1 (E5/E6): Auswahlmenü (neuer
 //! Worktree, neuer Klon, bestehender Klon, „Bereits ausgecheckt“) rein aus
 //! den Scan-Daten und den Abrufdaten, dazu der Plan für die git-Schritte in
-//! `git.rs` (`fetch_refspecs`, `prepare_mr_branch`, `add_worktree`,
+//! `git` (`fetch_refspecs`, `prepare_mr_branch`, `add_worktree`,
 //! `clone_repo`). Kein I/O: läuft bei jedem Frame auf zwischengespeicherten
 //! Daten.
 

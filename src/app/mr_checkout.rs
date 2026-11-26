@@ -1,6 +1,6 @@
 //! Auschecken eines MR in der App (K1, Task 11): Worker für „Neuer
 //! Worktree“, „Neuer Klon“ und das Vorbereiten eines bestehenden Klons
-//! (`git.rs`), der Wechsel über den bestehenden Ablauf
+//! (`git`), der Wechsel über den bestehenden Ablauf
 //! `pending_branch_switches` (Dialog bei Änderungen), „Danach öffnen“ und das
 //! Menü „Bereits ausgecheckt“. Der Worker hält den Ref-Lock (`GitBusy`, kein
 //! paralleler Scan oder Auto-Fetch); Fehler gehen wie beim Fetch über
@@ -687,7 +687,7 @@ fn failure_text(lang: Language, iid: u64, failure: &MrCheckoutFailure) -> String
     }
 }
 
-/// `CheckoutError` lokalisiert (Display bleibt Deutsch wie in `git.rs`);
+/// `CheckoutError` lokalisiert (Display bleibt Deutsch wie in `git`);
 /// sonstige git-Fehler unverändert.
 pub(super) fn checkout_error_text(lang: Language, error: &CheckoutError) -> String {
     match error {

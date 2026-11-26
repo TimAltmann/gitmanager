@@ -146,7 +146,7 @@ pub fn sort_main_repos(repos: &mut [RepoInfo], config: &AppConfig) {
 /// Geklonte, sortierte Kopie (Test-/Reuse-freundlich). Render-Pfad nutzt
 /// `sort_main_repos` in-place, um Klone pro Frame zu vermeiden.
 /// Nur in Tests genutzt (Prod-Pfad sortiert in-place) — analog zu den
-/// Pfad-Wrappern in `git.rs`.
+/// Pfad-Wrappern in `git`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn sorted_main_repos(repos: &[RepoInfo], config: &AppConfig) -> Vec<RepoInfo> {
     let mut out = repos.to_vec();

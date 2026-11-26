@@ -81,7 +81,7 @@ pub enum CheckoutOutcome {
 }
 
 /// E15: typisierte Abbrüche vor dem Checkout (Arbeitsverzeichnis unberührt).
-/// Display bleibt Deutsch wie die übrigen git.rs-Fehler; die UI lokalisiert
+/// Display bleibt Deutsch wie die übrigen git-Fehler; die UI lokalisiert
 /// per Downcast (`branch_upstream_mismatch`, `branch_checked_out_elsewhere`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchSwitchBlocked {
