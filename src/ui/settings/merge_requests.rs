@@ -27,10 +27,11 @@ use crate::gitlab::service::{
 use crate::gitlab::time::format_date;
 use crate::i18n::{count_text, tr, tr_fmt, Language};
 use crate::ui::theme::{mr_palette, MrPalette};
+use crate::ui::widgets::{self, icon_image, small};
 use egui::text_edit::TextEditState;
 use egui::{
-    vec2, Align, Button, Color32, CursorIcon, FontId, Frame, Id, Image, ImageSource, Label, Layout,
-    Margin, Response, RichText, Spinner, Stroke, TextEdit, Ui, WidgetInfo, WidgetType,
+    Align, Button, Color32, CursorIcon, FontId, Frame, Id, ImageSource, Label, Layout, Margin,
+    Response, RichText, Spinner, Stroke, TextEdit, Ui,
 };
 use semver::Version;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2124,26 +2125,9 @@ fn wrapped(ui: &mut Ui, text: &str, size: f32, color: Color32) {
     ui.add(Label::new(RichText::new(text).size(size).color(color)).wrap());
 }
 
-fn small(ui: &mut Ui, text: &str, color: Color32) -> Response {
-    ui.label(RichText::new(text).size(11.0).color(color))
-}
-
-fn icon_image(icon: ImageSource<'static>, size: f32, tint: Color32) -> Image<'static> {
-    Image::new(icon)
-        .fit_to_exact_size(vec2(size, size))
-        .tint(tint)
-}
-
 /// Icon-Button 22 × 22 mit Tooltip und AccessKit-Namen.
 fn icon_button(ui: &mut Ui, icon: ImageSource<'static>, tooltip: &str) -> Response {
-    let tint = ui.visuals().widgets.inactive.fg_stroke.color;
-    let resp = ui.add(
-        Button::new(icon_image(icon, 14.0, tint))
-            .min_size(vec2(22.0, 22.0))
-            .corner_radius(6),
-    );
-    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tooltip));
-    resp.on_hover_text(tooltip)
+    widgets::icon_button(ui, icon, tooltip, false, true)
 }
 
 /// Hauptknopf in den Auswahlfarben des Themes.
@@ -2244,6 +2228,7 @@ mod tests {
     use super::*;
     use crate::gitlab::remote::RemoteInfo;
     use crate::gitlab::service::ProjectAccess;
+    use egui::vec2;
 
     const HOST: &str = "gitlab.example.com";
 

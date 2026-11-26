@@ -13,3 +13,4 @@ pub mod theme;
 // auf Windows bleibt -D warnings strikt.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod tray_popup;
+pub mod widgets;
