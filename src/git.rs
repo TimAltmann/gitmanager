@@ -1,6 +1,6 @@
 use crate::gitlab::checkout::MrCheckoutPlan;
 use crate::gitlab::remote::RemoteInfo;
-use crate::process::{self, Keep, Limits, SpawnLocked, CREATE_NO_WINDOW};
+use crate::process::{self, set_creation_flags, Keep, Limits, SpawnLocked, CREATE_NO_WINDOW};
 use git2::{BranchType, Repository, StatusOptions};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -3219,14 +3219,6 @@ pub fn resolve_rider_path_force() -> Option<PathBuf> {
     resolve_rider_path()
 }
 
-pub(crate) fn set_creation_flags(_cmd: &mut std::process::Command, _flags: u32) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        _cmd.creation_flags(_flags);
-    }
-}
-
 /// Öffnet eine Datei/Ordner mit einer IDE-Konfiguration
 /// `repo_path` ist immer das Repo-Root (für cwd), `file` ist optional die Solution/Project Datei
 pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> anyhow::Result<()> {
@@ -3346,7 +3338,7 @@ fn spawn_wt(repo_str: &str, cmd_string: &str, repo_path: &Path) -> anyhow::Resul
     let mut cmd = std::process::Command::new("wt");
     cmd.args(["-d", repo_str, "--", "cmd", "/k", cmd_string]);
     cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, 0x00000010);
+    set_creation_flags(&mut cmd, process::CREATE_NEW_CONSOLE);
     cmd.spawn_locked()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("Windows Terminal starten fehlgeschlagen: {e}"))
@@ -3372,7 +3364,7 @@ fn spawn_powershell(ps_script: &str, repo_path: &Path) -> anyhow::Result<()> {
         cmd.args(["-NoLogo", "-NoExit", "-Command", &full_script]);
     }
     cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, 0x00000010);
+    set_creation_flags(&mut cmd, process::CREATE_NEW_CONSOLE);
     cmd.spawn_locked()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("Powershell starten fehlgeschlagen: {e}"))
@@ -3402,7 +3394,7 @@ fn spawn_powershell_shell(repo_path: &Path) -> anyhow::Result<()> {
         ]);
     }
     cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, 0x00000010);
+    set_creation_flags(&mut cmd, process::CREATE_NEW_CONSOLE);
     cmd.spawn_locked()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("Powershell starten fehlgeschlagen: {e}"))
@@ -3414,7 +3406,7 @@ fn spawn_wt_shell(repo_path: &Path) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new("wt");
     cmd.args(["-d", &repo_str]);
     cmd.current_dir(repo_path);
-    set_creation_flags(&mut cmd, 0x00000010);
+    set_creation_flags(&mut cmd, process::CREATE_NEW_CONSOLE);
     cmd.spawn_locked()
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("Windows Terminal starten fehlgeschlagen: {e}"))
@@ -3493,7 +3485,7 @@ pub fn launch_agent(
                     cmd.arg(&agent_cmd_raw);
                 }
                 cmd.current_dir(repo_path);
-                set_creation_flags(&mut cmd, 0x00000010);
+                set_creation_flags(&mut cmd, process::CREATE_NEW_CONSOLE);
                 cmd.spawn_locked().map(|_| ()).map_err(|e| {
                     anyhow::anyhow!("Custom Terminal '{}' starten fehlgeschlagen: {e}", custom)
                 })
@@ -3527,7 +3519,7 @@ pub fn open_shell(repo_path: &Path, terminal_pref: &TerminalPreference) -> anyho
             TerminalPreference::Custom(custom) => {
                 let mut cmd = std::process::Command::new(custom);
                 cmd.current_dir(repo_path);
-                set_creation_flags(&mut cmd, 0x00000010);
+                set_creation_flags(&mut cmd, process::CREATE_NEW_CONSOLE);
                 cmd.spawn_locked().map(|_| ()).map_err(|e| {
                     anyhow::anyhow!("Custom Terminal '{}' starten fehlgeschlagen: {e}", custom)
                 })
