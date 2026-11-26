@@ -141,7 +141,7 @@ pub fn parse_session(path: &Path) -> Option<ClaudeSession> {
 }
 
 /// Text einer Nutzer-Nachricht (String oder Liste von Text-Blöcken).
-fn message_text(v: &Value) -> Option<String> {
+pub(crate) fn message_text(v: &Value) -> Option<String> {
     match v.pointer("/message/content")? {
         Value::String(s) => Some(s.clone()),
         Value::Array(parts) => {

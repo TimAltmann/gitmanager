@@ -359,6 +359,27 @@ mod tests {
         }
     }
 
+    fn notes_event(now: u32) -> MrEvent {
+        MrEvent {
+            kind: MrEventKind::NotesAdded { before: 1, now },
+            host_key: "h".to_string(),
+            id: "a".to_string(),
+            iid: 1,
+            project_path: "g/p".to_string(),
+            title: "T".to_string(),
+            web_url: String::new(),
+            author: String::new(),
+        }
+    }
+
+    fn note(author: &str, body: &str) -> NoteInfo {
+        NoteInfo {
+            author_username: author.to_string(),
+            body: body.to_string(),
+            ..NoteInfo::default()
+        }
+    }
+
     #[test]
     fn toast_show_focuses_mr_row() {
         let ctx = egui::Context::default();
@@ -415,27 +436,12 @@ mod tests {
         // Abruf der Kommentare nicht abwarten: Ergebnis direkt einspielen
         let store = &mut app.mr_activity.store;
         store.observe(app.mr_snapshot.as_deref().unwrap(), now_unix());
-        let event = MrEvent {
-            kind: MrEventKind::NotesAdded { before: 1, now: 2 },
-            host_key: "h".to_string(),
-            id: "a".to_string(),
-            iid: 1,
-            project_path: "g/p".to_string(),
-            title: "T".to_string(),
-            web_url: String::new(),
-            author: String::new(),
-        };
-        let mine = NoteInfo {
-            author_username: "me".to_string(),
-            body: "erledigt".to_string(),
-            ..NoteInfo::default()
-        };
         app.on_mr_notes(
             Some("me".to_string()),
             vec![NotesJob {
-                event,
+                event: notes_event(2),
                 trigger: None,
-                notes: vec![mine],
+                notes: vec![note("me", "erledigt")],
             }],
         );
         let snap = app.mr_snapshot.as_deref().unwrap();
@@ -451,32 +457,12 @@ mod tests {
         // Abruf der Kommentare nicht abwarten: Ergebnis direkt einspielen
         let store = &mut app.mr_activity.store;
         store.observe(app.mr_snapshot.as_deref().unwrap(), now_unix());
-        let event = MrEvent {
-            kind: MrEventKind::NotesAdded { before: 1, now: 3 },
-            host_key: "h".to_string(),
-            id: "a".to_string(),
-            iid: 1,
-            project_path: "g/p".to_string(),
-            title: "T".to_string(),
-            web_url: String::new(),
-            author: String::new(),
-        };
-        let mine = NoteInfo {
-            author_username: "me".to_string(),
-            body: "erledigt".to_string(),
-            ..NoteInfo::default()
-        };
-        let other = NoteInfo {
-            author_username: "anna".to_string(),
-            body: "bitte prüfen".to_string(),
-            ..NoteInfo::default()
-        };
         app.on_mr_notes(
             Some("me".to_string()),
             vec![NotesJob {
-                event,
+                event: notes_event(3),
                 trigger: None,
-                notes: vec![mine, other],
+                notes: vec![note("me", "erledigt"), note("anna", "bitte prüfen")],
             }],
         );
         let snap = app.mr_snapshot.as_deref().unwrap();

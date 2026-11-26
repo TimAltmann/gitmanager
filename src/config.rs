@@ -288,12 +288,6 @@ fn default_language() -> Language {
 fn default_branch_limit() -> usize {
     200
 }
-fn default_minimize_to_tray() -> bool {
-    true
-}
-fn default_check_for_updates() -> bool {
-    true
-}
 fn default_tray_branch_limit() -> usize {
     20
 }
@@ -838,10 +832,10 @@ pub struct AppConfig {
     #[serde(default = "default_branch_limit")]
     pub branch_display_limit: usize,
 
-    #[serde(default = "default_minimize_to_tray")]
+    #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
 
-    #[serde(default = "default_check_for_updates")]
+    #[serde(default = "default_true")]
     pub check_for_updates: bool,
 
     #[serde(default = "default_tray_branch_limit")]
@@ -887,7 +881,7 @@ pub struct AppConfig {
 
     /// Windows-Benachrichtigung, wenn eine Claude Session wartet oder fertig
     /// ist. Ältere Versionen ignorieren das Feld.
-    #[serde(default = "default_claude_notify")]
+    #[serde(default = "default_true")]
     pub claude_notify: bool,
 
     /// Favorisierte Repos/Worktrees (Schlüssel aus `repo_state_key`); stehen
@@ -901,8 +895,13 @@ pub struct AppConfig {
     pub favorite_sessions: Vec<String>,
 }
 
-fn default_claude_notify() -> bool {
-    true
+/// Eintrag in einer Liste umschalten: entfernen wenn vorhanden, sonst anhängen.
+fn toggle_vec_entry<T: PartialEq>(items: &mut Vec<T>, item: T) {
+    if let Some(i) = items.iter().position(|existing| *existing == item) {
+        items.remove(i);
+    } else {
+        items.push(item);
+    }
 }
 
 impl AppConfig {
@@ -1018,8 +1017,8 @@ impl Default for AppConfig {
             repo_state: HashMap::new(),
             language: default_language(),
             branch_display_limit: default_branch_limit(),
-            minimize_to_tray: default_minimize_to_tray(),
-            check_for_updates: default_check_for_updates(),
+            minimize_to_tray: default_true(),
+            check_for_updates: default_true(),
             tray_branch_limit: default_tray_branch_limit(),
             tray_icons: TrayIconConfig::default(),
             repo_usage: HashMap::new(),
@@ -1030,7 +1029,7 @@ impl Default for AppConfig {
             worktree_root: None,
             claude_default_dir: None,
             folder_files: Vec::new(),
-            claude_notify: default_claude_notify(),
+            claude_notify: default_true(),
             favorite_repos: Vec::new(),
             favorite_sessions: Vec::new(),
         }
@@ -1739,12 +1738,7 @@ impl AppConfig {
     /// Favorit setzen bzw. entfernen. Aufrufer sortieren die Liste neu
     /// (`repo_sort_dirty`).
     pub fn toggle_favorite_repo(&mut self, path: &Path) {
-        let key = Self::favorite_key(path);
-        if let Some(i) = self.favorite_repos.iter().position(|k| *k == key) {
-            self.favorite_repos.remove(i);
-        } else {
-            self.favorite_repos.push(key);
-        }
+        toggle_vec_entry(&mut self.favorite_repos, Self::favorite_key(path));
     }
 
     /// Ist die Claude Session (ID) als Favorit markiert?
@@ -1754,11 +1748,7 @@ impl AppConfig {
 
     /// Favorit setzen bzw. entfernen.
     pub fn toggle_favorite_session(&mut self, id: &str) {
-        if let Some(i) = self.favorite_sessions.iter().position(|s| s == id) {
-            self.favorite_sessions.remove(i);
-        } else {
-            self.favorite_sessions.push(id.to_string());
-        }
+        toggle_vec_entry(&mut self.favorite_sessions, id.to_string());
     }
 
     /// Bevorzugte Solution des Repos (relativer Pfad).

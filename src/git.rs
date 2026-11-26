@@ -1415,6 +1415,31 @@ pub fn ahead_behind(path: &Path) -> (usize, usize) {
 }
 
 /// Finding C: Variante mit bereits geöffnetem Handle — kein drittes
+/// Ahead/behind gegen einen Remote-Branch ermitteln (zwei übliche Ref-Formen).
+fn ahead_behind_against(
+    repo: &Repository,
+    local_oid: git2::Oid,
+    branch: &str,
+    remote_name: &str,
+) -> Option<(usize, usize)> {
+    for candidate in [
+        format!("refs/remotes/{remote_name}/{branch}"),
+        format!("{remote_name}/{branch}"),
+    ] {
+        if let Ok(obj) = repo.revparse_single(&candidate) {
+            let up_oid = obj
+                .peel_to_commit()
+                .map(|c| c.id())
+                .unwrap_or_else(|_| obj.id());
+            if let Ok(ab) = repo.graph_ahead_behind(local_oid, up_oid) {
+                return Some(ab);
+            }
+            // F2#2: Graph-Fehler → nächsten Kandidaten versuchen.
+        }
+    }
+    None
+}
+
 /// `Repository::open` pro Scan (siehe `get_repo_info`).
 pub fn ahead_behind_in(repo: &Repository) -> (usize, usize) {
     if repo.is_bare() {
@@ -1464,22 +1489,11 @@ pub fn ahead_behind_in(repo: &Repository) -> (usize, usize) {
         .config()
         .and_then(|c| c.get_string(&format!("branch.{branch}.remote")))
     {
-        for candidate in [
-            format!("refs/remotes/{cfg_branch_remote}/{branch}"),
-            format!("{cfg_branch_remote}/{branch}"),
-        ] {
-            if let Ok(obj) = repo.revparse_single(&candidate) {
-                let up_oid = obj
-                    .peel_to_commit()
-                    .map(|c| c.id())
-                    .unwrap_or_else(|_| obj.id());
-                if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
-                    return (a, b);
-                }
-                // F2#2: Graph-Fehler → nicht (0,0), sondern unten andere
-                // Remotes versuchen (Upstream-bekannt-Regel oben bleibt).
-            }
+        if let Some(ab) = ahead_behind_against(repo, local_oid, &branch, &cfg_branch_remote) {
+            return ab;
         }
+        // F2#2: Graph-Fehler → nicht (0,0), sondern unten andere Remotes
+        // versuchen (Upstream-bekannt-Regel oben bleibt).
     }
     if let Ok(remotes) = repo.remotes() {
         // L5: `origin` zuerst prüfen — bei Forks (origin+upstream) würde
@@ -1490,20 +1504,8 @@ pub fn ahead_behind_in(repo: &Repository) -> (usize, usize) {
             .collect();
         names.sort_by_key(|n| (n != "origin", n.clone()));
         for remote_name in &names {
-            for candidate in [
-                format!("refs/remotes/{remote_name}/{branch}"),
-                format!("{remote_name}/{branch}"),
-            ] {
-                if let Ok(obj) = repo.revparse_single(&candidate) {
-                    let up_oid = obj
-                        .peel_to_commit()
-                        .map(|c| c.id())
-                        .unwrap_or_else(|_| obj.id());
-                    if let Ok((a, b)) = repo.graph_ahead_behind(local_oid, up_oid) {
-                        return (a, b);
-                    }
-                    // F2#2: Graph-Fehler → nächsten Remote versuchen.
-                }
+            if let Some(ab) = ahead_behind_against(repo, local_oid, &branch, remote_name) {
+                return ab;
             }
         }
     }

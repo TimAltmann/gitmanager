@@ -111,21 +111,25 @@ impl Field {
     }
 
     /// Pflichtargument
-    fn arg(mut self, name: &'static str, value: impl std::fmt::Display) -> Self {
-        self.args.push(Arg {
-            name,
-            value: value.to_string(),
-            optional: false,
-        });
-        self
+    fn arg(self, name: &'static str, value: impl std::fmt::Display) -> Self {
+        self.push_arg(name, value, false)
     }
 
     /// Argument, das beim Schema-Fallback entfallen darf
-    fn opt_arg(mut self, name: &'static str, value: impl std::fmt::Display) -> Self {
+    fn opt_arg(self, name: &'static str, value: impl std::fmt::Display) -> Self {
+        self.push_arg(name, value, true)
+    }
+
+    fn push_arg(
+        mut self,
+        name: &'static str,
+        value: impl std::fmt::Display,
+        optional: bool,
+    ) -> Self {
         self.args.push(Arg {
             name,
             value: value.to_string(),
-            optional: true,
+            optional,
         });
         self
     }
@@ -606,6 +610,24 @@ pub fn uninvolved(paths: &[String], me: &str) -> Vec<Query> {
         .collect()
 }
 
+/// Projekt-Feld mit Alias und `fullPath`-Variable; die zweite Variable
+/// (Cursor, IID, Branches) setzt der Aufrufer je Abfrageart.
+fn push_project_alias(
+    mut query: Query,
+    alias: impl Into<String>,
+    path_var: &str,
+    path: &str,
+    project: Field,
+) -> Query {
+    query.root.items.push(
+        project
+            .alias(alias)
+            .arg("fullPath", format!("${path_var}"))
+            .into(),
+    );
+    query.var(path_var, "ID!", Some(Value::from(path)))
+}
+
 /// `UNINVOLVED_PAGE`: nächste Seite je Projekt `(pfad, cursor)`, bis zu
 /// `UNINVOLVED_PAGE_CHUNK` Projekte per Alias (`p0`, `p1`, …) je Abfrage;
 /// mehr Projekte ergeben mehrere Abfragen (Komplexität).
@@ -618,15 +640,9 @@ pub fn uninvolved_page(pages: &[(String, String)], me: &str) -> Vec<Query> {
                 let (p, c) = (format!("p{i}"), format!("c{i}"));
                 let mut items = scalars("fullPath");
                 items.push(project_mrs(Some(&c)).into());
-                let project = Field::object("project", &["Project"], items)
-                    .alias(p.clone())
-                    .arg("fullPath", format!("${p}"));
-                query.root.items.push(project.into());
-                query = query.var(p, "ID!", Some(Value::from(path.as_str()))).var(
-                    c,
-                    "String",
-                    Some(Value::from(cursor.as_str())),
-                );
+                let project = Field::object("project", &["Project"], items);
+                query = push_project_alias(query, &p, &p, path, project)
+                    .var(c, "String", Some(Value::from(cursor.as_str())));
             }
             query
                 .var("me", "String", Some(Value::from(me)))
@@ -658,15 +674,9 @@ pub fn recent_notes(mrs: &[(String, u64)]) -> Vec<Query> {
                 .arg("last", NOTES_LAST);
                 let mr = Field::object("mergeRequest", &["MergeRequest"], vec![notes.into()])
                     .arg("iid", format!("${n}"));
-                let project = Field::object("project", &["Project"], vec![mr.into()])
-                    .alias(format!("m{i}"))
-                    .arg("fullPath", format!("${p}"));
-                query.root.items.push(project.into());
-                query = query.var(p, "ID!", Some(Value::from(path.as_str()))).var(
-                    n,
-                    "String!",
-                    Some(Value::from(iid.to_string())),
-                );
+                let project = Field::object("project", &["Project"], vec![mr.into()]);
+                query = push_project_alias(query, format!("m{i}"), &p, path, project)
+                    .var(n, "String!", Some(Value::from(iid.to_string())));
             }
             query
         })
@@ -729,15 +739,9 @@ pub fn merged_by_branches(projects: &[(String, Vec<String>)]) -> Vec<Query> {
                 .arg("state", "merged")
                 .arg("sourceBranches", format!("${b}"))
                 .arg("first", 100);
-                let project = Field::object("project", &["Project"], vec![mrs.into()])
-                    .alias(format!("p{i}"))
-                    .arg("fullPath", format!("${p}"));
-                query.root.items.push(project.into());
-                query = query.var(p, "ID!", Some(Value::from(path.as_str()))).var(
-                    b,
-                    "[String!]",
-                    Some(Value::from(branches.clone())),
-                );
+                let project = Field::object("project", &["Project"], vec![mrs.into()]);
+                query = push_project_alias(query, &p, &p, path, project)
+                    .var(b, "[String!]", Some(Value::from(branches.clone())));
             }
             query
         })
@@ -1501,9 +1505,8 @@ pub fn missing_paths(requested: &[String], found: &[ProjectNode]) -> Vec<String>
 mod tests {
     use super::*;
     use crate::gitlab::glab::fake::FakeCall;
-    use crate::gitlab::glab::{
-        EnvValue, FakeGlab, FakeReply, GatedRunner, GlabError, GlabOutput, HttpHead, StdinBody,
-    };
+    use crate::gitlab::glab::{EnvValue, FakeReply, GlabError, StdinBody};
+    use crate::gitlab::test_support::{gated, gql as reply, strings};
     use std::time::Duration;
 
     const HOST: &str = "gitlab.example.com";
@@ -1527,32 +1530,6 @@ mod tests {
 
     fn data(fixture: &str) -> Value {
         json(fixture)["data"].clone()
-    }
-
-    fn strings(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// Antwort von `glab api graphql -i`: HTTP 200, bei `errors` Exit 1.
-    fn reply(body: &str) -> FakeReply {
-        let failed = body.contains("\"errors\"");
-        FakeReply::output(GlabOutput {
-            exit: i32::from(failed),
-            http: Some(HttpHead {
-                code: 200,
-                reason: "OK".to_string(),
-            }),
-            body: body.to_string(),
-            stderr_tail: if failed {
-                "glab: GraphQL-Fehler".to_string()
-            } else {
-                String::new()
-            },
-        })
-    }
-
-    fn gated() -> GatedRunner<FakeGlab> {
-        GatedRunner::new(FakeGlab::new())
     }
 
     /// Abfragetext und Variablen eines protokollierten Aufrufs.

@@ -1154,6 +1154,7 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gitlab::test_support::{gated, secret};
     use std::thread;
 
     const TOKEN: &str = "glpat-Geheim0815xyz";
@@ -1177,14 +1178,6 @@ mod tests {
             body: String::new(),
             stderr_tail: stderr.to_string(),
         }
-    }
-
-    fn gated() -> GatedRunner<FakeGlab> {
-        GatedRunner::new(FakeGlab::new())
-    }
-
-    fn secret(s: &str) -> SecretString {
-        SecretString::new(s.to_string())
     }
 
     // --- Step 1: classify und `-i`-Parser -------------------------------

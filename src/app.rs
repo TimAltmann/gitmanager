@@ -156,6 +156,31 @@ pub fn capped_file_count_label(count: usize, truncated: bool) -> String {
     }
 }
 
+/// Roter Fehler-Frame für Dialoge und Fehlerbanner; nur der Innenabstand
+/// unterscheidet sich zwischen den beiden Aufrufern.
+fn error_frame(inner_margin: egui::Margin) -> egui::Frame {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(255, 235, 235))
+        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 100, 100)))
+        .corner_radius(6)
+        .inner_margin(inner_margin)
+}
+
+/// „Error: …“ / „Fehler: …“ mit der gemeinsamen roten Schrift.
+fn error_label(lang: Language, msg: &str, size: f32) -> RichText {
+    RichText::new(format!(
+        "{}: {}",
+        if lang == Language::En {
+            "Error"
+        } else {
+            "Fehler"
+        },
+        msg
+    ))
+    .size(size)
+    .color(Color32::from_rgb(160, 40, 40))
+}
+
 /// Statusleiste der Repo-Liste, solange ein Lauf die Refs hält. Beim
 /// Auschecken eines MR (K1, auch während eines minutenlangen Klons)
 /// „Auschecken für !{iid} läuft …“ statt „Scanne nach Repositories…“.
@@ -458,40 +483,37 @@ pub struct MyApp {
     cleanup_ui: cleanup::CleanupUi,
 }
 
-impl MyApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        #[cfg(target_os = "windows")]
-        if !crate::dpi_fix::install(cc) {
-            eprintln!("DPI-Korrektur für das Hauptfenster nicht installiert");
-        }
-        let config = AppConfig::load();
-        // Startup-Sync: Run-Key mit aktueller exe synchronisieren (falls exe verschoben).
-        // Best effort — kein Start-Abbruch bei Registry-Fehlern.
-        // M1: set() selbst ist idempotent (kein Rewrite wenn Wert identisch),
-        // daher hier kein is_enabled-Vorabcheck nötig.
-        if let Err(e) = crate::autostart::apply_autostart(config.autostart) {
-            eprintln!("Autostart-Sync fehlgeschlagen: {e:#}");
-        }
-        // M1: --minimized (Autostart) startet versteckt im Tray.
-        // N6: gleiche Entscheidung wie main() (Single Source).
-        let start_minimized = crate::start_minimized_flag();
-        crate::ui::theme::apply_theme(&cc.egui_ctx, &config.theme);
-        // SVG Icons loader für egui_extras
-        egui_extras::install_image_loaders(&cc.egui_ctx);
+/// `with_channels` liefert die App zusammen mit den Sendern der beiden
+/// Hintergrund-Threads zurück.
+type AppWithSenders = (
+    MyApp,
+    Sender<Result<AppConfig, String>>,
+    Sender<Result<Option<crate::updater::UpdateInfo>, String>>,
+);
 
-        let (tx, rx) = mpsc::channel();
+impl MyApp {
+    /// Gemeinsamer Konstruktor für `new` und die Test-App: übergeben werden
+    /// nur die bewusst unterschiedlichen Werte (Fenster-/Fetch-Zustand,
+    /// Aktivitätsquelle, glab und Kanäle). Die Kanäle gehören zur App; die
+    /// beiden Sender für Hintergrund-Threads gibt dieser Helper zurück.
+    fn with_channels(
+        config: AppConfig,
+        window_visible: bool,
+        last_auto_fetch: Option<std::time::Instant>,
+        mr_activity: mr_activity::MrActivityState,
+        glab: Arc<dyn GlabRunner>,
+        glab_program: String,
+        glab_factory: GlabFactory,
+    ) -> AppWithSenders {
+        let (scan_tx, scan_rx) = mpsc::channel();
         let (launch_err_tx, launch_err_rx) = mpsc::channel();
         let (config_update_tx, config_update_rx) = mpsc::channel::<Result<AppConfig, String>>();
         let (update_tx, update_rx) =
             mpsc::channel::<Result<Option<crate::updater::UpdateInfo>, String>>();
         let (mr_tx, mr_rx) = mpsc::channel();
         let (mr_settings_tx, mr_settings_rx) = mpsc::channel();
-        let glab_factory = mr_settings::system_glab_factory();
-        let glab_program = config.merge_requests.glab_program.clone();
-        let glab = glab_factory(&glab_program);
         let mr_view = MrViewState::new(&config.merge_requests);
-
-        let mut app = Self {
+        let app = Self {
             config,
             repos: Vec::new(),
             git_busy: GitBusy::Idle,
@@ -499,8 +521,8 @@ impl MyApp {
             error_after_scan: None,
             show_settings: false,
             settings_state: None,
-            scan_tx: tx,
-            scan_rx: rx,
+            scan_tx,
+            scan_rx,
             launch_err_tx,
             launch_err_rx,
             config_update_rx,
@@ -525,11 +547,9 @@ impl MyApp {
             #[cfg(target_os = "windows")]
             last_tray_sync: None,
             tray_dirty: false,
-            window_visible: !start_minimized,
+            window_visible,
             should_quit: false,
-            // Task 5: direkt auf now setzen — erster Auto-Fetch erst nach Intervall,
-            // nicht sofort nach Startup-Scan (vermeidet Doppel-Fetch beim Start).
-            last_auto_fetch: Some(std::time::Instant::now()),
+            last_auto_fetch,
             auto_fetching: false,
             pending_scan: false,
             config_save_fail_streak: 0,
@@ -557,7 +577,7 @@ impl MyApp {
             mr_merged_loading: None,
             mr_merged_gen: 0,
             mr_tx,
-            mr_activity: mr_activity::MrActivityState::load_default(),
+            mr_activity,
             mr_rx,
             mr_view,
             mr_glab_missing: false,
@@ -576,6 +596,43 @@ impl MyApp {
             remove_ui: Default::default(),
             cleanup_ui: Default::default(),
         };
+        (app, config_update_tx, update_tx)
+    }
+
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        #[cfg(target_os = "windows")]
+        if !crate::dpi_fix::install(cc) {
+            eprintln!("DPI-Korrektur für das Hauptfenster nicht installiert");
+        }
+        let config = AppConfig::load();
+        // Startup-Sync: Run-Key mit aktueller exe synchronisieren (falls exe verschoben).
+        // Best effort — kein Start-Abbruch bei Registry-Fehlern.
+        // M1: set() selbst ist idempotent (kein Rewrite wenn Wert identisch),
+        // daher hier kein is_enabled-Vorabcheck nötig.
+        if let Err(e) = crate::autostart::apply_autostart(config.autostart) {
+            eprintln!("Autostart-Sync fehlgeschlagen: {e:#}");
+        }
+        // M1: --minimized (Autostart) startet versteckt im Tray.
+        // N6: gleiche Entscheidung wie main() (Single Source).
+        let start_minimized = crate::start_minimized_flag();
+        crate::ui::theme::apply_theme(&cc.egui_ctx, &config.theme);
+        // SVG Icons loader für egui_extras
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+
+        let glab_factory = mr_settings::system_glab_factory();
+        let glab_program = config.merge_requests.glab_program.clone();
+        let glab = glab_factory(&glab_program);
+        let (mut app, config_update_tx, update_tx) = Self::with_channels(
+            config,
+            !start_minimized,
+            // Task 5: direkt auf now setzen — erster Auto-Fetch erst nach Intervall,
+            // nicht sofort nach Startup-Scan (vermeidet Doppel-Fetch beim Start).
+            Some(std::time::Instant::now()),
+            mr_activity::MrActivityState::load_default(),
+            glab,
+            glab_program,
+            glab_factory,
+        );
         #[cfg(target_os = "windows")]
         {
             // Setup tray icon - custom popup on left/right click, no native menu.
@@ -2507,25 +2564,9 @@ impl MyApp {
                     ui.add_space(8.0);
                 }
                 if let Some(err) = &dlg.error {
-                    let frame = egui::Frame::new()
-                        .fill(Color32::from_rgb(255, 235, 235))
-                        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 100, 100)))
-                        .corner_radius(6)
-                        .inner_margin(egui::Margin::symmetric(8, 6));
+                    let frame = error_frame(egui::Margin::symmetric(8, 6));
                     frame.show(ui, |ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "{}: {}",
-                                if lang == Language::En {
-                                    "Error"
-                                } else {
-                                    "Fehler"
-                                },
-                                err
-                            ))
-                            .size(11.0)
-                            .color(Color32::from_rgb(160, 40, 40)),
-                        );
+                        ui.label(error_label(lang, err, 11.0));
                     });
                     ui.add_space(8.0);
                 }
@@ -2648,11 +2689,7 @@ impl MyApp {
         };
         let lang = self.config.language;
         let mut do_clear = false;
-        let frame = egui::Frame::new()
-            .fill(Color32::from_rgb(255, 235, 235))
-            .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(220, 100, 100)))
-            .corner_radius(6)
-            .inner_margin(egui::Margin::symmetric(10, 8));
+        let frame = error_frame(egui::Margin::symmetric(10, 8));
         frame.show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add(
@@ -2660,19 +2697,7 @@ impl MyApp {
                         .fit_to_exact_size(Vec2::splat(16.0))
                         .tint(Color32::from_rgb(160, 40, 40)),
                 );
-                ui.label(
-                    RichText::new(format!(
-                        "{}: {}",
-                        if lang == Language::En {
-                            "Error"
-                        } else {
-                            "Fehler"
-                        },
-                        err_msg
-                    ))
-                    .size(12.0)
-                    .color(Color32::from_rgb(160, 40, 40)),
-                );
+                ui.label(error_label(lang, &err_msg, 12.0));
                 if ui
                     .add(egui::Button::image(
                         egui::Image::new(ICON_CROSS)
@@ -3124,101 +3149,21 @@ mod tests {
 
     /// Wie `test_app` mit eigenem Runner (Antworten vorbereiten, Aufrufe prüfen).
     pub(super) fn test_app_with_glab(glab: Arc<dyn GlabRunner>) -> MyApp {
-        let (scan_tx, scan_rx) = mpsc::channel();
-        let (launch_err_tx, launch_err_rx) = mpsc::channel();
-        let (_config_update_tx, config_update_rx) = mpsc::channel();
-        let (_update_tx, update_rx) = mpsc::channel();
-        let (mr_tx, mr_rx) = mpsc::channel();
-        let (mr_settings_tx, mr_settings_rx) = mpsc::channel();
         let config = AppConfig::default();
-        let mr_view = MrViewState::new(&config.merge_requests);
         let glab_program = config.merge_requests.glab_program.clone();
         // Jedes Programm landet beim selben `FakeGlab`
         let fake = Arc::clone(&glab);
         let glab_factory: GlabFactory = Box::new(move |_| Arc::clone(&fake));
-        MyApp {
+        let (app, _config_update_tx, _update_tx) = MyApp::with_channels(
             config,
-            repos: Vec::new(),
-            git_busy: GitBusy::Idle,
-            error: None,
-            error_after_scan: None,
-            show_settings: false,
-            settings_state: None,
-            scan_tx,
-            scan_rx,
-            launch_err_tx,
-            launch_err_rx,
-            config_update_rx,
-            update_rx,
-            update_info: None,
-            update_error: None,
-            show_update_dialog: false,
-            status_message: None,
-            status_message_time: None,
-            branch_dialog: None,
-            pending_branch_switches: Vec::new(),
-            last_window_size: [0.0; 2],
-            top_bar_collapsed: false,
-            #[cfg(target_os = "windows")]
-            tray_icon: None,
-            #[cfg(target_os = "windows")]
-            tray_shared: None,
-            #[cfg(target_os = "windows")]
-            tray_action_rx: None,
-            #[cfg(target_os = "windows")]
-            tray_service_tray_rx: None,
-            #[cfg(target_os = "windows")]
-            last_tray_sync: None,
-            tray_dirty: false,
-            window_visible: true,
-            should_quit: false,
-            last_auto_fetch: None,
-            auto_fetching: false,
-            pending_scan: false,
-            config_save_fail_streak: 0,
-            config_save_pending: false,
-            last_config_save: None,
-            repo_sort_dirty: true,
-            main_view: MainView::Repos,
-            claude: claude_sessions::ClaudeViewState::new(),
+            true,
+            None,
+            mr_activity::MrActivityState::default(),
             glab,
             glab_program,
             glab_factory,
-            glab_hosts: Vec::new(),
-            mr_hosts: HostMap::default(),
-            mr_locals: Vec::new(),
-            mr_clones: Default::default(),
-            mr_snapshot: None,
-            mr_loading: false,
-            mr_pending_refresh: false,
-            mr_refresh_after_scan: false,
-            mr_last_refresh: None,
-            mr_auth_epoch: 0,
-            mr_discovering: false,
-            mr_more_pending: 0,
-            mr_merged: None,
-            mr_merged_loading: None,
-            mr_merged_gen: 0,
-            mr_tx,
-            mr_activity: mr_activity::MrActivityState::default(),
-            mr_rx,
-            mr_view,
-            mr_glab_missing: false,
-            mr_glab_error: None,
-            mr_switch: None,
-            pending_after_checkout: None,
-            mr_notice: None,
-            repo_highlight: None,
-            repo_mrs: Default::default(),
-            mr_rediscover: Default::default(),
-            mr_settings_tx,
-            mr_settings_rx,
-            mr_settings: MrSettingsCache::default(),
-            worktree_ui: Default::default(),
-            pull_ui: Default::default(),
-            remove_ui: Default::default(),
-            cleanup_ui: Default::default(),
-        }
+        );
+        app
     }
 
     #[test]

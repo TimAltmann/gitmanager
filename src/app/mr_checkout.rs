@@ -796,6 +796,7 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 mod tests {
     use super::super::tests::test_app;
     use super::*;
+    use crate::app::merge_requests::tests::settle_poll;
     use crate::git::WorktreeHead;
     use crate::gitlab::remote::{GlabHost, RemoteInfo};
     use tempfile::tempdir;
@@ -883,16 +884,13 @@ mod tests {
     /// Übernimmt Scan-Ergebnisse, bis weder Auschecken noch Scan laufen
     /// (höchstens 10 s).
     fn settle(app: &mut MyApp) {
-        let ctx = egui::Context::default();
-        let until = Instant::now() + Duration::from_secs(10);
-        loop {
-            app.poll_scan(&ctx);
-            if !app.git_busy.holds_refs() {
-                return;
-            }
-            assert!(Instant::now() < until, "Checkout-Worker hängt");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        settle_poll(
+            app,
+            10,
+            "Checkout-Worker hängt",
+            |app, ctx| app.poll_scan(ctx),
+            |app| app.git_busy.holds_refs(),
+        );
     }
 
     /// Upstream mit `main` und dem MR-Branch `feature/x` (ein Commit

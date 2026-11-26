@@ -3000,6 +3000,53 @@ fn effective_tray_order(draft: &AppConfig) -> Vec<String> {
     normalize_icon_order(&draft.tray_icons.icon_order, &all, true)
 }
 
+/// Limit slider + drag value + current-value label + italic summary,
+/// shared by the tray-repo and tray-branch limits.
+fn tray_limit_control(
+    ui: &mut egui::Ui,
+    value: &mut usize,
+    limit_label: &str,
+    direct_label: &str,
+    slider_text: &str,
+    summary: impl FnOnce(usize) -> String,
+) {
+    ui.horizontal(|ui| {
+        ui.label(limit_label);
+        let mut limit = *value;
+        if limit < 5 {
+            limit = 5;
+        }
+        let slider = egui::Slider::new(&mut limit, 5..=50)
+            .text(slider_text)
+            .step_by(1.0);
+        if ui.add(slider).changed() {
+            *value = limit.clamp(5, 50);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(direct_label);
+        let mut l = *value;
+        if ui
+            .add(egui::DragValue::new(&mut l).range(5..=50).speed(1.0))
+            .changed()
+        {
+            *value = l.clamp(5, 50);
+        }
+        ui.label(
+            RichText::new(format!("(aktuell: {})", *value))
+                .size(11.0)
+                .color(Color32::from_rgb(120, 120, 120)),
+        );
+    });
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(summary(*value))
+            .size(10.0)
+            .color(Color32::from_rgb(120, 120, 120))
+            .italics(),
+    );
+}
+
 fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
     let lang = state.draft.language;
     ui.label(
@@ -3059,43 +3106,18 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
         .color(Color32::from_rgb(100, 100, 100)),
     );
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label("Limit:");
-        let mut limit = state.draft.tray_icons.max_display;
-        if limit < 5 {
-            limit = 5;
-        }
-        let slider = egui::Slider::new(&mut limit, 5..=50)
-            .text("Repos")
-            .step_by(1.0);
-        if ui.add(slider).changed() {
-            state.draft.tray_icons.max_display = limit.clamp(5, 50);
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label("Oder direkt:");
-        let mut l = state.draft.tray_icons.max_display;
-        if ui
-            .add(egui::DragValue::new(&mut l).range(5..=50).speed(1.0))
-            .changed()
-        {
-            state.draft.tray_icons.max_display = l.clamp(5, 50);
-        }
-        ui.label(
-            RichText::new(format!("(aktuell: {})", state.draft.tray_icons.max_display))
-                .size(11.0)
-                .color(Color32::from_rgb(120, 120, 120)),
-        );
-    });
-    ui.add_space(4.0);
-    ui.label(
-        RichText::new(format!(
-            "Zeigt bis zu {} Repos im Tray-Popup. Weitere im Hauptfenster.",
-            state.draft.tray_icons.max_display
-        ))
-        .size(10.0)
-        .color(Color32::from_rgb(120, 120, 120))
-        .italics(),
+    tray_limit_control(
+        ui,
+        &mut state.draft.tray_icons.max_display,
+        "Limit:",
+        "Oder direkt:",
+        "Repos",
+        |v| {
+            format!(
+                "Zeigt bis zu {} Repos im Tray-Popup. Weitere im Hauptfenster.",
+                v
+            )
+        },
     );
 
     ui.add_space(12.0);
@@ -3237,44 +3259,15 @@ fn show_tray_icons_tab(ui: &mut egui::Ui, state: &mut SettingsState) {
             .color(Color32::from_rgb(100, 100, 100)),
     );
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label(tr(lang, "tray_limit_label"));
-        let mut limit = state.draft.tray_branch_limit;
-        if limit < 5 {
-            limit = 5;
-        }
-        let slider = egui::Slider::new(&mut limit, 5..=50)
-            .text("Branches")
-            .step_by(1.0);
-        if ui.add(slider).changed() {
-            state.draft.tray_branch_limit = limit.clamp(5, 50);
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label(tr(lang, "tray_direct_label"));
-        let mut l = state.draft.tray_branch_limit;
-        if ui
-            .add(egui::DragValue::new(&mut l).range(5..=50).speed(1.0))
-            .changed()
-        {
-            state.draft.tray_branch_limit = l.clamp(5, 50);
-        }
-        ui.label(
-            RichText::new(format!("(aktuell: {})", state.draft.tray_branch_limit))
-                .size(11.0)
-                .color(Color32::from_rgb(120, 120, 120)),
-        );
-    });
-    ui.add_space(4.0);
-    ui.label(
-        RichText::new(crate::i18n::tr_fmt(
-            lang,
-            "tray_branch_limit_summary",
-            &[&state.draft.tray_branch_limit.to_string()],
-        ))
-        .size(10.0)
-        .color(Color32::from_rgb(120, 120, 120))
-        .italics(),
+    let limit_label = tr(lang, "tray_limit_label");
+    let direct_label = tr(lang, "tray_direct_label");
+    tray_limit_control(
+        ui,
+        &mut state.draft.tray_branch_limit,
+        &limit_label,
+        &direct_label,
+        "Branches",
+        |v| crate::i18n::tr_fmt(lang, "tray_branch_limit_summary", &[&v.to_string()]),
     );
     ui.add_space(8.0);
     ui.separator();

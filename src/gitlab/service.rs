@@ -467,6 +467,22 @@ fn parse_config_host_keys(text: &str) -> Vec<String> {
 
 // --- Abruf ----------------------------------------------------------------
 
+/// glab fehlt oder ist zu alt: weitere Aufrufe wären zwecklos.
+fn unusable_glab(kind: &GlabErrorKind) -> bool {
+    matches!(kind, GlabErrorKind::NotInstalled | GlabErrorKind::TooOld(_))
+}
+
+/// Threads eines `scope` joinen; Panics der Worker weiterreichen.
+fn join_workers<'scope, T>(workers: Vec<std::thread::ScopedJoinHandle<'scope, T>>) -> Vec<T> {
+    workers
+        .into_iter()
+        .map(|w| {
+            w.join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
+        .collect()
+}
+
 /// Abruf aller GitLab-Hosts (E16, E20): je Host Dashboard und Erwähnungen
 /// (höchstens drei Seiten), mit `include_uninvolved` auch „Nicht beteiligt“
 /// für die einbezogenen lokalen Projekte. Hosts laufen parallel, je Host
@@ -483,7 +499,7 @@ pub fn fetch_snapshot(
     let mut result = MrFetchResult::default();
     if !hosts.gitlab_hosts.is_empty() {
         match glab_version(runner) {
-            Err(kind @ (GlabErrorKind::NotInstalled | GlabErrorKind::TooOld(_))) => {
+            Err(kind) if unusable_glab(&kind) => {
                 result.glab_error = Some(kind);
             }
             // Version unlesbar: die Abfragen zeigen selbst, ob glab geht
@@ -545,13 +561,7 @@ fn fetch_hosts(
                 })
             })
             .collect();
-        workers
-            .into_iter()
-            .map(|w| {
-                w.join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
-            .collect()
+        join_workers(workers)
     });
     done.into_iter()
         .map(|(raw, schema)| {
@@ -749,13 +759,7 @@ pub fn fetch_merged(
                 })
             })
             .collect();
-        workers
-            .into_iter()
-            .map(|w| {
-                w.join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
-            .collect()
+        join_workers(workers)
     })
 }
 
@@ -1061,7 +1065,7 @@ fn probe_with(
     };
     match version {
         Ok(version) => probe.glab_version = Some(version),
-        Err(kind @ (GlabErrorKind::NotInstalled | GlabErrorKind::TooOld(_))) => {
+        Err(kind) if unusable_glab(&kind) => {
             probe.error = Some(kind);
             return probe;
         }
@@ -1742,7 +1746,7 @@ pub fn save_token(
     protocol: Protocol,
 ) -> Result<SavedWhere, GlabErrorKind> {
     let version = glab_version(runner);
-    if let Err(kind @ (GlabErrorKind::NotInstalled | GlabErrorKind::TooOld(_))) = &version {
+    if let Some(kind) = version.as_ref().err().filter(|kind| unusable_glab(kind)) {
         return Err(kind.clone());
     }
     let check = check_token(runner, host, &token, protocol, &[])?;
@@ -1832,12 +1836,12 @@ mod tests {
     use super::*;
     use crate::gitlab::glab::fake::FakeCall;
     use crate::gitlab::glab::{
-        CallKind, EnvValue, FakeGlab, FakeReply, GatedRunner, GlabError, GlabOutput, GlabRequest,
-        HttpHead, StdinBody,
+        CallKind, EnvValue, FakeGlab, FakeReply, GatedRunner, GlabError, GlabRequest, StdinBody,
     };
     use crate::gitlab::graphql::SchemaError;
     use crate::gitlab::model::{MrPart, MyReview};
     use crate::gitlab::remote::HostTarget;
+    use crate::gitlab::test_support::{gated, gql, secret, strings};
     use crate::gitlab::time::parse_date;
     use serde_json::{json, Value};
     use std::path::PathBuf;
@@ -1870,38 +1874,8 @@ mod tests {
     const BAD_TOKEN: &str = r#"{"error":"invalid_token","error_description":"Bad Access Token."}"#;
     const NOT_FOUND: &str = r#"{"message":"404 Project Not Found"}"#;
 
-    fn gated() -> GatedRunner<FakeGlab> {
-        GatedRunner::new(FakeGlab::new())
-    }
-
-    fn strings(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
-    fn secret(s: &str) -> SecretString {
-        SecretString::new(s.to_string())
-    }
-
     fn version_reply(v: &str) -> FakeReply {
         FakeReply::stdout(0, &format!("glab {v} (a300719)\n"), "")
-    }
-
-    /// Antwort von `glab api graphql -i`: HTTP 200, bei `errors` Exit 1.
-    fn gql(body: &str) -> FakeReply {
-        let failed = body.contains("\"errors\"");
-        FakeReply::output(GlabOutput {
-            exit: i32::from(failed),
-            http: Some(HttpHead {
-                code: 200,
-                reason: "OK".to_string(),
-            }),
-            body: body.to_string(),
-            stderr_tail: if failed {
-                "glab: GraphQL-Fehler".to_string()
-            } else {
-                String::new()
-            },
-        })
     }
 
     /// Erwähnungen aus der Fixture, ohne weitere Seite.

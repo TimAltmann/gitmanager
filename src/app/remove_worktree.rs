@@ -310,6 +310,7 @@ impl MyApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::cleanup::tests::git;
     use crate::app::tests::test_app;
     use crate::git::{BranchSafety, RepoInfo};
     use std::path::{Path, PathBuf};
@@ -349,17 +350,6 @@ mod tests {
         assert_eq!(d.branch_to_delete(), Some(("feat", true)));
         d.delete_branch = false;
         assert_eq!(d.branch_to_delete(), None);
-    }
-
-    fn git(dir: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{args:?}: {out:?}");
     }
 
     #[test]

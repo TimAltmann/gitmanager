@@ -445,16 +445,17 @@ fn resolve_program(program: &str) -> Option<PathBuf> {
 mod tests {
     use super::super::tests::test_app_with_glab;
     use super::*;
+    use crate::app::merge_requests::tests::{
+        config_get, is_version, no_glab_config, push_signed_in, repo, settle_poll, version_reply,
+    };
     use crate::config::HostAlias;
-    use crate::git::RepoInfo;
     use crate::gitlab::glab::fake::FakeGlab;
     use crate::gitlab::glab::{CallKind, FakeReply, GlabError, GlabRequest, StdinBody};
-    use crate::gitlab::remote::{GlabHost, RemoteInfo};
+    use crate::gitlab::remote::GlabHost;
     use crate::gitlab::secret::SecretString;
     use crate::gitlab::service::Protocol;
     use crate::i18n::{tr, tr_fmt, Language};
     use crate::ui::settings::SettingsState;
-    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     const HOST: &str = "gitlab.example.com";
@@ -467,50 +468,10 @@ mod tests {
 
     fn fake_app() -> (MyApp, Fake) {
         let glab: Fake = Arc::new(GatedRunner::new(FakeGlab::new()));
-        crate::app::merge_requests::tests::no_glab_config(glab.inner());
+        no_glab_config(glab.inner());
         let mut app = test_app_with_glab(glab.clone());
         app.config.language = Language::De;
         (app, glab)
-    }
-
-    fn repo(name: &str, url: &str) -> RepoInfo {
-        let mut repo = RepoInfo::new(
-            PathBuf::from(format!("/tmp/gm-mrs-test/{name}")),
-            "main".to_string(),
-            false,
-            false,
-        );
-        repo.remotes = vec![RemoteInfo::new("origin", url)];
-        repo
-    }
-
-    fn is_version(r: &GlabRequest) -> bool {
-        r.args.first().is_some_and(|a| a == "version")
-    }
-
-    fn version_reply() -> FakeReply {
-        FakeReply::stdout(0, "glab 1.123.0 (a300719)\n", "")
-    }
-
-    fn config_get(host: &'static str, key: &'static str) -> impl Fn(&GlabRequest) -> bool + Send {
-        move |r: &GlabRequest| {
-            r.args.first().is_some_and(|a| a == "config")
-                && r.args.last().is_some_and(|k| k == key)
-                && r.host_key.as_deref() == Some(host)
-        }
-    }
-
-    /// Erkennung: `host` ist bei glab angemeldet.
-    fn push_signed_in(fake: &FakeGlab, host: &'static str) {
-        fake.push_when(
-            config_get(host, "user"),
-            FakeReply::stdout(0, "taltmann\n", ""),
-        );
-        fake.push_when(config_get(host, "ssh_host"), FakeReply::stdout(0, "", ""));
-        fake.push_when(
-            config_get(host, "api_protocol"),
-            FakeReply::stdout(0, "", ""),
-        );
     }
 
     /// ACCESS nur mit `currentUser` (ohne Projekte).
@@ -543,20 +504,22 @@ mod tests {
     /// Ergebnisse übernehmen, bis kein Einstellungs- oder MR-Worker mehr
     /// läuft (höchstens 5 s).
     fn settle(app: &mut MyApp) {
-        let ctx = egui::Context::default();
-        let until = Instant::now() + Duration::from_secs(5);
-        loop {
-            app.poll_mr_settings(&ctx);
-            app.poll_mr(&ctx);
-            let settings_busy = app.mr_settings.token_busy.is_some()
-                || app.mr_settings.glab_checking
-                || !app.mr_settings.probing.is_empty();
-            if !settings_busy && !app.mr_loading && !app.mr_discovering {
-                return;
-            }
-            assert!(Instant::now() < until, "Worker hängt");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        settle_poll(
+            app,
+            5,
+            "Worker hängt",
+            |app, ctx| {
+                app.poll_mr_settings(ctx);
+                app.poll_mr(ctx);
+            },
+            |app| {
+                app.mr_settings.token_busy.is_some()
+                    || app.mr_settings.glab_checking
+                    || !app.mr_settings.probing.is_empty()
+                    || app.mr_loading
+                    || app.mr_discovering
+            },
+        );
     }
 
     fn save_output(host: &str) -> MrSettingsOutput {

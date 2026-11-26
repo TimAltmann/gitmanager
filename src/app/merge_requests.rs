@@ -1206,7 +1206,7 @@ pub(super) mod tests {
         app.update_mr_hosts();
     }
 
-    fn repo(name: &str, url: &str) -> RepoInfo {
+    pub(crate) fn repo(name: &str, url: &str) -> RepoInfo {
         let mut repo = RepoInfo::new(
             PathBuf::from(format!("/tmp/gm-mr-test/{name}")),
             "main".to_string(),
@@ -1225,11 +1225,11 @@ pub(super) mod tests {
         }
     }
 
-    fn is_version(r: &GlabRequest) -> bool {
+    pub(crate) fn is_version(r: &GlabRequest) -> bool {
         r.args.first().is_some_and(|a| a == "version")
     }
 
-    fn version_reply() -> FakeReply {
+    pub(crate) fn version_reply() -> FakeReply {
         FakeReply::stdout(0, "glab 1.123.0 (a300719)\n", "")
     }
 
@@ -1237,7 +1237,7 @@ pub(super) mod tests {
         FakeReply::error(GlabError::NotFound)
     }
 
-    fn config_get(host: &'static str, key: &'static str) -> impl Fn(&GlabRequest) -> bool + Send {
+    pub(crate) fn config_get(host: &'static str, key: &'static str) -> impl Fn(&GlabRequest) -> bool + Send {
         move |r: &GlabRequest| {
             r.args.first().is_some_and(|a| a == "config")
                 && r.args.last().is_some_and(|k| k == key)
@@ -1246,7 +1246,7 @@ pub(super) mod tests {
     }
 
     /// Erkennung: `host` ist bei glab angemeldet.
-    fn push_signed_in(fake: &FakeGlab, host: &'static str) {
+    pub(crate) fn push_signed_in(fake: &FakeGlab, host: &'static str) {
         fake.push_when(
             config_get(host, "user"),
             FakeReply::stdout(0, "taltmann\n", ""),
@@ -1279,22 +1279,41 @@ pub(super) mod tests {
         hosts
     }
 
-    /// Übernimmt Ergebnisse, bis kein MR-Worker mehr läuft (höchstens 5 s).
-    fn settle(app: &mut MyApp) {
+    /// Gemeinsamer Polling-Rahmen für Worker-Tests: `poll` ablaufen lassen,
+    /// bis `busy` false ist (höchstens `secs` Sekunden).
+    pub(crate) fn settle_poll(
+        app: &mut MyApp,
+        secs: u64,
+        msg: &str,
+        mut poll: impl FnMut(&mut MyApp, &egui::Context),
+        busy: impl Fn(&MyApp) -> bool,
+    ) {
         let ctx = egui::Context::default();
-        let until = Instant::now() + Duration::from_secs(5);
+        let until = Instant::now() + Duration::from_secs(secs);
         loop {
-            app.poll_mr(&ctx);
-            if !app.mr_loading
-                && !app.mr_discovering
-                && app.mr_more_pending == 0
-                && app.mr_merged_loading.is_none()
-            {
+            poll(app, &ctx);
+            if !busy(app) {
                 return;
             }
-            assert!(Instant::now() < until, "MR-Worker hängt");
+            assert!(Instant::now() < until, "{msg}");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// Übernimmt Ergebnisse, bis kein MR-Worker mehr läuft (höchstens 5 s).
+    fn settle(app: &mut MyApp) {
+        settle_poll(
+            app,
+            5,
+            "MR-Worker hängt",
+            |app, ctx| app.poll_mr(ctx),
+            |app| {
+                app.mr_loading
+                    || app.mr_discovering
+                    || app.mr_more_pending != 0
+                    || app.mr_merged_loading.is_some()
+            },
+        );
     }
 
     fn scan(app: &mut MyApp, repos: Vec<RepoInfo>) {
@@ -1973,10 +1992,23 @@ pub(super) mod tests {
         assert!(calls.iter().all(|c| c.request.args[0] == "api"));
     }
 
-    #[test]
-    fn merged_loads_on_toggle_and_drops_stale_results() {
-        use crate::gitlab::remote::LocalProject;
+    /// Eine Seite „Gemergt“ mit MR !7 in `group/app`.
+    fn merged_page() -> String {
         use crate::gitlab::time::format_rfc3339;
+        serde_json::json!({ "data": { "currentUser": { "username": "taltmann",
+            "authoredMergeRequests": {
+                "count": 1,
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [{ "id": "gid://gitlab/MergeRequest/7", "iid": "7",
+                            "project": { "fullPath": "group/app" },
+                            "mergedAt": format_rfc3339(now_unix() - 3600) }]
+            } } } })
+        .to_string()
+    }
+
+    /// App mit Host und lokalem Projekt für den „Gemergt“-Abruf.
+    fn merged_app() -> (MyApp, Fake) {
+        use crate::gitlab::remote::LocalProject;
         let (mut app, glab) = fake_app();
         app.mr_snapshot = Some(Box::new(MrSnapshot {
             per_host: vec![host_status(HOST)],
@@ -1988,15 +2020,13 @@ pub(super) mod tests {
             repos: Vec::new(),
             included: true,
         }];
-        let page = serde_json::json!({ "data": { "currentUser": { "username": "taltmann",
-            "authoredMergeRequests": {
-                "count": 1,
-                "pageInfo": { "hasNextPage": false, "endCursor": null },
-                "nodes": [{ "id": "gid://gitlab/MergeRequest/7", "iid": "7",
-                            "project": { "fullPath": "group/app" },
-                            "mergedAt": format_rfc3339(now_unix() - 3600) }]
-            } } } });
-        glab.inner().push(FakeReply::http(200, &page.to_string()));
+        (app, glab)
+    }
+
+    #[test]
+    fn merged_loads_on_toggle_and_drops_stale_results() {
+        let (mut app, glab) = merged_app();
+        glab.inner().push(FakeReply::http(200, &merged_page()));
         app.mr_view.mine_merged = true;
         app.mr_view.merged_days = 7;
         let actions = MrViewActions {
@@ -2029,30 +2059,10 @@ pub(super) mod tests {
     /// Ergebnis für 30 Tage wird verworfen, geladen und gezeigt werden 90.
     #[test]
     fn merged_period_change_while_loading_loads_new_period() {
-        use crate::gitlab::remote::LocalProject;
-        use crate::gitlab::time::format_rfc3339;
-        let (mut app, glab) = fake_app();
-        app.mr_snapshot = Some(Box::new(MrSnapshot {
-            per_host: vec![host_status(HOST)],
-            ..MrSnapshot::default()
-        }));
-        app.mr_locals = vec![LocalProject {
-            host_key: HOST.to_string(),
-            full_path: "group/app".to_string(),
-            repos: Vec::new(),
-            included: true,
-        }];
-        let page = serde_json::json!({ "data": { "currentUser": { "username": "taltmann",
-            "authoredMergeRequests": {
-                "count": 1,
-                "pageInfo": { "hasNextPage": false, "endCursor": null },
-                "nodes": [{ "id": "gid://gitlab/MergeRequest/7", "iid": "7",
-                            "project": { "fullPath": "group/app" },
-                            "mergedAt": format_rfc3339(now_unix() - 3600) }]
-            } } } });
+        let (mut app, glab) = merged_app();
         // Eine Antwort je Abruf (30 und 90 Tage)
         for _ in 0..2 {
-            glab.inner().push(FakeReply::http(200, &page.to_string()));
+            glab.inner().push(FakeReply::http(200, &merged_page()));
         }
         let ctx = egui::Context::default();
         let fetch = || MrViewActions {

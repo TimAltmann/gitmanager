@@ -746,13 +746,13 @@ fn show_results(ui: &mut egui::Ui, lang: crate::i18n::Language, results: &[Clean
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::app::tests::{test_app, test_app_with_glab};
     use crate::gitlab::glab::{FakeGlab, FakeReply, GatedRunner, GlabError};
     use crate::gitlab::remote::{HostTarget, RemoteInfo};
 
-    fn git(dir: &Path, args: &[&str]) {
+    pub(in crate::app) fn git(dir: &Path, args: &[&str]) {
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
