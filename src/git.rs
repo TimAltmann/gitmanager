@@ -3232,19 +3232,8 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
     // Bei use_shell=false werden args via Command::args ohne Shell-Parsing übergeben – Zeichen wie '&' in Pfaden
     // wie "C:\Users\Tom & Jerry\app.sln" sind dann harmlos und dürfen nicht blockiert werden.
     // Bei use_shell=true wird via cmd /C gestartet und Shell-Zeichen müssen blockiert werden.
-    let shell_chars = ['&', '|', ';', '>', '<'];
     if ide.use_shell && !ide.allow_unsafe {
-        for a in &args {
-            if a.chars().any(|c| shell_chars.contains(&c)) {
-                anyhow::bail!("Ungültige Zeichen in IDE-Args (shell-Zeichen) – aktiviere allow_unsafe wenn beabsichtigt: {a}");
-            }
-        }
-        if effective_program.chars().any(|c| shell_chars.contains(&c)) {
-            anyhow::bail!(
-                "Ungültige Zeichen in IDE-Programm (shell-Zeichen) – aktiviere allow_unsafe wenn beabsichtigt: {}",
-                effective_program
-            );
-        }
+        reject_shell_chars(&args, &effective_program, false)?;
     }
 
     #[cfg(test)]
@@ -3265,17 +3254,7 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
                 // Fallback via cmd /C verwendet eine Shell – daher bei !allow_unsafe Shell-Zeichen blockieren,
                 // unabhängig von use_shell, da hier immer eine Shell involviert ist.
                 if !ide.allow_unsafe {
-                    for a in &args {
-                        if a.chars().any(|c| shell_chars.contains(&c)) {
-                            anyhow::bail!("Ungültige Zeichen in IDE-Args für Shell-Fallback (allow_unsafe erforderlich): {a}");
-                        }
-                    }
-                    if effective_program.chars().any(|c| shell_chars.contains(&c)) {
-                        anyhow::bail!(
-                            "Ungültige Zeichen in IDE-Programm für Shell-Fallback (allow_unsafe erforderlich): {}",
-                            effective_program
-                        );
-                    }
+                    reject_shell_chars(&args, &effective_program, true)?;
                 }
                 let mut shell_args = vec!["/C".to_string(), effective_program.clone()];
                 shell_args.extend(args.clone());
@@ -3307,6 +3286,28 @@ pub fn launch_ide(ide: &IdeConfig, repo_path: &Path, file: Option<&Path>) -> any
             e
         )),
     }
+}
+
+/// Shell-Zeichen in Args/Programm blockieren, bevor ein Kommando über eine
+/// Shell gestartet wird. `fallback` wählt die Meldung des `cmd /C`-Pfads;
+/// die Zeichen selbst und die Prüfung sind in beiden Fällen identisch.
+fn reject_shell_chars(args: &[String], program: &str, fallback: bool) -> anyhow::Result<()> {
+    const SHELL_CHARS: [char; 5] = ['&', '|', ';', '>', '<'];
+    for arg in args {
+        if arg.chars().any(|c| SHELL_CHARS.contains(&c)) {
+            if fallback {
+                anyhow::bail!("Ungültige Zeichen in IDE-Args für Shell-Fallback (allow_unsafe erforderlich): {arg}");
+            }
+            anyhow::bail!("Ungültige Zeichen in IDE-Args (shell-Zeichen) – aktiviere allow_unsafe wenn beabsichtigt: {arg}");
+        }
+    }
+    if program.chars().any(|c| SHELL_CHARS.contains(&c)) {
+        if fallback {
+            anyhow::bail!("Ungültige Zeichen in IDE-Programm für Shell-Fallback (allow_unsafe erforderlich): {program}");
+        }
+        anyhow::bail!("Ungültige Zeichen in IDE-Programm (shell-Zeichen) – aktiviere allow_unsafe wenn beabsichtigt: {program}");
+    }
+    Ok(())
 }
 
 /// Gemeinsames Command-Finish für alle Spawn-Helfer: working-directory,
