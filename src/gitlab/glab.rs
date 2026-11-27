@@ -687,7 +687,7 @@ impl SystemGlab {
         if let Some(path) = path {
             cmd.env("PATH", path);
         }
-        crate::git::set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
+        process::set_creation_flags(&mut cmd, CREATE_NO_WINDOW);
         cmd.spawn()
     }
 }

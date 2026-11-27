@@ -3,7 +3,7 @@
 
 use crate::claude_live::{open_matches_search, LiveStatus, OpenSession};
 use crate::claude_preview::{PreviewItem, PreviewRole};
-use crate::claude_sessions::{claude_projects_dir, session_matches_search, SessionEntry};
+use crate::claude_sessions::{session_matches_search, SessionEntry};
 use crate::config::AppConfig;
 use crate::git::SolutionFile;
 use crate::gitlab::time::relative_time;
@@ -15,21 +15,16 @@ use crate::ui::claude_anim::{
 };
 use crate::ui::search_field::search_field;
 use crate::ui::theme::mr_palette;
+use crate::ui::theme::COLOR_MUTED;
+use crate::ui::widgets::{culled, hover_outline};
 use egui::{FontId, Popup, PopupCloseBehavior, RichText, Ui, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
-const ICON_GIT_BRANCH: egui::ImageSource =
-    egui::include_image!("../../assets/icons/git-branch.svg");
-const ICON_TERMINAL: egui::ImageSource = egui::include_image!("../../assets/icons/terminal.svg");
-const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
-const ICON_CHEVRON_DOWN: egui::ImageSource =
-    egui::include_image!("../../assets/icons/chevron-down.svg");
-const ICON_STAR: egui::ImageSource = egui::include_image!("../../assets/icons/star.svg");
-const ICON_STAR_FILL: egui::ImageSource = egui::include_image!("../../assets/icons/star-fill.svg");
-const ICON_CHEVRON_UP: egui::ImageSource =
-    egui::include_image!("../../assets/icons/chevron-up.svg");
+use crate::ui::icons::{
+    ICON_CHEVRON_DOWN, ICON_CHEVRON_UP, ICON_CLAUDE, ICON_FOLDER, ICON_GIT_BRANCH, ICON_STAR,
+    ICON_STAR_FILL, ICON_TERMINAL,
+};
 
 /// Was der Nutzer in der Ansicht ausgelöst hat.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -148,7 +143,7 @@ pub fn show_claude_sessions(
                         ui.add_space(4.0);
                         for o in &open_hits {
                             let preview = Preview::of(&o.live.session_id, expanded, previews);
-                            culled(ui, open_card_id(o), |ui| {
+                            culled(ui, open_card_id(o), false, |ui| {
                                 show_open_card(ui, o, config, now_ms, preview, actions)
                             });
                             ui.add_space(6.0);
@@ -168,7 +163,7 @@ pub fn show_claude_sessions(
                         ui.add_space(4.0);
                         for e in &rest {
                             let preview = Preview::of(&e.session.id, expanded, previews);
-                            culled(ui, card_id(e), |ui| {
+                            culled(ui, card_id(e), false, |ui| {
                                 show_session_card(ui, e, config, now_secs, preview, actions)
                             });
                             ui.add_space(6.0);
@@ -191,11 +186,12 @@ fn show_empty(ui: &mut Ui, scanning: bool, lang: Language) {
         ui.label(
             RichText::new(tr(lang, "claude_none_found"))
                 .size(16.0)
-                .color(egui::Color32::from_rgb(100, 100, 100)),
+                .color(COLOR_MUTED),
         );
         ui.add_space(8.0);
-        let dir = claude_projects_dir()
-            .map(|d| d.display().to_string())
+        // Nur der Pfad, ohne Zugriff auf die Platte (läuft je Frame)
+        let dir = crate::claude_sessions::claude_config_dir()
+            .map(|d| d.join("projects").display().to_string())
             .unwrap_or_else(|| "~/.claude/projects".to_string());
         ui.label(
             RichText::new(tr_fmt(lang, "claude_none_hint", &[&dir]))
@@ -220,26 +216,6 @@ pub(crate) fn card_id(entry: &SessionEntry) -> egui::Id {
 /// Id der Klickfläche einer offenen Karte.
 pub(crate) fn open_card_id(o: &OpenSession) -> egui::Id {
     egui::Id::new(("claude_open_card", o.live.pid, &o.live.session_id))
-}
-
-/// Zeichnet eine Karte nur, wenn sie im sichtbaren Bereich liegt. Außerhalb
-/// wird lediglich ihre zuletzt gemessene Höhe freigehalten: Bei laufender
-/// Animation (20 Bilder pro Sekunde) sollen nicht hunderte Karten außerhalb
-/// des Sichtbereichs jedes Mal neu aufgebaut werden. Ohne Messwert oder nach
-/// geänderter Breite (Umbruch) wird gezeichnet und neu gemessen.
-fn culled(ui: &mut Ui, id: egui::Id, draw: impl FnOnce(&mut Ui)) {
-    let key = id.with("culled_size");
-    let width = ui.available_width();
-    let top = ui.cursor().min.y;
-    if let Some((w, h)) = ui.ctx().data(|d| d.get_temp::<(f32, f32)>(key)) {
-        let clip = ui.clip_rect();
-        if (w - width).abs() < 0.5 && (top > clip.max.y || top + h < clip.min.y) {
-            ui.allocate_space(Vec2::new(width, h));
-            return;
-        }
-    }
-    let height = ui.scope(draw).response.rect.height();
-    ui.ctx().data_mut(|d| d.insert_temp(key, (width, height)));
 }
 
 /// Karte im Stil der Repo-Karte. Die Klickfläche wird VOR dem Inhalt
@@ -358,7 +334,7 @@ fn preview_toggle(
     let tip = tr(lang, tip);
     let resp = ui.add(egui::Button::image(image)).on_hover_text(&tip);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &tip));
-    hover_frame(ui, &resp);
+    hover_outline(ui, &resp);
     if resp.clicked() {
         actions.toggle_preview = Some(id.to_string());
     }
@@ -522,7 +498,12 @@ fn status_line(ui: &mut Ui, o: &OpenSession, lang: Language, now_ms: i64) {
     let t = ui.input(|i| i.time);
     let status = o.live.status;
     let color = status_color(status);
-    let elapsed = format!("({})", format_elapsed(now_ms - o.live.status_since_ms));
+    // Ohne Zeitstempel in der Statusdatei (0) keine Dauer statt „48… h“
+    let elapsed = if o.live.status_since_ms > 0 {
+        format!("({})", format_elapsed(now_ms - o.live.status_since_ms))
+    } else {
+        String::new()
+    };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         match status {
@@ -562,20 +543,8 @@ fn status_line(ui: &mut Ui, o: &OpenSession, lang: Language, now_ms: i64) {
 /// Icon-Button wie in der Repo-Liste (Rahmen beim Überfahren).
 fn icon_button(ui: &mut Ui, image: egui::Image<'static>, tooltip: &str) -> bool {
     let resp = ui.add(egui::Button::image(image)).on_hover_text(tooltip);
-    hover_frame(ui, &resp);
+    hover_outline(ui, &resp);
     resp.clicked()
-}
-
-/// Rahmen um einen Icon-Button beim Überfahren.
-fn hover_frame(ui: &Ui, resp: &egui::Response) {
-    if resp.hovered() {
-        ui.painter().rect_stroke(
-            resp.rect,
-            egui::CornerRadius::same(4),
-            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 100, 100)),
-            egui::StrokeKind::Outside,
-        );
-    }
 }
 
 /// IDE-, Shell- und Explorer-Buttons (rechts, Reihenfolge wie in der
@@ -606,40 +575,91 @@ fn open_buttons(
     for ide in profile.visible_ides().iter().take(4).rev() {
         let tooltip = format!("{} {}", tr(lang, "open_in"), ide.display_name);
         let resp = ui
-            .add(egui::Button::image(crate::ui::repo_list::ide_image(ide)))
+            .add(egui::Button::image(crate::ui::icons::ide_image(ide, 18.0)))
             .on_hover_text(&tooltip);
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &tooltip));
-        hover_frame(ui, &resp);
+        hover_outline(ui, &resp);
         let popup_id = Popup::default_response_id(&resp);
-        if resp.clicked() && !Popup::is_id_open(ui.ctx(), popup_id) {
-            // Solutions beim Öffnen einmal suchen (Worktrees scannt der
-            // Repo-Scan nicht)
-            let solutions = if ide.no_args {
-                Vec::new()
-            } else {
-                scan_solutions_for_repo(&repo, profile)
-            };
-            if solutions.is_empty() {
+        // Im Frame des Klicks ist das Popup noch nicht offen (es öffnet
+        // weiter unten), die Suche kann aber schon fertig sein
+        let opening = resp.clicked() && !Popup::is_id_open(ui.ctx(), popup_id);
+        if opening {
+            ui.ctx().data_mut(|d| d.remove::<SlnMenu>(popup_id));
+            if ide.no_args {
                 actions.ide_open = Some((repo.clone(), ide.id.clone(), repo.clone()));
-                ui.ctx().data_mut(|d| d.remove::<SlnMenu>(popup_id));
+                ui.ctx().data_mut(|d| d.remove::<SlnSearch>(popup_id));
+            } else {
+                // Solutions beim Öffnen einmal suchen (Worktrees scannt der
+                // Repo-Scan nicht) – im Hintergrund: der Ordner kann groß
+                // sein oder auf einem langsamen Laufwerk liegen
+                let search = SlnSearch::start(ui.ctx(), &repo, profile);
+                ui.ctx().data_mut(|d| d.insert_temp(popup_id, search));
+            }
+        }
+        // Ergebnis der Suche übernehmen: ohne Solutions gleich den Ordner
+        // öffnen, sonst das Menü füllen
+        let search = ui.ctx().data(|d| d.get_temp::<SlnSearch>(popup_id));
+        if let Some(solutions) = search.as_ref().and_then(SlnSearch::take) {
+            ui.ctx().data_mut(|d| d.remove::<SlnSearch>(popup_id));
+            if !opening && !Popup::is_id_open(ui.ctx(), popup_id) {
+                // Popup inzwischen weggeklickt: das Ergebnis verfällt, die
+                // IDE startet nicht mehr hinterher
+            } else if solutions.is_empty() {
+                actions.ide_open = Some((repo.clone(), ide.id.clone(), repo.clone()));
+                Popup::close_id(ui.ctx(), popup_id);
             } else {
                 let menu = SlnMenu::new(solutions, config, &base);
                 ui.ctx().data_mut(|d| d.insert_temp(popup_id, menu));
             }
         }
-        let Some(menu) = ui.ctx().data(|d| d.get_temp::<SlnMenu>(popup_id)) else {
+        let searching = ui
+            .ctx()
+            .data(|d| d.get_temp::<SlnSearch>(popup_id))
+            .is_some();
+        let menu = ui.ctx().data(|d| d.get_temp::<SlnMenu>(popup_id));
+        if !searching && menu.is_none() {
             continue;
-        };
+        }
         Popup::from_toggle_button_response(&resp)
             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
             .align(egui::RectAlign::BOTTOM_END)
             .width(SLN_MENU_WIDTH)
             .show(|ui| {
-                if let Some(file) = sln_menu_ui(ui, &menu, config, &base, &repo, actions) {
+                let Some(menu) = &menu else {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(tr(lang, "claude_sln_searching"));
+                    });
+                    return;
+                };
+                if let Some(file) = sln_menu_ui(ui, menu, config, &base, &repo, actions) {
                     actions.ide_open = Some((repo.clone(), ide.id.clone(), file));
                     ui.close();
                 }
             });
+    }
+}
+
+/// Laufende Solution-Suche einer Menüöffnung (Worker füllt das Ergebnis).
+#[derive(Clone)]
+struct SlnSearch(std::sync::Arc<std::sync::Mutex<Option<Vec<SolutionFile>>>>);
+
+impl SlnSearch {
+    fn start(ctx: &egui::Context, repo: &Path, profile: &crate::config::LanguageProfile) -> Self {
+        let search = Self(Default::default());
+        let (slot, ctx) = (search.clone(), ctx.clone());
+        let (repo, profile) = (repo.to_path_buf(), profile.clone());
+        std::thread::spawn(move || {
+            let found = scan_solutions_for_repo(&repo, &profile);
+            *slot.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(found);
+            ctx.request_repaint();
+        });
+        search
+    }
+
+    /// Ergebnis, sobald es da ist (einmalig).
+    fn take(&self) -> Option<Vec<SolutionFile>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 }
 
@@ -973,7 +993,17 @@ mod tests {
     /// dem Label `needle`. Liefert Aktionen und alle Labels des letzten Frames.
     fn click_label(
         needle: &str,
+        draw: impl FnMut(&mut Ui, &mut ClaudeSessionActions),
+    ) -> (ClaudeSessionActions, Vec<String>) {
+        click_label_until(needle, draw, |_, _| true)
+    }
+
+    /// Wie `click_label`; zeichnet nach dem Klick weiter, bis `done` gilt
+    /// (Ergebnis eines Hintergrund-Threads, höchstens 5 s).
+    fn click_label_until(
+        needle: &str,
         mut draw: impl FnMut(&mut Ui, &mut ClaudeSessionActions),
+        done: impl Fn(&ClaudeSessionActions, &[String]) -> bool,
     ) -> (ClaudeSessionActions, Vec<String>) {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
@@ -981,7 +1011,15 @@ mod tests {
         let mut target = None;
         let mut actions = ClaudeSessionActions::default();
         let mut labels = Vec::new();
-        for frame in 0..4 {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        for frame in 0.. {
+            if frame > 3 {
+                if done(&actions, &labels) {
+                    break;
+                }
+                assert!(std::time::Instant::now() < until, "{labels:?}");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
             let mut raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1183,9 +1221,12 @@ mod tests {
         o.repo_path = Some(dir.path().to_path_buf());
         let config = AppConfig::default();
         let (tooltip, _) = ide_tooltip(&config);
-        let (actions, labels) = click_label(&tooltip, |ui, a| {
-            show_open_card(ui, &o, &config, 0, Preview::Collapsed, a);
-        });
+        // Die Solutions sucht ein Hintergrund-Thread: bis das Menü steht
+        let (actions, labels) = click_label_until(
+            &tooltip,
+            |ui, a| show_open_card(ui, &o, &config, 0, Preview::Collapsed, a),
+            |_, labels| labels.iter().any(|l| l == "a.sln"),
+        );
         assert_eq!(actions.ide_open, None, "erst wählen");
         assert_eq!(actions.focus, None);
         let b = PathBuf::from("sub").join("b.sln").display().to_string();
@@ -1200,9 +1241,11 @@ mod tests {
         o.repo_path = Some(dir.path().to_path_buf());
         let config = AppConfig::default();
         let (tooltip, ide_id) = ide_tooltip(&config);
-        let (actions, _) = click_label(&tooltip, |ui, a| {
-            show_open_card(ui, &o, &config, 0, Preview::Collapsed, a);
-        });
+        let (actions, _) = click_label_until(
+            &tooltip,
+            |ui, a| show_open_card(ui, &o, &config, 0, Preview::Collapsed, a),
+            |actions, _| actions.ide_open.is_some(),
+        );
         let repo = dir.path().to_path_buf();
         assert_eq!(actions.ide_open, Some((repo.clone(), ide_id, repo)));
     }

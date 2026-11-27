@@ -1,7 +1,7 @@
 //! Auschecken eines MR-Branches nach K1 (E5/E6): Auswahlmenü (neuer
 //! Worktree, neuer Klon, bestehender Klon, „Bereits ausgecheckt“) rein aus
 //! den Scan-Daten und den Abrufdaten, dazu der Plan für die git-Schritte in
-//! `git.rs` (`fetch_refspecs`, `prepare_mr_branch`, `add_worktree`,
+//! `git` (`fetch_refspecs`, `prepare_mr_branch`, `add_worktree`,
 //! `clone_repo`). Kein I/O: läuft bei jedem Frame auf zwischengespeicherten
 //! Daten.
 
@@ -577,9 +577,7 @@ fn is_default_branch(branch: &str, target_branch: &str) -> bool {
 /// gesetzt: er hinge vom Arbeitsordner des Prozesses ab (Autostart oft
 /// `System32`), der git-CLI-Fallback läge im Basis-Klon.
 pub fn review_root_dir(cfg: &MrConfig) -> Option<PathBuf> {
-    let root = cfg.review_root.as_deref()?.trim();
-    let dir: PathBuf = Path::new(root).components().collect();
-    dir.is_absolute().then_some(dir)
+    crate::config::absolute_dir(cfg.review_root.as_deref())
 }
 
 /// Ordnername aus erlaubten Zeichen (GitLab-Pfadregeln `[A-Za-z0-9._-]`);
@@ -683,10 +681,9 @@ impl Taken<'_> {
     }
 }
 
-/// Vergleichsschlüssel für Pfade: ohne abschließenden Separator, unter
-/// Windows ohne Groß-/Kleinschreibung (`AppConfig::repo_state_key`).
+/// Vergleichsschlüssel für Pfade, siehe [`AppConfig::path_key`].
 pub fn path_key(path: &Path) -> String {
-    AppConfig::repo_state_key(&path.components().collect::<PathBuf>())
+    AppConfig::path_key(path)
 }
 
 /// URL für „Neuer Klon …“ ohne lokalen Klon des Projekts: nach dem Muster

@@ -27,8 +27,9 @@ use crate::gitlab::service::{error_text, is_auth_error};
 use crate::gitlab::time::{format_date, relative_time};
 use crate::i18n::{count_text, tr, tr_fmt, Language};
 use crate::ui::theme::{mr_palette, MrPalette};
+use crate::ui::widgets::{icon_button, icon_image, small};
 use egui::{
-    vec2, Align, Align2, Atoms, Button, Color32, ComboBox, CursorIcon, FontId, Frame, Id, Image,
+    vec2, Align, Align2, Atoms, Button, Color32, ComboBox, CursorIcon, FontId, Frame, Id,
     ImageSource, Key, Label, Layout, Margin, Popup, PopupCloseBehavior, RectAlign, Response,
     RichText, ScrollArea, Sense, Spinner, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, WidgetInfo,
     WidgetType,
@@ -38,48 +39,15 @@ use std::path::{Path, PathBuf};
 
 // Icons: Phosphor Regular (MIT), mit `color="#FFFFFF"`, damit `tint` sie
 // einfärbt – resvg rendert `currentColor` sonst schwarz.
-const ICON_CHECK_CIRCLE: ImageSource =
-    egui::include_image!("../../assets/icons/mr/check-circle.svg");
-const ICON_X_CIRCLE: ImageSource = egui::include_image!("../../assets/icons/mr/x-circle.svg");
-const ICON_CIRCLE_NOTCH: ImageSource =
-    egui::include_image!("../../assets/icons/mr/circle-notch.svg");
-const ICON_CLOCK: ImageSource = egui::include_image!("../../assets/icons/mr/clock.svg");
-const ICON_MINUS_CIRCLE: ImageSource =
-    egui::include_image!("../../assets/icons/mr/minus-circle.svg");
-const ICON_PROHIBIT: ImageSource = egui::include_image!("../../assets/icons/mr/prohibit.svg");
-const ICON_SKIP_CIRCLE: ImageSource =
-    egui::include_image!("../../assets/icons/mr/skip-forward-circle.svg");
-const ICON_PLAY_CIRCLE: ImageSource = egui::include_image!("../../assets/icons/mr/play-circle.svg");
-const ICON_CHAT: ImageSource = egui::include_image!("../../assets/icons/mr/chat-circle.svg");
-const ICON_CHAT_DOTS: ImageSource =
-    egui::include_image!("../../assets/icons/mr/chat-circle-dots.svg");
-const ICON_CHAT_CHECK: ImageSource =
-    egui::include_image!("../../assets/icons/mr/chat-circle-check.svg");
-const ICON_CHECK: ImageSource = egui::include_image!("../../assets/icons/mr/check.svg");
-const ICON_ARROW_U: ImageSource = egui::include_image!("../../assets/icons/mr/arrow-u-up-left.svg");
-const ICON_USER: ImageSource = egui::include_image!("../../assets/icons/mr/user.svg");
-const ICON_SORT: ImageSource = egui::include_image!("../../assets/icons/mr/sort-descending.svg");
-const ICON_OPEN_EXTERNAL: ImageSource =
-    egui::include_image!("../../assets/icons/mr/arrow-square-out.svg");
-const ICON_PULL_REQUEST: ImageSource =
-    egui::include_image!("../../assets/icons/mr/git-pull-request.svg");
-const ICON_BRANCH: ImageSource = egui::include_image!("../../assets/icons/mr/git-branch.svg");
-const ICON_TERMINAL: ImageSource =
-    egui::include_image!("../../assets/icons/mr/terminal-window.svg");
-const ICON_LOCK: ImageSource = egui::include_image!("../../assets/icons/mr/lock-simple.svg");
-const ICON_COPY: ImageSource = egui::include_image!("../../assets/icons/mr/copy.svg");
-const ICON_FOLDER_PLUS: ImageSource = egui::include_image!("../../assets/icons/mr/folder-plus.svg");
-const ICON_DOWNLOAD: ImageSource =
-    egui::include_image!("../../assets/icons/mr/download-simple.svg");
-const ICON_DOTS: ImageSource = egui::include_image!("../../assets/icons/mr/dots-three.svg");
-const ICON_FOLDER: ImageSource = egui::include_image!("../../assets/icons/mr/folder.svg");
-const ICON_FOLDER_ARROW: ImageSource =
-    egui::include_image!("../../assets/icons/mr/folder-arrow.svg");
-const ICON_CODE: ImageSource = egui::include_image!("../../assets/icons/mr/code.svg");
-const ICON_SPARKLE: ImageSource = egui::include_image!("../../assets/icons/mr/sparkle.svg");
-const ICON_WARNING: ImageSource = egui::include_image!("../../assets/icons/mr/warning-circle.svg");
-const ICON_SEARCH: ImageSource = egui::include_image!("../../assets/icons/mr/magnifying-glass.svg");
-const ICON_CROSS: ImageSource = egui::include_image!("../../assets/icons/mr/x.svg");
+use crate::ui::icons::mr::{
+    ICON_ARROW_U, ICON_BRANCH, ICON_CHAT, ICON_CHAT_CHECK, ICON_CHAT_DOTS, ICON_CHECK,
+    ICON_CHECK_CIRCLE, ICON_CIRCLE_NOTCH, ICON_CLOCK, ICON_CODE, ICON_COPY, ICON_CROSS,
+    ICON_DOWNLOAD, ICON_FOLDER, ICON_FOLDER_ARROW, ICON_FOLDER_PLUS, ICON_LOCK, ICON_MINUS_CIRCLE,
+    ICON_OPEN_EXTERNAL, ICON_PLAY_CIRCLE, ICON_PROHIBIT, ICON_PULL_REQUEST, ICON_SEARCH,
+    ICON_SKIP_CIRCLE, ICON_SORT, ICON_SPARKLE, ICON_TERMINAL, ICON_USER, ICON_WARNING,
+    ICON_X_CIRCLE,
+};
+use crate::ui::icons::ICON_DOTS;
 
 /// Mindestbreite einer Spalte: zwei Spalten ab 2 × 420 + 12 = 852 px
 /// Inhaltsbreite (E8), damit B beim Mindestfenster zweispaltig bleibt.
@@ -1194,7 +1162,9 @@ fn merged_body(ui: &mut Ui, v: &View, state: &mut MrViewState, actions: &mut MrV
     for merged in &rows {
         show_merged_row(ui, v, merged, actions);
     }
-    if rows.is_empty() && list.errors.is_empty() {
+    // Wie in `mine_body`: ohne Daten (alle Hosts im Fehler oder abgemeldet)
+    // kein „Keine gemergten MRs“
+    if rows.is_empty() && list.errors.is_empty() && v.has_data {
         if list.mrs.is_empty() {
             let days = list.days.to_string();
             empty_block(ui, v, &tr_fmt(lang, "mr_empty_merged", &[&days]), None);
@@ -1501,25 +1471,41 @@ enum RowKind {
 }
 
 fn show_row(ui: &mut Ui, v: &View, mr: &MergeRequest, kind: RowKind, actions: &mut MrViewActions) {
-    let brief = v.input.clones.brief(&MrRefInfo::from_mr(mr), v.input.repos);
-    let button = checkout_button(&brief);
-    draw_row(ui, v, mr, None, kind, &button, actions);
+    visible_row(ui, v, mr, |ui| {
+        let brief = v.input.clones.brief(&MrRefInfo::from_mr(mr), v.input.repos);
+        let button = checkout_button(&brief);
+        draw_row(ui, v, mr, None, kind, &button, actions);
+    });
+}
+
+/// Baut eine Zeile nur im sichtbaren Bereich auf (`widgets::culled`): mit
+/// einigen hundert MRs kostete sonst jeder Frame alle Zeilen. Die Zeile,
+/// zu der gescrollt wird (`focus`), wird immer gezeichnet.
+fn visible_row(ui: &mut Ui, v: &View, mr: &MergeRequest, draw: impl FnOnce(&mut Ui)) {
+    let focused = v
+        .focus
+        .as_ref()
+        .is_some_and(|f| f.host_key == mr.host_key && f.id == mr.id);
+    let id = ui.id().with(("mr_row", &mr.host_key, &mr.id));
+    crate::ui::widgets::culled(ui, id, focused, draw);
 }
 
 /// Zeile „Gemergt“: Titel ruhiger mit Chip „Gemergt“, Projekt und Branches,
 /// „gemergt {Zeit} von {Name}“ · Pipeline · Approvals, nur Browser-Button.
 fn show_merged_row(ui: &mut Ui, v: &View, merged: &MergedMr, actions: &mut MrViewActions) {
-    // Kein Auschecken: der Button wird nicht gezeichnet
-    let button = ButtonKind::Menu;
-    draw_row(
-        ui,
-        v,
-        &merged.mr,
-        Some(merged),
-        RowKind::Merged,
-        &button,
-        actions,
-    );
+    visible_row(ui, v, &merged.mr, |ui| {
+        // Kein Auschecken: der Button wird nicht gezeichnet
+        let button = ButtonKind::Menu;
+        draw_row(
+            ui,
+            v,
+            &merged.mr,
+            Some(merged),
+            RowKind::Merged,
+            &button,
+            actions,
+        );
+    });
 }
 
 fn draw_row(
@@ -2871,17 +2857,6 @@ pub(crate) fn pipeline_icon(
     }
 }
 
-fn icon_image(icon: ImageSource<'static>, size: f32, tint: Color32) -> Image<'static> {
-    Image::new(icon)
-        .fit_to_exact_size(vec2(size, size))
-        .tint(tint)
-}
-
-/// 11 px Text, nicht umbrechend.
-fn small(ui: &mut Ui, text: &str, color: Color32) -> Response {
-    ui.label(RichText::new(text).size(11.0).color(color))
-}
-
 fn mono(ui: &mut Ui, text: &str, size: f32, color: Color32) -> Response {
     ui.label(
         RichText::new(text)
@@ -3032,32 +3007,6 @@ fn chip_width(ui: &Ui, on: bool, label: &str, count: Option<&str>) -> f32 {
         width += 5.0 + text_width(ui, count, FontId::proportional(10.0));
     }
     width
-}
-
-/// Icon-Button 22 × 22 mit Tooltip und AccessKit-Namen.
-fn icon_button(
-    ui: &mut Ui,
-    icon: ImageSource<'static>,
-    tooltip: &str,
-    selected: bool,
-    enabled: bool,
-) -> Response {
-    let tint = if selected {
-        ui.visuals().selection.stroke.color
-    } else {
-        ui.visuals().widgets.inactive.fg_stroke.color
-    };
-    let button = Button::new(icon_image(icon, 14.0, tint))
-        .min_size(vec2(22.0, 22.0))
-        .corner_radius(6)
-        .selected(selected);
-    let resp = ui.add_enabled(enabled, button);
-    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, tooltip));
-    if enabled {
-        resp.on_hover_text(tooltip)
-    } else {
-        resp
-    }
 }
 
 /// „nicht lokal“ als umrandeter Button (öffnet das Menü mit „Neuer Klon …“).

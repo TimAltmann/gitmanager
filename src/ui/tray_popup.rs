@@ -2,92 +2,18 @@ use crate::config::AppConfig;
 use crate::git::RepoInfo;
 use crate::i18n::{tr, tr_fmt, Language};
 use crate::ui::theme::mr_palette;
+use crate::ui::theme::COLOR_MUTED;
 use egui::{AtomLayoutResponse, Color32, RichText, Vec2};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-// Icons reused from repo_list
-const ICON_VSCODE: egui::ImageSource = egui::include_image!("../../assets/icons/vscode.svg");
-const ICON_VS: egui::ImageSource = egui::include_image!("../../assets/icons/visualstudio.svg");
-const ICON_RIDER: egui::ImageSource = egui::include_image!("../../assets/icons/rider.svg");
-const ICON_CLAUDE: egui::ImageSource = egui::include_image!("../../assets/icons/claude.svg");
-const ICON_FOLDER: egui::ImageSource = egui::include_image!("../../assets/icons/folder.svg");
-const ICON_TERMINAL: egui::ImageSource = egui::include_image!("../../assets/icons/terminal.svg");
-const ICON_CODEX: egui::ImageSource = egui::include_image!("../../assets/icons/codex.svg");
-const ICON_GEMINI: egui::ImageSource = egui::include_image!("../../assets/icons/gemini.svg");
-const ICON_COPILOT: egui::ImageSource = egui::include_image!("../../assets/icons/copilot.svg");
-const ICON_CURSOR: egui::ImageSource = egui::include_image!("../../assets/icons/cursor.svg");
-const ICON_AIDER: egui::ImageSource = egui::include_image!("../../assets/icons/aider.svg");
-const ICON_REFRESH: egui::ImageSource = egui::include_image!("../../assets/icons/refresh.svg");
-const ICON_GEAR: egui::ImageSource = egui::include_image!("../../assets/icons/gear.svg");
-const ICON_CROSS: egui::ImageSource = egui::include_image!("../../assets/icons/cross.svg");
-// Phosphor Regular wie in der MR-Ansicht (weiß, `tint` färbt ein)
-const ICON_PULL_REQUEST: egui::ImageSource =
-    egui::include_image!("../../assets/icons/mr/git-pull-request.svg");
+use crate::ui::icons::mr::ICON_PULL_REQUEST;
+use crate::ui::icons::{
+    agent_image, ide_image, ICON_CROSS, ICON_FOLDER, ICON_GEAR, ICON_REFRESH, ICON_TERMINAL,
+};
 
-fn ide_icon_for(ide_id: &str) -> egui::ImageSource<'static> {
-    match ide_id {
-        "vs2022" | "vs" | "visualstudio" => ICON_VS,
-        "rider" | "jetbrains" => ICON_RIDER,
-        "vscode" => ICON_VSCODE,
-        _ => ICON_VSCODE,
-    }
-}
-
-fn agent_icon_for(agent_id: &str) -> egui::ImageSource<'static> {
-    match agent_id {
-        "claude" => ICON_CLAUDE,
-        "codex" => ICON_CODEX,
-        "gemini" => ICON_GEMINI,
-        "copilot" => ICON_COPILOT,
-        "cursor" => ICON_CURSOR,
-        "aider" => ICON_AIDER,
-        _ => ICON_CLAUDE,
-    }
-}
-
-fn ide_image(ide: &crate::config::IdeConfig) -> egui::Image<'static> {
-    if let Some(path) = &ide.icon {
-        // #6: Existenz nur einmal pro Pfad per stat prüfen (statt pro Repo pro
-        // Frame). Icons sind quasi-statisch; Dateiwechsel greift ab Neustart.
-        if icon_exists_cached(path) {
-            let uri = format!("file://{}", path.replace('\\', "/"));
-            return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(16.0));
-        }
-    }
-    egui::Image::new(ide_icon_for(&ide.id)).fit_to_exact_size(Vec2::splat(16.0))
-}
-
-fn agent_image(agent: &crate::config::AgentProfile) -> egui::Image<'static> {
-    if let Some(path) = &agent.icon {
-        // #6: siehe ide_image — gecachter stat statt Syscall pro Frame.
-        if icon_exists_cached(path) {
-            let uri = format!("file://{}", path.replace('\\', "/"));
-            return egui::Image::new(uri).fit_to_exact_size(Vec2::splat(16.0));
-        }
-    }
-    egui::Image::new(agent_icon_for(&agent.id)).fit_to_exact_size(Vec2::splat(16.0))
-}
-
-/// #6: gecachter `Path.exists` für Icon-Dateien. Ein stat-Syscall pro Pfad
-/// pro Prozess statt pro Repo-Zeile pro Frame (~3000 stats/s bei 30fps).
-/// Der erste Aufruf prüft das FS, danach gilt der Cache (Icons ändern sich
-/// praktisch nie zur Laufzeit; Wechsel greift ab Neustart).
-pub fn icon_exists_cached(path: &str) -> bool {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(&hit) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(path) {
-        return hit;
-    }
-    let exists = std::path::Path::new(path).exists();
-    cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(path.to_string(), exists);
-    exists
-}
+/// Kantenlänge der IDE- und Agent-Icons im Popup
+const TOOL_ICON_SIZE: f32 = 16.0;
 
 /// #9: ROOT-DPI auflösen. Nur endliche positive Werte übernehmen — sonst
 /// neutral 1.0. Nie auf die DPI des off-screen Service-Viewports
@@ -210,7 +136,8 @@ pub fn truncate_label(s: &str, max_chars: usize) -> String {
 pub struct TrayFetching {
     /// Scan oder Fetch läuft: Fetch-Buttons gesperrt
     pub busy: bool,
-    /// Repo des laufenden manuellen Fetch (Spinner statt Button)
+    /// Repo des laufenden manuellen Fetch oder Branch-Wechsels (Spinner
+    /// statt Button)
     pub repo: Option<PathBuf>,
 }
 
@@ -476,7 +403,7 @@ pub fn show_tray_popup_ui(
                             )
                             .small(),
                         )
-                        .on_hover_text("Schließen (Esc)")
+                        .on_hover_text(format!("{} (Esc)", tr(lang, "close")))
                         .clicked()
                     {
                         actions.close_popup = true;
@@ -489,7 +416,7 @@ pub fn show_tray_popup_ui(
                     .small();
                     if ui
                         .add(settings_btn)
-                        .on_hover_text("Settings öffnen")
+                        .on_hover_text(tr(lang, "settings"))
                         .clicked()
                     {
                         actions.open_settings = true;
@@ -501,7 +428,11 @@ pub fn show_tray_popup_ui(
                             .tint(ui.visuals().text_color()),
                     )
                     .small();
-                    if ui.add(refresh_btn).on_hover_text("Refresh").clicked() {
+                    if ui
+                        .add(refresh_btn)
+                        .on_hover_text(tr(lang, "refresh"))
+                        .clicked()
+                    {
                         actions.refresh = true;
                     }
                 });
@@ -581,7 +512,7 @@ pub fn show_tray_popup_ui(
                     ui.label(
                         RichText::new(crate::i18n::tr(lang, "no_repos_found"))
                             .size(12.0)
-                            .color(Color32::from_rgb(100, 100, 100)),
+                            .color(COLOR_MUTED),
                     );
                     ui.add_space(8.0);
                     ui.label(
@@ -590,7 +521,7 @@ pub fn show_tray_popup_ui(
                             .color(Color32::from_rgb(130, 130, 130)),
                     );
                     ui.add_space(12.0);
-                    if ui.button("🔄 Refresh").clicked() {
+                    if ui.button(tr(lang, "refresh")).clicked() {
                         actions.refresh = true;
                     }
                 });
@@ -861,7 +792,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                     ui.label(
                         RichText::new(truncate_label(&repo.branch, TRAY_LABEL_MAX_CHARS))
                             .size(10.0)
-                            .color(Color32::from_rgb(100, 100, 100))
+                            .color(COLOR_MUTED)
                             .italics(),
                     )
                     .on_hover_text(&repo.branch);
@@ -937,10 +868,12 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                         .selected_solution
                         .clone()
                         .unwrap_or_else(|| repo.path.clone());
-                    let btn = egui::Button::image(ide_image(ide)).small();
-                    let resp = ui
-                        .add(btn)
-                        .on_hover_text(format!("In {} öffnen", ide.display_name));
+                    let btn = egui::Button::image(ide_image(ide, TOOL_ICON_SIZE)).small();
+                    let resp = ui.add(btn).on_hover_text(format!(
+                        "{} {}",
+                        tr(lang, "open_in"),
+                        ide.display_name
+                    ));
                     if resp.clicked() {
                         actions.ide_open = Some((repo.path.clone(), ide.id.clone(), file_path));
                         actions.close_popup = true;
@@ -963,7 +896,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                         );
                     } else if !any_visible_original {
                         ui.label(
-                            RichText::new("Keine IDE")
+                            RichText::new(tr(lang, "tray_no_ide"))
                                 .size(9.0)
                                 .color(Color32::from_rgb(140, 140, 140)),
                         );
@@ -992,7 +925,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                             )
                             .small(),
                         )
-                        .on_hover_text("Im Explorer öffnen")
+                        .on_hover_text(tr(lang, "open_in_explorer"))
                         .clicked()
                 {
                     actions.explorer_open = Some(repo.path.clone());
@@ -1008,7 +941,7 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                             )
                             .small(),
                         )
-                        .on_hover_text("Terminal öffnen")
+                        .on_hover_text(tr(lang, "open_in_shell"))
                         .clicked()
                 {
                     actions.shell_open = Some(repo.path.clone());
@@ -1034,10 +967,12 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                     ui.separator();
                 }
                 for agent in filtered.iter().take(2) {
-                    let btn = egui::Button::image(agent_image(agent)).small();
-                    let resp = ui
-                        .add(btn)
-                        .on_hover_text(format!("Agent {} starten", agent.display_name));
+                    let btn = egui::Button::image(agent_image(agent, TOOL_ICON_SIZE)).small();
+                    let resp = ui.add(btn).on_hover_text(tr_fmt(
+                        lang,
+                        "open_in_terminal",
+                        &[&agent.display_name],
+                    ));
                     if resp.clicked() {
                         actions.agent_open = Some((repo.path.clone(), agent.id.clone()));
                         actions.close_popup = true;
@@ -1047,8 +982,8 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
                     let first = &active_agents[0];
                     if !tray_hidden.contains(&first.id)
                         && ui
-                            .add(egui::Button::image(agent_image(first)).small())
-                            .on_hover_text(format!("Agent {} starten", first.display_name))
+                            .add(egui::Button::image(agent_image(first, TOOL_ICON_SIZE)).small())
+                            .on_hover_text(tr_fmt(lang, "open_in_terminal", &[&first.display_name]))
                             .clicked()
                     {
                         actions.agent_open = Some((repo.path.clone(), first.id.clone()));
@@ -1058,6 +993,42 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
             });
         });
     });
+}
+
+/// Rechteck in Bildschirm-Pixeln (virtueller Desktop, wie Windows es liefert).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PxRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+/// Linke obere Ecke des Popups in Bildschirm-Pixeln: mittig über dem
+/// Tray-Icon, innerhalb des Arbeitsbereichs (`work`, ohne Taskleiste) des
+/// Monitors, auf dem das Icon liegt. `scale` ist die Skalierung dieses
+/// Monitors (1.0 = 100 %), `popup_size` die Größe in Punkten.
+///
+/// In Pixeln statt Punkten, weil Punkte je Monitor anders skalieren: mit
+/// der Skalierung des Hauptfensters umgerechnet landete das Popup auf dem
+/// falschen Monitor oder unter der Taskleiste.
+pub fn popup_origin_px(
+    icon: PxRect,
+    work: PxRect,
+    scale: f32,
+    popup_size: egui::Vec2,
+) -> (i32, i32) {
+    let px = |points: f32| (points * scale).round() as i32;
+    let (w, h, gap) = (px(popup_size.x), px(popup_size.y), px(4.0));
+    let x = (icon.left + icon.right) / 2 - w / 2;
+    let y = icon.top - h - gap;
+    // Wie `safe_clamp` unten: ein Popup größer als der Arbeitsbereich darf
+    // `clamp` nicht zum Absturz bringen
+    let clamp = |v: i32, lo: i32, hi: i32| v.clamp(lo.min(hi), lo.max(hi));
+    (
+        clamp(x, work.left + gap, work.right - w - gap),
+        clamp(y, work.top + gap, work.bottom - h - gap),
+    )
 }
 
 /// Calculates popup position directly above the tray icon rect.
@@ -1183,6 +1154,61 @@ pub fn sorted_visible_repos(repos: &[RepoInfo], config: &AppConfig, limit: usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Zwei Monitore: links 2560×1440 bei 100 %, rechts (Taskleiste, Icon)
+    /// 3840×2160 bei 150 %. Das Popup bleibt auf dem rechten Monitor und
+    /// endet über der Taskleiste.
+    #[test]
+    fn popup_origin_px_uses_icon_monitor_and_work_area() {
+        let icon = PxRect {
+            left: 6200,
+            top: 2100,
+            right: 6236,
+            bottom: 2136,
+        };
+        // Arbeitsbereich ohne die 72 px hohe Taskleiste
+        let work = PxRect {
+            left: 2560,
+            top: 0,
+            right: 6400,
+            bottom: 2088,
+        };
+        let size = egui::vec2(360.0, 480.0);
+        let (x, y) = popup_origin_px(icon, work, 1.5, size);
+        let (w, h) = (540, 720);
+        assert!(x >= work.left && x + w <= work.right, "x={x}");
+        assert_eq!(y + h, work.bottom - 6, "Unterkante über der Taskleiste");
+        // Icon weit genug vom Rand: mittig darüber
+        let icon = PxRect {
+            left: 4000,
+            top: 2100,
+            right: 4036,
+            bottom: 2136,
+        };
+        assert_eq!(popup_origin_px(icon, work, 1.5, size).0, 4018 - w / 2);
+    }
+
+    /// Taskleiste oben oder Popup höher als der Bildschirm: kein Panic,
+    /// das Popup beginnt im Arbeitsbereich.
+    #[test]
+    fn popup_origin_px_clamps_into_work_area() {
+        let work = PxRect {
+            left: 0,
+            top: 48,
+            right: 1920,
+            bottom: 1080,
+        };
+        let icon = PxRect {
+            left: 1800,
+            top: 8,
+            right: 1832,
+            bottom: 40,
+        };
+        let (x, y) = popup_origin_px(icon, work, 1.0, egui::vec2(360.0, 480.0));
+        assert_eq!((x, y), (1920 - 360 - 4, 52));
+        let (_, y) = popup_origin_px(icon, work, 1.0, egui::vec2(360.0, 2000.0));
+        assert!(y <= 52);
+    }
 
     #[test]
     fn popup_position_above_tray() {
@@ -1684,26 +1710,6 @@ mod tests {
         assert_eq!(repos[idx[1]].path, PathBuf::from("/tmp/r00"));
         assert_eq!(repos[idx[2]].path, PathBuf::from("/tmp/r05"));
         assert_eq!(repos[idx[3]].path, PathBuf::from("/tmp/r42"));
-    }
-
-    #[test]
-    fn icon_exists_cached_reports_fs_and_caches() {
-        // #6: Einmal geprüfte Pfade dürfen keinen erneuten stat-Syscall brauchen.
-        let dir = std::env::temp_dir().join(format!(
-            "gm_icon_cache_test_{}_{}",
-            std::process::id(),
-            "traypopup"
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let present = dir.join("present_xyz123.png");
-        std::fs::write(&present, b"x").unwrap();
-        let missing = dir.join("missing_xyz123.png");
-        assert!(icon_exists_cached(present.to_str().unwrap()));
-        assert!(!icon_exists_cached(missing.to_str().unwrap()));
-        // Gecacht: nach Löschen weiterhin true (kein erneuter stat).
-        std::fs::remove_file(&present).unwrap();
-        assert!(icon_exists_cached(present.to_str().unwrap()));
-        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

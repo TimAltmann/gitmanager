@@ -82,13 +82,6 @@ mod imp {
         None
     }
 
-    #[allow(dead_code)]
-    fn load_tray_icon_data() -> Option<(Vec<u8>, u32, u32)> {
-        // Prefer tray-optimized icon: embedded icon_tray.png, then icon.ico.
-        // Default Dark = bisheriges Verhalten (Weiß-Icon).
-        load_tray_icon_data_for_theme(TrayIconTheme::Dark)
-    }
-
     pub fn build_tray_icon(theme: TrayIconTheme) -> Option<tray_icon::Icon> {
         let (rgba, w, h) = load_tray_icon_data_for_theme(theme)?;
         tray_icon::Icon::from_rgba(rgba, w, h).ok()
@@ -101,11 +94,6 @@ mod imp {
         } else {
             false
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn create_tray_channels(ctx: egui::Context) -> Option<TrayChannels> {
-        create_tray_channels_with_theme(ctx, TrayIconTheme::Dark)
     }
 
     pub fn create_tray_channels_with_theme(

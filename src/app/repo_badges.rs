@@ -7,51 +7,9 @@ use std::path::PathBuf;
 use super::{MainView, MyApp};
 use crate::claude_live::{LiveSession, LiveStatus};
 use crate::claude_sessions::path_key;
-use crate::config::MrConfig;
 use crate::git::RepoInfo;
-use crate::gitlab::model::{approvals, MergeRequest, PipelineState};
+use crate::gitlab::badge::MrBadge;
 use crate::ui::merge_requests::MrFocus;
-
-/// Kurzfassung eines MR für den Chip `!iid · n/m ✓ · Pipeline`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MrBadge {
-    pub host_key: String,
-    pub id: String,
-    pub iid: u64,
-    pub title: String,
-    pub draft: bool,
-    pub approved: u32,
-    /// Regel bzw. Ziel aus den Einstellungen; `None` = keines
-    pub required: Option<u32>,
-    pub pipeline: PipelineState,
-    pub mine: bool,
-    pub updated_at: Option<i64>,
-}
-
-impl MrBadge {
-    /// Mit Standard-Einstellungen; `update_repo_mrs` nutzt die echten.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn from_mr(mr: &MergeRequest, mine: bool) -> Self {
-        Self::with_cfg(mr, mine, &MrConfig::default())
-    }
-
-    /// Zählung wie die Approval-Leiste der MR-Zeile (Bots, Ziel).
-    fn with_cfg(mr: &MergeRequest, mine: bool, cfg: &MrConfig) -> Self {
-        let appr = approvals(mr, cfg.ignore_bot_approvals, cfg.approval_goal);
-        Self {
-            host_key: mr.host_key.clone(),
-            id: mr.id.clone(),
-            iid: mr.iid,
-            title: mr.title.clone(),
-            draft: mr.draft,
-            approved: appr.given,
-            required: (appr.goal > 0).then_some(appr.goal),
-            pipeline: mr.pipeline,
-            mine,
-            updated_at: mr.updated_at,
-        }
-    }
-}
 
 /// Ein Badge je Ordner; Priorität: eigene vor fremden, dann neuestes
 /// `updated_at`. Bei Gleichstand gewinnt der erste Treffer.
@@ -69,15 +27,6 @@ pub(crate) fn pick_badges(hits: Vec<(PathBuf, MrBadge)>) -> HashMap<PathBuf, MrB
     out
 }
 
-/// Rang für den Claude-Chip: „wartet“ vor „arbeitet“; `Idle` zählt nicht.
-fn claude_rank(status: LiveStatus) -> u8 {
-    match status {
-        LiveStatus::Waiting => 2,
-        LiveStatus::Busy | LiveStatus::Shell => 1,
-        LiveStatus::Idle => 0,
-    }
-}
-
 /// Live-Status je Repo-Ordner (gleicher `path_key` wie `cwd` der Session);
 /// teilen sich mehrere Sessions einen Ordner, gewinnt „wartet“.
 pub(crate) fn claude_card_status(
@@ -86,7 +35,7 @@ pub(crate) fn claude_card_status(
 ) -> HashMap<PathBuf, LiveStatus> {
     let active: Vec<(String, LiveStatus)> = live
         .iter()
-        .filter(|s| claude_rank(s.status) > 0)
+        .filter(|s| s.status.badge_priority() > 0)
         .map(|s| (path_key(&s.cwd), s.status))
         .collect();
     let mut out = HashMap::new();
@@ -99,7 +48,7 @@ pub(crate) fn claude_card_status(
             .iter()
             .filter(|(k, _)| *k == key)
             .map(|(_, s)| *s)
-            .max_by_key(|s| claude_rank(*s));
+            .max_by_key(|s| s.badge_priority());
         if let Some(status) = best {
             out.insert(repo.path.clone(), status);
         }
@@ -111,8 +60,8 @@ pub(crate) fn claude_card_status(
 pub(crate) fn claude_pid_for(live: &[LiveSession], path: &std::path::Path) -> Option<u32> {
     let key = path_key(&path.to_string_lossy());
     live.iter()
-        .filter(|s| claude_rank(s.status) > 0 && path_key(&s.cwd) == key)
-        .max_by_key(|s| claude_rank(s.status))
+        .filter(|s| s.status.badge_priority() > 0 && path_key(&s.cwd) == key)
+        .max_by_key(|s| s.status.badge_priority())
         .map(|s| s.pid)
 }
 
@@ -165,7 +114,7 @@ mod tests {
     use super::*;
     use crate::app::tests::test_app;
     use crate::git::RepoInfo;
-    use crate::gitlab::model::{MrSnapshot, UninvolvedList};
+    use crate::gitlab::model::{MergeRequest, MrSnapshot, UninvolvedList};
     use crate::gitlab::remote::GlabHost;
     use crate::gitlab::remote::RemoteInfo;
     use std::path::Path;

@@ -589,8 +589,7 @@ impl MyApp {
         self.mr_last_refresh = Some(Instant::now());
         // E20: nur in der MR-Ansicht, nie im Banner oder Tray
         if self.main_view == MainView::MergeRequests {
-            self.status_message = Some(tr(self.config.language, reason_key));
-            self.status_message_time = Some(Instant::now());
+            self.set_status(tr(self.config.language, reason_key));
         }
         self.run_pending_mr_refresh();
     }
@@ -630,6 +629,9 @@ impl MyApp {
         let busy = self.mr_loading || self.mr_discovering || self.mr_more_pending > 0;
         if !busy && should_auto_fetch(self.mr_last_refresh, interval, Instant::now()) {
             self.start_mr_refresh();
+            // `poll_mr` lief in diesem Durchlauf schon: gleich wieder
+            // wecken, sonst läge das Ergebnis bis zum 60-s-Takt im Kanal
+            ctx.request_repaint();
         }
         // Weckt `logic()` für die nächste Prüfung
         ctx.request_repaint_after(Duration::from_secs(60));
@@ -788,6 +790,13 @@ impl MyApp {
 
     /// Statusleiste in der MR-Ansicht (Text, ist Statusmeldung).
     pub(super) fn mr_status_line(&self) -> (String, bool) {
+        // Ein Auschecken (Klon, Fetch) läuft oft länger als seine
+        // Statusmeldung steht: danach den laufenden Vorgang zeigen
+        if self.status_message.is_none() && !self.git_busy.scans_repos() {
+            if let Some(busy) = super::repo_busy_text(self.config.language, &self.git_busy) {
+                return (busy, false);
+            }
+        }
         mr_status_text(
             self.config.language,
             self.status_message.as_deref(),
@@ -808,7 +817,11 @@ impl MyApp {
         {
             let config = &self.config;
             let mru = |p: &Path| crate::ui::tray_popup::mru_timestamp(config, p);
-            let exists = |p: &Path| p.exists();
+            // Vorschlag für den Zielordner: Prüfung im Hintergrund (ein
+            // Review-Ordner auf einem schlafenden Laufwerk hielte den Klick
+            // sonst an). Unbekannt gilt als frei; einen belegten Ordner
+            // lehnt der Checkout-Worker ab.
+            let exists = |p: &Path| crate::path_probe::exists(&ctx, p).unwrap_or(false);
             let repos = &self.repos;
             let ide_for = |p: &Path| super::mr_checkout::ide_name_for(config, repos, p);
             let agents = config.get_active_agents();
@@ -1122,7 +1135,9 @@ pub(super) fn top_bar_button(
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::super::tests::{test_app, test_app_with_glab};
+    use super::super::tests::{
+        config_get, is_version, push_signed_in, test_app, test_app_with_glab, version_reply,
+    };
     use super::super::{GitBusy, ScanResult};
     use super::*;
     use crate::gitlab::glab::fake::FakeGlab;
@@ -1239,37 +1254,8 @@ pub(super) mod tests {
         }
     }
 
-    fn is_version(r: &GlabRequest) -> bool {
-        r.args.first().is_some_and(|a| a == "version")
-    }
-
-    fn version_reply() -> FakeReply {
-        FakeReply::stdout(0, "glab 1.123.0 (a300719)\n", "")
-    }
-
     fn not_installed() -> FakeReply {
         FakeReply::error(GlabError::NotFound)
-    }
-
-    fn config_get(host: &'static str, key: &'static str) -> impl Fn(&GlabRequest) -> bool + Send {
-        move |r: &GlabRequest| {
-            r.args.first().is_some_and(|a| a == "config")
-                && r.args.last().is_some_and(|k| k == key)
-                && r.host_key.as_deref() == Some(host)
-        }
-    }
-
-    /// Erkennung: `host` ist bei glab angemeldet.
-    fn push_signed_in(fake: &FakeGlab, host: &'static str) {
-        fake.push_when(
-            config_get(host, "user"),
-            FakeReply::stdout(0, "taltmann\n", ""),
-        );
-        fake.push_when(config_get(host, "ssh_host"), FakeReply::stdout(0, "", ""));
-        fake.push_when(
-            config_get(host, "api_protocol"),
-            FakeReply::stdout(0, "", ""),
-        );
     }
 
     /// `glab api` an `host` läuft in den Timeout (beendet den Host im Abruf).
@@ -1483,11 +1469,17 @@ pub(super) mod tests {
         assert!(app.mr_pending_refresh, "Wunsch gemerkt");
         assert!(glab.inner().take_calls().is_empty(), "kein zweiter Abruf");
         glab.inner().push(not_installed());
-        app.mr_tx.send(loaded(0, 1)).expect("send");
+        // Der Worker des gemerkten Refreshs meldet sich auf dem alten Kanal;
+        // der kommt erst nach der Prüfung zurück. Ein schneller Worker landet
+        // sonst noch im selben poll_mr und beendet `mr_loading` schon dort.
+        let (tx, rx) = mpsc::channel();
+        let worker_rx = std::mem::replace(&mut app.mr_rx, rx);
+        tx.send(loaded(0, 1)).expect("send");
         app.poll_mr(&egui::Context::default());
         assert_eq!(app.mr_snapshot.as_deref().map(|s| s.badge), Some(1));
         assert!(!app.mr_pending_refresh);
         assert!(app.mr_loading, "gemerkter Refresh läuft");
+        app.mr_rx = worker_rx;
         settle(&mut app);
         assert_eq!(glab.inner().take_calls().len(), 1);
     }

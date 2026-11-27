@@ -68,30 +68,33 @@ pub fn apply_theme(ctx: &egui::Context, theme: &Theme) {
     visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
     visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
     visuals.window_corner_radius = egui::CornerRadius::same(8);
-    ctx.set_visuals(visuals);
-
-    let mut style = (*ctx.global_style()).clone();
-    style.text_styles.insert(
-        egui::TextStyle::Heading,
-        egui::FontId::new(18.0, egui::FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Body,
-        egui::FontId::new(13.0, egui::FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Button,
-        egui::FontId::new(13.0, egui::FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Small,
-        egui::FontId::new(11.0, egui::FontFamily::Proportional),
-    );
-    ctx.set_global_style(style);
+    // In beide Stil-Plätze von egui (hell und dunkel): mit der Vorgabe
+    // „System“ nimmt egui sonst nach einem Hell/Dunkel-Wechsel von Windows
+    // seinen Standardstil statt des gewählten Themes.
+    ctx.all_styles_mut(|style| {
+        style.visuals = visuals.clone();
+        for (text_style, size) in [
+            (egui::TextStyle::Heading, 18.0),
+            (egui::TextStyle::Body, 13.0),
+            (egui::TextStyle::Button, 13.0),
+            (egui::TextStyle::Small, 11.0),
+        ] {
+            style.text_styles.insert(
+                text_style,
+                egui::FontId::new(size, egui::FontFamily::Proportional),
+            );
+        }
+    });
 }
 
 pub const COLOR_DIRTY: Color32 = Color32::from_rgb(220, 70, 40);
 pub const COLOR_CLEAN: Color32 = Color32::from_rgb(60, 160, 80);
+/// Warnung in Dialogen (Verlustgefahr, nur teilweise erledigt)
+pub const COLOR_WARN: Color32 = Color32::from_rgb(220, 130, 40);
+/// Fehlertext in Dialogen
+pub const COLOR_ERROR: Color32 = Color32::from_rgb(200, 60, 60);
+/// Gedämpftes Grau für Nebentexte und Hinweise (themenunabhängig).
+pub const COLOR_MUTED: Color32 = Color32::from_rgb(100, 100, 100);
 
 /// Farben der Merge-Request-Ansicht (E14), je Theme eigene Werte. Text-
 /// varianten halten ≥ 4.5:1, Icon-Varianten ≥ 3:1 gegen

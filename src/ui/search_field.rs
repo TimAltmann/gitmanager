@@ -4,8 +4,7 @@
 use crate::i18n::{tr, Language};
 use egui::{Ui, Vec2};
 
-const ICON_SEARCH: egui::ImageSource = egui::include_image!("../../assets/icons/search.svg");
-const ICON_CROSS: egui::ImageSource = egui::include_image!("../../assets/icons/cross.svg");
+use crate::ui::icons::{ICON_CROSS, ICON_SEARCH};
 
 /// Zeichnet das Suchfeld in die aktuelle (horizontale) Zeile.
 pub fn search_field(ui: &mut Ui, id: &str, hint: &str, search: &mut String, lang: Language) {

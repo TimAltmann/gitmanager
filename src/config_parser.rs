@@ -1,25 +1,7 @@
 use crate::config::ConfigSelector;
+use crate::text::{xml_escape, xml_unescape};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-
-fn escape_xml_attr(s: &str) -> String {
-    // Escape XML attribute value (minimal set). Order matters: & first.
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-fn unescape_xml_attr(s: &str) -> String {
-    // Reverse of escape – handle common entities. Do &amp; last to avoid double decoding
-    // For key comparison fallback.
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
-}
 
 fn find_attr_range(tag: &str, attr_name: &str) -> Option<(usize, usize, char)> {
     let mut search_pos = 0;
@@ -92,12 +74,22 @@ fn replace_value_in_xml(
     val_attr: &str,
     new_value: &str,
 ) -> Option<String> {
-    let escaped = escape_xml_attr(new_value);
+    let escaped = xml_escape(new_value);
     let mut search_start = 0;
     while search_start < xml.len() {
         // find next "<add" prefix
         let start_rel = xml[search_start..].find("<add")?;
         let start = search_start + start_rel;
+        // Auskommentierte Einträge überspringen: gelesen wird mit roxmltree
+        // (ohne Kommentare) – sonst änderte das Schreiben die Zeile im
+        // Kommentar und meldete Erfolg, der wirksame Wert bliebe.
+        if let Some(comment_rel) = xml[search_start..start].find("<!--") {
+            let comment = search_start + comment_rel;
+            // Kommentar ohne Ende: dahinter steht nichts Wirksames (`?`)
+            let end_rel = xml[comment..].find("-->")?;
+            search_start = comment + end_rel + 3;
+            continue;
+        }
         // validate delimiter after "<add"
         if start + 4 < xml.len() {
             let after_char = xml.as_bytes()[start + 4] as char;
@@ -113,7 +105,7 @@ fn replace_value_in_xml(
         // check key attr matches
         if let Some((k_start, k_end, _)) = find_attr_range(tag, key_attr) {
             let k_val_raw = &tag[k_start..k_end];
-            let k_val_decoded = unescape_xml_attr(k_val_raw);
+            let k_val_decoded = xml_unescape(k_val_raw);
             if k_val_raw == key || k_val_decoded == key {
                 // found target element, now locate value attr
                 if let Some((v_start_rel, v_end_rel, _quote)) = find_attr_range(tag, val_attr) {
@@ -164,10 +156,12 @@ fn is_invalid_file_path(file_path: &str) -> bool {
     false
 }
 
-pub fn read_xml_value(
+/// Pfad prüfen, Datei lesen und auf wohlgeformtes XML prüfen (Lesen und
+/// Schreiben brauchen dasselbe).
+fn load_validated(
     repo_path: &Path,
     selector: &ConfigSelector,
-) -> Result<Option<String>, String> {
+) -> Result<(PathBuf, String), String> {
     if is_invalid_file_path(&selector.file_path) {
         return Err(format!(
             "Ungültiger Dateipfad: '{}' darf nicht absolut sein oder .. enthalten",
@@ -177,9 +171,16 @@ pub fn read_xml_value(
     let file_path = repo_path.join(&selector.file_path);
     let content = std::fs::read_to_string(&file_path)
         .map_err(|e| format!("Konnte {} nicht lesen: {}", file_path.display(), e))?;
-    // validate XML is well-formed, map parse error to Err
     roxmltree::Document::parse(&content)
         .map_err(|e| format!("XML ungültig in {}: {}", file_path.display(), e))?;
+    Ok((file_path, content))
+}
+
+pub fn read_xml_value(
+    repo_path: &Path,
+    selector: &ConfigSelector,
+) -> Result<Option<String>, String> {
+    let (_, content) = load_validated(repo_path, selector)?;
     Ok(find_add_element_value(
         &content,
         &selector.key,
@@ -193,18 +194,7 @@ pub fn write_xml_value(
     selector: &ConfigSelector,
     new_value: &str,
 ) -> Result<(), String> {
-    if is_invalid_file_path(&selector.file_path) {
-        return Err(format!(
-            "Ungültiger Dateipfad: '{}' darf nicht absolut sein oder .. enthalten",
-            selector.file_path
-        ));
-    }
-    let file_path = repo_path.join(&selector.file_path);
-    let content = std::fs::read_to_string(&file_path)
-        .map_err(|e| format!("Konnte {} nicht lesen: {}", file_path.display(), e))?;
-    // validate XML
-    roxmltree::Document::parse(&content)
-        .map_err(|e| format!("XML ungültig in {}: {}", file_path.display(), e))?;
+    let (file_path, content) = load_validated(repo_path, selector)?;
     if find_add_element_value(
         &content,
         &selector.key,
@@ -259,6 +249,27 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    /// Ein auskommentierter Eintrag mit demselben Key bleibt unberührt;
+    /// geändert wird die wirksame Zeile.
+    #[test]
+    fn replace_value_skips_commented_out_entries() {
+        let xml = concat!(
+            "<appSettings>\n",
+            "  <!-- <add key=\"Database\" value=\"prod\"/> -->\n",
+            "  <add key=\"Database\" value=\"dev\"/>\n",
+            "</appSettings>"
+        );
+        let out = replace_value_in_xml(xml, "Database", "key", "value", "test").unwrap();
+        assert!(out.contains("<!-- <add key=\"Database\" value=\"prod\"/> -->"));
+        assert!(out.contains("<add key=\"Database\" value=\"test\"/>"));
+        // Nur im Kommentar vorhanden: nichts zu ändern
+        let only_comment = "<a><!-- <add key=\"K\" value=\"v\"/> --></a>";
+        assert_eq!(
+            replace_value_in_xml(only_comment, "K", "key", "value", "x"),
+            None
+        );
+    }
 
     fn make_selector(key: &str) -> ConfigSelector {
         ConfigSelector {

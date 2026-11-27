@@ -54,6 +54,9 @@ pub(super) struct NewWorktreeDialog {
     pub target: String,
     /// Zielordner von Hand geändert: Vorschlag nicht mehr nachführen
     pub target_edited: bool,
+    /// Der Vorschlag wartet auf eine Ordnerprüfung im Hintergrund und wird
+    /// danach noch einmal berechnet
+    suggestion_pending: bool,
     pub error: Option<String>,
     pub running: bool,
 }
@@ -73,6 +76,7 @@ impl NewWorktreeDialog {
             },
             target: String::new(),
             target_edited: false,
+            suggestion_pending: false,
             error: None,
             running: false,
         }
@@ -169,6 +173,12 @@ pub(super) fn checked_out_at<'a>(base: &'a RepoInfo, local: &str) -> Option<&'a 
 impl MyApp {
     /// Dialog öffnen, für `base` oder das erste Repo (kein Worktree).
     pub(super) fn open_new_worktree_dialog(&mut self, base: Option<PathBuf>) {
+        // Ein laufendes Anlegen nicht überschreiben: sein Ergebnis schlösse
+        // sonst den neuen Dialog bzw. schriebe seinen Fehler hinein
+        if self.worktree_ui.dialog.as_ref().is_some_and(|d| d.running) {
+            self.set_status(tr(self.config.language, "wt_creating"));
+            return;
+        }
         let repo = match base {
             Some(base) => self.repos.iter().find(|r| r.path == base),
             None => self.repos.iter().find(|r| !r.is_linked_worktree),
@@ -192,10 +202,22 @@ impl MyApp {
         let branch = dialog.local_branch(&repo.remotes);
         let root = self.config.worktree_root_dir();
         let taken: Vec<&Path> = self.repos.iter().map(|r| r.path.as_path()).collect();
-        let exists = |p: &Path| p.exists() || taken.contains(&p);
+        // Ordnerprüfung im Hintergrund: der Vorschlag wird bei jedem
+        // Tastendruck neu berechnet, ein `stat` im Standard-Ordner auf einem
+        // langsamen Laufwerk hielte dabei jedes Mal das Fenster an. Bis das
+        // Ergebnis da ist, zählen nur die bekannten Repos.
+        let pending = std::cell::Cell::new(false);
+        let exists = |p: &Path| {
+            let on_disk = crate::path_probe::exists(&self.ctx, p).unwrap_or_else(|| {
+                pending.set(true);
+                false
+            });
+            on_disk || taken.contains(&p)
+        };
         dialog.target = suggest_worktree_path(&dialog.base, &branch, root.as_deref(), &exists)
             .display()
             .to_string();
+        dialog.suggestion_pending = pending.get();
     }
 
     pub(super) fn show_new_worktree_dialog(&mut self, ctx: &egui::Context) {
@@ -206,8 +228,9 @@ impl MyApp {
         let mut open = true;
         let mut create = false;
         let mut cancel = false;
-        let mut suggestion_dirty = false;
-        let busy = self.git_busy.holds_refs() || self.auto_fetching;
+        // Offene Ordnerprüfung: Vorschlag mit ihrem Ergebnis neu berechnen
+        let mut suggestion_dirty = dialog.suggestion_pending;
+        let busy = self.git_busy.holds_refs() || self.auto_fetching || self.branch_switch.is_some();
         let bases: Vec<&RepoInfo> = self
             .repos
             .iter()
@@ -362,7 +385,7 @@ impl MyApp {
                     ui.label(
                         RichText::new(err)
                             .size(11.5)
-                            .color(Color32::from_rgb(200, 60, 60)),
+                            .color(crate::ui::theme::COLOR_ERROR),
                     );
                 }
 
@@ -378,7 +401,11 @@ impl MyApp {
                     {
                         create = true;
                     }
-                    if ui.button(tr(lang, "cancel")).clicked() {
+                    // Während des Anlegens bliebe der Klick ohne Wirkung
+                    if ui
+                        .add_enabled(!dialog.running, egui::Button::new(tr(lang, "cancel")))
+                        .clicked()
+                    {
                         cancel = true;
                     }
                     if dialog.running {

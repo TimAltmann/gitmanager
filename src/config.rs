@@ -45,13 +45,6 @@ pub enum TrayIconTheme {
     Light,
 }
 
-impl TrayIconTheme {
-    #[allow(dead_code)]
-    pub fn all() -> Vec<TrayIconTheme> {
-        vec![TrayIconTheme::Dark, TrayIconTheme::Light]
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrayIconConfig {
     /// Reihenfolge der Icons im Tray-Popup (IDs in Anzeigereihenfolge)
@@ -295,12 +288,6 @@ fn default_language() -> Language {
 fn default_branch_limit() -> usize {
     200
 }
-fn default_minimize_to_tray() -> bool {
-    true
-}
-fn default_check_for_updates() -> bool {
-    true
-}
 fn default_tray_branch_limit() -> usize {
     20
 }
@@ -394,6 +381,22 @@ pub struct IdeConfig {
 }
 
 impl IdeConfig {
+    /// VS Code im Repo-Ordner: Standard-IDE neuer Profile und Rückfall der
+    /// Repo-Karte für Profile ohne IDE.
+    pub fn vscode() -> Self {
+        Self {
+            id: "vscode".to_string(),
+            display_name: "VS Code".to_string(),
+            program: "code".to_string(),
+            args: vec![".".to_string()],
+            command: None,
+            use_shell: false,
+            allow_unsafe: false,
+            no_args: false,
+            icon: None,
+        }
+    }
+
     pub fn effective_program(&self) -> String {
         if !self.program.is_empty() {
             self.program.clone()
@@ -650,17 +653,7 @@ fn default_dotnet_profile() -> LanguageProfile {
                 no_args: false,
                 icon: None,
             },
-            IdeConfig {
-                id: "vscode".to_string(),
-                display_name: "VS Code".to_string(),
-                program: "code".to_string(),
-                args: vec![".".to_string()],
-                command: None,
-                use_shell: false,
-                allow_unsafe: false,
-                no_args: false,
-                icon: None,
-            },
+            IdeConfig::vscode(),
             IdeConfig {
                 id: "rider".to_string(),
                 display_name: "Rider".to_string(),
@@ -845,10 +838,10 @@ pub struct AppConfig {
     #[serde(default = "default_branch_limit")]
     pub branch_display_limit: usize,
 
-    #[serde(default = "default_minimize_to_tray")]
+    #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
 
-    #[serde(default = "default_check_for_updates")]
+    #[serde(default = "default_true")]
     pub check_for_updates: bool,
 
     #[serde(default = "default_tray_branch_limit")]
@@ -894,7 +887,7 @@ pub struct AppConfig {
 
     /// Windows-Benachrichtigung, wenn eine Claude Session wartet oder fertig
     /// ist. Ältere Versionen ignorieren das Feld.
-    #[serde(default = "default_claude_notify")]
+    #[serde(default = "default_true")]
     pub claude_notify: bool,
 
     /// Favorisierte Repos/Worktrees (Schlüssel aus `repo_state_key`); stehen
@@ -908,8 +901,80 @@ pub struct AppConfig {
     pub favorite_sessions: Vec<String>,
 }
 
-fn default_claude_notify() -> bool {
-    true
+/// Serialisierter Stand der Config ([`AppConfig::snapshot`]) mit laufender
+/// Nummer.
+pub struct ConfigSnapshot {
+    seq: u64,
+    json: String,
+}
+
+impl ConfigSnapshot {
+    /// Schreibt atomar (`*.tmp` → `rename`). Schreiber aus mehreren Threads
+    /// laufen nacheinander, und ein älterer Stand überschreibt nie einen
+    /// schon geschriebenen neueren.
+    pub fn write(&self) -> Result<()> {
+        static LAST_WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+        let mut last = LAST_WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+        if self.seq <= *last {
+            return Ok(());
+        }
+        let path = AppConfig::config_path().context("Kein Config-Pfad ermittelbar")?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Konnte Config-Verzeichnis nicht erstellen: {}",
+                    parent.display()
+                )
+            })?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp)
+                .with_context(|| format!("Konnte Config nicht schreiben: {}", tmp.display()))?;
+            file.write_all(self.json.as_bytes())
+                .with_context(|| format!("Konnte Config nicht schreiben: {}", tmp.display()))?;
+            file.sync_all()
+                .with_context(|| format!("Konnte Config nicht syncen: {}", tmp.display()))?;
+        }
+        std::fs::rename(&tmp, &path)
+            .with_context(|| format!("Konnte Config nicht finalisieren: {}", path.display()))?;
+        // Best effort: sync parent dir (auf Unix)
+        #[cfg(unix)]
+        if let Some(dir) = path.parent().and_then(|p| std::fs::File::open(p).ok()) {
+            let _ = dir.sync_all();
+        }
+        *last = self.seq;
+        Ok(())
+    }
+}
+
+/// Eintrag einer Liste umschalten: entfernen, wenn vorhanden, sonst anhängen.
+fn toggle_entry(items: &mut Vec<String>, item: String) {
+    if let Some(i) = items.iter().position(|existing| *existing == item) {
+        items.remove(i);
+    } else {
+        items.push(item);
+    }
+}
+
+/// Windows-Pfade unterscheiden keine Groß-/Kleinschreibung: Schlüssel klein
+/// schreiben, damit dasselbe Repo nicht unter zwei Schlüsseln liegt.
+#[cfg(windows)]
+fn lowercase_keys<T>(map: &mut HashMap<String, T>) {
+    let mut normalized = HashMap::with_capacity(map.len());
+    for (k, v) in map.drain() {
+        normalized.entry(k.to_lowercase()).or_insert(v);
+    }
+    *map = normalized;
+}
+
+/// Icon-Pfad trimmen; eine leere Angabe heißt „kein Icon“.
+fn trim_icon(icon: &mut Option<String>) {
+    *icon = icon
+        .take()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty());
 }
 
 impl AppConfig {
@@ -1025,8 +1090,8 @@ impl Default for AppConfig {
             repo_state: HashMap::new(),
             language: default_language(),
             branch_display_limit: default_branch_limit(),
-            minimize_to_tray: default_minimize_to_tray(),
-            check_for_updates: default_check_for_updates(),
+            minimize_to_tray: default_true(),
+            check_for_updates: default_true(),
             tray_branch_limit: default_tray_branch_limit(),
             tray_icons: TrayIconConfig::default(),
             repo_usage: HashMap::new(),
@@ -1037,7 +1102,7 @@ impl Default for AppConfig {
             worktree_root: None,
             claude_default_dir: None,
             folder_files: Vec::new(),
-            claude_notify: default_claude_notify(),
+            claude_notify: default_true(),
             favorite_repos: Vec::new(),
             favorite_sessions: Vec::new(),
         }
@@ -1073,11 +1138,15 @@ fn dirs_home() -> Option<PathBuf> {
 }
 
 impl AppConfig {
+    /// Pfad der `config.json`; einmal ermittelt (die Einstellungen zeigen
+    /// ihn je Frame).
     pub fn config_path() -> Option<PathBuf> {
-        ProjectDirs::from("com", "gitmanager", "gitmanager").map(|dirs| {
-            let cfg_dir = dirs.config_dir();
-            cfg_dir.join("config.json")
+        static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        PATH.get_or_init(|| {
+            ProjectDirs::from("com", "gitmanager", "gitmanager")
+                .map(|dirs| dirs.config_dir().join("config.json"))
         })
+        .clone()
     }
 
     pub fn legacy_config_path() -> Option<PathBuf> {
@@ -1154,42 +1223,63 @@ impl AppConfig {
         }
     }
 
-    /// Lädt die Config von Disk oder gibt Default zurück
-    pub fn load() -> Self {
+    /// Lädt die Config von Disk. Ist sie nicht lesbar (abgeschnitten, von
+    /// Hand kaputt, von einer neueren Version), gelten die Defaults; die
+    /// Datei bleibt als `config.json.bad` erhalten, denn das nächste
+    /// Speichern überschreibt `config.json`. Der Fehlertext geht mit zurück.
+    pub fn load() -> (Self, Option<String>) {
         match Self::try_load() {
-            Ok(cfg) => cfg,
+            Ok(cfg) => (cfg, None),
             Err(e) => {
                 eprintln!("Config laden fehlgeschlagen, nutze Default: {e:#}");
-                Self::default()
+                let mut message = format!("{e:#}");
+                if let Some(path) = Self::config_path().filter(|p| p.exists()) {
+                    let backup = Self::free_backup_path(&path);
+                    if std::fs::copy(&path, &backup).is_ok() {
+                        message.push_str(&format!(" – {}", backup.display()));
+                    }
+                }
+                (Self::default(), Some(message))
             }
         }
     }
 
+    /// `config.json.bad`, bei vorhandener Datei `.bad.1`, `.bad.2` …: eine
+    /// frühere Sicherung ist womöglich die einzige Kopie der Einstellungen.
+    fn free_backup_path(path: &Path) -> PathBuf {
+        let first = path.with_extension("json.bad");
+        if !first.exists() {
+            return first;
+        }
+        (1..100)
+            .map(|n| path.with_extension(format!("json.bad.{n}")))
+            .find(|p| !p.exists())
+            .unwrap_or(first)
+    }
+
     fn try_load() -> Result<Self> {
         let path = Self::config_path().context("Kein Config-Pfad ermittelbar")?;
-        // Migration: if new path doesn't exist but legacy repomanager path does, import it
-        let effective_path = if !path.exists() {
-            if let Some(legacy) = Self::legacy_config_path() {
-                if legacy.exists() {
-                    // Import legacy config: read from legacy, then save to new location on next migration save
-                    let legacy_data = std::fs::read_to_string(&legacy).with_context(|| {
-                        format!("Konnte Legacy-Config nicht lesen: {}", legacy.display())
-                    })?;
-                    let mut cfg: Self = serde_json::from_str(&legacy_data)
-                        .context("Legacy Config JSON ungültig")?;
-                    cfg.config_version = cfg.config_version.max(4);
-                    // Mark as v5 to trigger language migration save
-                    let _ = cfg.save();
-                    return Ok(cfg);
-                }
-            }
-            return Ok(Self::default());
+        // Ohne eigene Datei die des Vorgängers (repomanager) übernehmen; sie
+        // durchläuft Migration und Validierung wie jede andere und wird am
+        // Ende unter dem neuen Pfad gespeichert.
+        let legacy = if path.exists() {
+            None
         } else {
-            path
+            match Self::legacy_config_path().filter(|p| p.exists()) {
+                Some(legacy) => Some(legacy),
+                None => return Ok(Self::default()),
+            }
         };
-        let data = std::fs::read_to_string(&effective_path)
-            .with_context(|| format!("Konnte Config nicht lesen: {}", effective_path.display()))?;
+        let source = legacy.as_ref().unwrap_or(&path);
+        let data = std::fs::read_to_string(source)
+            .with_context(|| format!("Konnte Config nicht lesen: {}", source.display()))?;
         let mut cfg: Self = serde_json::from_str(&data).context("Config JSON ungültig")?;
+        if legacy.is_some() {
+            cfg.config_version = cfg.config_version.max(4);
+        }
+        // Gespeichert wird einmal am Ende, wenn Migration oder Clamps etwas
+        // geändert haben (K1) – nicht nach jedem Schritt.
+        let loaded_version = cfg.config_version;
         // Migration & Validierung
         if cfg.config_version < 2 {
             // Alte Config ohne Version → injiziere Defaults
@@ -1206,8 +1296,6 @@ impl AppConfig {
                 cfg.active_agent_id = default_active_agent();
             }
             cfg.config_version = 2;
-            // Speichere migrierte Config zurück (best effort)
-            let _ = cfg.save();
         }
         if cfg.config_version < 3 {
             // Neue Defaults seit v3: 7 Profile + 6 Agents – fehlende ergänzen
@@ -1224,28 +1312,14 @@ impl AppConfig {
                 }
             }
             cfg.config_version = 3;
-            let _ = cfg.save();
         }
         if cfg.config_version < 4 {
-            // v4: Nur noch .NET als Default-Profil, andere Presets entfernen (Custom bleiben)
-            // Entferne die 6 zuvor auto-hinzugefügten Profile, behalte nur dotnet + custom
-            let keep_dotnet_only = ["dotnet"];
-            // Behalte nur dotnet und alle die nicht zu den alten Defaults gehören
+            // v4: Nur noch .NET als Default-Profil. Die sechs zuvor automatisch
+            // angelegten Presets entfallen (auch angepasste – bei Bedarf neu
+            // anlegen), eigene Profile bleiben.
             let old_auto_ids = ["rust", "node", "python", "java", "go", "cpp"];
-            cfg.profiles.retain(|p| {
-                if keep_dotnet_only.contains(&p.id.as_str()) {
-                    true
-                } else if old_auto_ids.contains(&p.id.as_str()) {
-                    // Prüfe ob es ein reines Default-Profil war (keine Custom-Änderungen)
-                    // Für Einfachheit: entferne es, Nutzer kann es bei Bedarf neu anlegen
-                    false
-                } else {
-                    true // Custom Profile behalten
-                }
-            });
-            if cfg.profiles.is_empty() {
-                cfg.profiles = default_profiles();
-            }
+            cfg.profiles
+                .retain(|p| !old_auto_ids.contains(&p.id.as_str()));
             // Migriere active_agent_id -> active_agent_ids
             if cfg.active_agent_ids.is_empty() {
                 if let Some(old) = cfg.active_agent_id.clone() {
@@ -1257,24 +1331,16 @@ impl AppConfig {
                     cfg.active_agent_ids = default_active_agents();
                 }
             }
-            // Falls active_agent_ids leer, setze default
-            if cfg.active_agent_ids.is_empty() {
-                cfg.active_agent_ids = default_active_agents();
-            }
             // Theme ist via #[serde(default)] bereits Light falls fehlend
             cfg.config_version = 4;
-            let _ = cfg.save();
         }
         if cfg.config_version < 5 {
             // v5: Language setting added (default En via serde), just bump version
             cfg.config_version = 5;
-            let _ = cfg.save();
         }
         if cfg.config_version < 6 {
-            // v6: branch_display_limit + vscode default "." + no_args flag + {repo} Warnung
-            if cfg.branch_display_limit == 0 {
-                cfg.branch_display_limit = default_branch_limit();
-            }
+            // v6: vscode default "." + no_args flag + {repo} Warnung
+            // (branch_display_limit: Clamp unten bei jedem Laden)
             // Migrate vscode args from {file} to "." if still default (auch mit Zusatzflags)
             for p in &mut cfg.profiles {
                 for ide in &mut p.ides {
@@ -1303,60 +1369,23 @@ impl AppConfig {
                 }
             }
             cfg.config_version = 6;
-            let _ = cfg.save();
         }
         if cfg.config_version < 7 {
-            for p in &mut cfg.profiles {
-                for sel in &mut p.config_selectors {
-                    sel.id = sel.id.trim().to_lowercase().replace(' ', "_");
-                    sel.file_path = sel.file_path.trim().to_string();
-                    sel.key = sel.key.trim().to_string();
-                    if sel.key_attribute.trim().is_empty() {
-                        sel.key_attribute = "key".to_string();
-                    }
-                    if sel.value_attribute.trim().is_empty() {
-                        sel.value_attribute = "value".to_string();
-                    }
-                    sel.options.retain(|o| !o.value.trim().is_empty());
-                }
-            }
+            // v7: Config-Selectors; normalisiert werden sie unten bei jedem Laden.
             cfg.config_version = 7;
-            let _ = cfg.save();
         }
         if cfg.config_version < 8 {
-            for p in &mut cfg.profiles {
-                for ide in &mut p.ides {
-                    if let Some(ic) = ide.icon.as_mut() {
-                        let t = ic.trim().to_string();
-                        if t.is_empty() {
-                            ide.icon = None;
-                        } else {
-                            *ic = t;
-                        }
-                    }
-                }
+            for ide in cfg.profiles.iter_mut().flat_map(|p| &mut p.ides) {
+                trim_icon(&mut ide.icon);
             }
-            for a in &mut cfg.agents {
-                if let Some(ic) = a.icon.as_mut() {
-                    let t = ic.trim().to_string();
-                    if t.is_empty() {
-                        a.icon = None;
-                    } else {
-                        *ic = t;
-                    }
-                }
+            for agent in &mut cfg.agents {
+                trim_icon(&mut agent.icon);
             }
             cfg.config_version = 8;
-            let _ = cfg.save();
         }
         if cfg.config_version < 9 {
-            // v9: Tray settings introduced
-            // minimize_to_tray default handled via serde default, but ensure tray_branch_limit valid
-            if cfg.tray_branch_limit == 0 {
-                cfg.tray_branch_limit = default_tray_branch_limit();
-            }
+            // v9: Tray-Einstellungen (Defaults via serde, Limit-Clamp unten)
             cfg.config_version = 9;
-            let _ = cfg.save();
         }
         if cfg.config_version < 10 {
             // v10: TrayIconConfig introduced (icon_order, hidden_icon_ids, max_display)
@@ -1365,58 +1394,20 @@ impl AppConfig {
                 "vscode", "vs2022", "rider", "folder", "terminal", "claude", "codex", "gemini",
                 "copilot", "cursor", "aider",
             ];
-            if cfg.tray_icons.max_display == 0 {
-                cfg.tray_icons.max_display = default_tray_max_display();
-            }
-            cfg.tray_icons.max_display = cfg.tray_icons.max_display.clamp(5, 50);
-            // hidden ids dedup/sort
-            cfg.tray_icons.hidden_icon_ids.sort();
-            cfg.tray_icons.hidden_icon_ids.dedup();
-            // filter hidden to valid ids only (keep custom hidden as is for forward compat? filter to known list)
-            // keep only known ids for migration, custom unknown kept as is (no filtering)
-            // icon_order dedup preserve order
-            {
-                let mut seen = std::collections::HashSet::new();
-                cfg.tray_icons
-                    .icon_order
-                    .retain(|id| seen.insert(id.clone()));
-            }
-            if cfg.tray_icons.icon_order.is_empty() {
-                cfg.tray_icons.icon_order =
-                    DEFAULT_TRAY_ICONS.iter().map(|s| s.to_string()).collect();
-            } else {
-                // ensure all default icons present (append missing)
-                for id in DEFAULT_TRAY_ICONS {
-                    if !cfg.tray_icons.icon_order.contains(&id.to_string()) {
-                        cfg.tray_icons.icon_order.push(id.to_string());
-                    }
+            // Fehlende Standard-Icons anhängen; unbekannte IDs bleiben
+            // (vorwärtskompatibel). `max_display`, Dubletten, die Sortierung
+            // der ausgeblendeten IDs und die Schlüssel von `repo_usage`
+            // bereinigt die Validierung unten bei jedem Laden.
+            for id in DEFAULT_TRAY_ICONS {
+                if !cfg.tray_icons.icon_order.iter().any(|known| known == id) {
+                    cfg.tray_icons.icon_order.push(id.to_string());
                 }
-                // also remove invalid? keep as is for forward compat, but ensure deduped above
-            }
-            // RepoUsage introduced together with TrayIconConfig v10 (Task 5 MRU)
-            // Existing configs before v10 have no repo_usage; ensure initialized (empty map if missing)
-            if cfg.repo_usage.is_empty() {
-                cfg.repo_usage = HashMap::new();
-            }
-            // Windows key normalization for repo_usage (case-insensitive)
-            #[cfg(windows)]
-            {
-                let mut normalized: HashMap<String, RepoUsage> = HashMap::new();
-                for (k, v) in cfg.repo_usage.drain() {
-                    let nk = k.to_lowercase();
-                    normalized.entry(nk).or_insert(v);
-                }
-                cfg.repo_usage = normalized;
             }
             cfg.config_version = 10;
-            let _ = cfg.save();
         }
-        // K1: Versionen ab hier ohne Zwischen-Save — einmalig am Ende.
-        let loaded_version = cfg.config_version;
         if cfg.config_version < 11 {
             // v11: Autostart via Registry Run-Key (Windows), Default false via serde.
             // Kein Pfad-Schreiben hier — Registry-Sync erfolgt in app.rs (Save + Startup).
-            // K1: kein Zwischen-Save — einmalig am Ende von try_load().
             cfg.config_version = 11;
         }
         if cfg.config_version < 12 {
@@ -1471,7 +1462,7 @@ impl AppConfig {
         cfg.branch_display_limit = clamped_branch;
         cfg.tray_branch_limit = clamped_tray;
         cfg.tray_icons.max_display = clamped_max;
-        if cfg.config_version != loaded_version || clamp_changed {
+        if legacy.is_some() || cfg.config_version != loaded_version || clamp_changed {
             let _ = cfg.save();
         }
         cfg.tray_icons.hidden_icon_ids.sort();
@@ -1492,27 +1483,18 @@ impl AppConfig {
         cfg.roots.sort();
         cfg.roots.dedup();
 
-        // RepoState Keys auf Windows normalisieren (case-insensitiv) – verhindert doppelte Einträge
+        // Schlüssel wie `repo_state_key` (verhindert doppelte Einträge)
         #[cfg(windows)]
         {
-            let mut normalized: HashMap<String, RepoUiState> = HashMap::new();
-            for (k, v) in cfg.repo_state.drain() {
-                let nk = k.to_lowercase();
-                normalized.entry(nk).or_insert(v);
-            }
-            cfg.repo_state = normalized;
-        }
-        // RepoUsage keys similarly normalize on Windows
-        #[cfg(windows)]
-        {
-            let mut normalized: HashMap<String, RepoUsage> = HashMap::new();
-            for (k, v) in cfg.repo_usage.drain() {
-                let nk = k.to_lowercase();
-                normalized.entry(nk).or_insert(v);
-            }
-            cfg.repo_usage = normalized;
+            lowercase_keys(&mut cfg.repo_state);
+            lowercase_keys(&mut cfg.repo_usage);
         }
 
+        // Ohne Profil ginge nichts (`get_active_profile`); auch `"profiles": []`
+        // von Hand oder nach der v4-Bereinigung
+        if cfg.profiles.is_empty() {
+            cfg.profiles = default_profiles();
+        }
         // Profile validieren
         for p in &mut cfg.profiles {
             p.file_extension = p.normalized_extension();
@@ -1624,13 +1606,6 @@ impl AppConfig {
         }
         // Sync deprecated field
         cfg.active_agent_id = cfg.active_agent_ids.first().cloned();
-        if let Some(active) = &cfg.active_agent_id {
-            if !cfg.agents.iter().any(|a| &a.id == active) {
-                let new_active = cfg.agents.first().map(|a| a.id.clone());
-                cfg.active_agent_id = new_active.clone();
-                cfg.active_agent_ids = new_active.into_iter().collect();
-            }
-        }
         // Per-Profil hidden_agent_ids / agent_order gegen tatsächliche Agents validieren
         let valid_agent_ids: Vec<String> = cfg.agents.iter().map(|a| a.id.clone()).collect();
         for p in &mut cfg.profiles {
@@ -1640,40 +1615,19 @@ impl AppConfig {
         Ok(cfg)
     }
 
-    pub fn save(&self) -> Result<()> {
-        let path = Self::config_path().context("Kein Config-Pfad ermittelbar")?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Konnte Config-Verzeichnis nicht erstellen: {}",
-                    parent.display()
-                )
-            })?;
-        }
-        let data =
+    /// Aktueller Stand zum Schreiben, auch aus einem anderen Thread.
+    pub fn snapshot(&self) -> Result<ConfigSnapshot> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let json =
             serde_json::to_string_pretty(self).context("Config serialisieren fehlgeschlagen")?;
-        let tmp = path.with_extension("json.tmp");
-        {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&tmp)
-                .with_context(|| format!("Konnte Config nicht schreiben: {}", tmp.display()))?;
-            file.write_all(data.as_bytes())
-                .with_context(|| format!("Konnte Config nicht schreiben: {}", tmp.display()))?;
-            file.sync_all()
-                .with_context(|| format!("Konnte Config nicht syncen: {}", tmp.display()))?;
-        }
-        std::fs::rename(&tmp, &path)
-            .with_context(|| format!("Konnte Config nicht finalisieren: {}", path.display()))?;
-        // Best effort: sync parent dir (auf Unix)
-        #[cfg(unix)]
-        {
-            if let Some(parent) = path.parent() {
-                if let Ok(dir) = std::fs::File::open(parent) {
-                    let _ = dir.sync_all();
-                }
-            }
-        }
-        Ok(())
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        Ok(ConfigSnapshot { seq, json })
+    }
+
+    /// Schreibt die Config sofort (blockiert für Schreiben und fsync). Im
+    /// UI-Thread nur beim Beenden; sonst über `snapshot` in einem Thread.
+    pub fn save(&self) -> Result<()> {
+        self.snapshot()?.write()
     }
 
     pub fn add_root(&mut self, path: PathBuf) {
@@ -1743,11 +1697,8 @@ impl AppConfig {
 
     pub fn toggle_agent_active(&mut self, agent_id: &str) {
         if self.is_agent_active(agent_id) {
+            // Eine leere Liste ist erlaubt: dann zeigt die UI keinen Agent-Button
             self.active_agent_ids.retain(|id| id != agent_id);
-            // Verhindere leere Liste nicht strikt, aber sync deprecated
-            if self.active_agent_ids.is_empty() {
-                // Erlaube leer, aber UI zeigt dann keinen Button – optional fallback
-            }
         } else {
             self.active_agent_ids.push(agent_id.to_string());
         }
@@ -1771,27 +1722,23 @@ impl AppConfig {
         }
     }
 
-    /// Favoriten-Schlüssel: Komponenten normalisiert (kein abschließender
-    /// Slash), auf Windows zusätzlich ohne Groß-/Kleinschreibung.
-    fn favorite_key(path: &Path) -> String {
+    /// Vergleichsschlüssel für Pfade (Favoriten, Checkout-Ziele): Komponenten
+    /// normalisiert (kein abschließender Separator), auf Windows zusätzlich
+    /// ohne Groß-/Kleinschreibung.
+    pub fn path_key(path: &Path) -> String {
         Self::repo_state_key(&path.components().collect::<PathBuf>())
     }
 
     /// Ist das Repo/der Worktree als Favorit markiert?
     pub fn is_favorite_repo(&self, path: &Path) -> bool {
-        let key = Self::favorite_key(path);
+        let key = Self::path_key(path);
         self.favorite_repos.contains(&key)
     }
 
     /// Favorit setzen bzw. entfernen. Aufrufer sortieren die Liste neu
     /// (`repo_sort_dirty`).
     pub fn toggle_favorite_repo(&mut self, path: &Path) {
-        let key = Self::favorite_key(path);
-        if let Some(i) = self.favorite_repos.iter().position(|k| *k == key) {
-            self.favorite_repos.remove(i);
-        } else {
-            self.favorite_repos.push(key);
-        }
+        toggle_entry(&mut self.favorite_repos, Self::path_key(path));
     }
 
     /// Ist die Claude Session (ID) als Favorit markiert?
@@ -1801,11 +1748,7 @@ impl AppConfig {
 
     /// Favorit setzen bzw. entfernen.
     pub fn toggle_favorite_session(&mut self, id: &str) {
-        if let Some(i) = self.favorite_sessions.iter().position(|s| s == id) {
-            self.favorite_sessions.remove(i);
-        } else {
-            self.favorite_sessions.push(id.to_string());
-        }
+        toggle_entry(&mut self.favorite_sessions, id.to_string());
     }
 
     /// Bevorzugte Solution des Repos (relativer Pfad).

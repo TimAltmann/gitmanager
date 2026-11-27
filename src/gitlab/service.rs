@@ -275,6 +275,16 @@ fn store_schema(host: &str, schema: HostSchema) {
     });
 }
 
+/// Gibt `f` das gelernte Schema von `host` und schreibt es danach zurück.
+/// Die Sperre gilt nur fürs Laden und Speichern, nicht während `f` (dort
+/// laufen Netzaufrufe).
+fn with_schema<T>(host: &str, f: impl FnOnce(&mut HostSchema) -> T) -> T {
+    let mut schema = schema_for(host);
+    let out = f(&mut schema);
+    store_schema(host, schema);
+    out
+}
+
 // --- Fehlerarten ----------------------------------------------------------
 
 /// Nach diesen Fehlern geht im selben Durchlauf kein Aufruf mehr an den Host.
@@ -467,6 +477,22 @@ fn parse_config_host_keys(text: &str) -> Vec<String> {
 
 // --- Abruf ----------------------------------------------------------------
 
+/// glab fehlt oder ist zu alt: weitere Aufrufe wären zwecklos.
+fn unusable_glab(kind: &GlabErrorKind) -> bool {
+    matches!(kind, GlabErrorKind::NotInstalled | GlabErrorKind::TooOld(_))
+}
+
+/// Wartet auf die Threads eines `scope`; die Panic eines Workers geht weiter.
+fn join_workers<T>(workers: Vec<std::thread::ScopedJoinHandle<'_, T>>) -> Vec<T> {
+    workers
+        .into_iter()
+        .map(|w| {
+            w.join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
+        .collect()
+}
+
 /// Abruf aller GitLab-Hosts (E16, E20): je Host Dashboard und Erwähnungen
 /// (höchstens drei Seiten), mit `include_uninvolved` auch „Nicht beteiligt“
 /// für die einbezogenen lokalen Projekte. Hosts laufen parallel, je Host
@@ -483,7 +509,7 @@ pub fn fetch_snapshot(
     let mut result = MrFetchResult::default();
     if !hosts.gitlab_hosts.is_empty() {
         match glab_version(runner) {
-            Err(kind @ (GlabErrorKind::NotInstalled | GlabErrorKind::TooOld(_))) => {
+            Err(kind) if unusable_glab(&kind) => {
                 result.glab_error = Some(kind);
             }
             // Version unlesbar: die Abfragen zeigen selbst, ob glab geht
@@ -545,13 +571,7 @@ fn fetch_hosts(
                 })
             })
             .collect();
-        workers
-            .into_iter()
-            .map(|w| {
-                w.join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
-            .collect()
+        join_workers(workers)
     });
     done.into_iter()
         .map(|(raw, schema)| {
@@ -731,32 +751,33 @@ pub fn fetch_merged(
     since: i64,
 ) -> Vec<MergedHostPage> {
     let since = format_rfc3339(since);
-    std::thread::scope(|scope| {
+    // Schemata hier laden und speichern, nicht in den Workern (`with_schemas`)
+    let done: Vec<(MergedHostPage, HostSchema)> = std::thread::scope(|scope| {
         let workers: Vec<_> = jobs
             .iter()
             .map(|(host, me, cursor)| {
                 let since = &since;
+                let mut schema = schema_for(host);
                 scope.spawn(move || {
-                    let mut schema = schema_for(host);
                     let query = graphql::merged(since, cursor.as_deref());
                     let page = run_query(runner, host, &mut schema, query).and_then(merged_page);
-                    store_schema(host, schema);
-                    MergedHostPage {
+                    let page = MergedHostPage {
                         host_key: host.clone(),
                         me: me.clone(),
                         page,
-                    }
+                    };
+                    (page, schema)
                 })
             })
             .collect();
-        workers
-            .into_iter()
-            .map(|w| {
-                w.join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
-            .collect()
-    })
+        join_workers(workers)
+    });
+    done.into_iter()
+        .map(|(page, schema)| {
+            store_schema(&page.host_key, schema);
+            page
+        })
+        .collect()
 }
 
 /// Letzte Kommentare je MR `(projektpfad, iid)` eines Hosts, in der
@@ -767,18 +788,19 @@ pub fn fetch_recent_notes(
     host: &str,
     mrs: &[(String, u64)],
 ) -> Vec<Vec<NoteInfo>> {
-    let mut schema = schema_for(host);
-    let mut out = Vec::with_capacity(mrs.len());
-    for (query, chunk) in graphql::recent_notes(mrs)
-        .into_iter()
-        .zip(mrs.chunks(graphql::NOTES_CHUNK))
-    {
-        match run_query(runner, host, &mut schema, query) {
-            Ok(got) => out.extend(graphql::parse_recent_notes(&got.data, chunk.len())),
-            Err(_) => out.extend(chunk.iter().map(|_| Vec::new())),
+    let mut out = with_schema(host, |schema| {
+        let mut out = Vec::with_capacity(mrs.len());
+        for (query, chunk) in graphql::recent_notes(mrs)
+            .into_iter()
+            .zip(mrs.chunks(graphql::NOTES_CHUNK))
+        {
+            match run_query(runner, host, schema, query) {
+                Ok(got) => out.extend(graphql::parse_recent_notes(&got.data, chunk.len())),
+                Err(_) => out.extend(chunk.iter().map(|_| Vec::new())),
+            }
         }
-    }
-    store_schema(host, schema);
+        out
+    });
     // Ohne Nutzer-Kommentar (fein granulierter Token ohne „Work Item:
     // Read“: GraphQL liefert sie leer, ohne Fehler) über REST-Diskussionen,
     // die solche Tokens lesen dürfen; sonst bliebe der Autor unbekannt
@@ -939,47 +961,48 @@ pub fn fetch_merged_branches(
         .filter(|(_, branches)| !branches.is_empty())
         .cloned()
         .collect();
-    let mut schema = schema_for(host);
-    let mut found: Vec<MergedByBranch> = Vec::with_capacity(asked.len());
-    let mut failure = None;
-    for (query, chunk) in graphql::merged_by_branches(&asked)
-        .into_iter()
-        .zip(asked.chunks(graphql::MERGED_BRANCHES_CHUNK))
-    {
-        let got = match run_query(runner, host, &mut schema, query) {
-            Ok(got) => got,
-            Err(kind) => {
-                failure = Some(kind);
+    let (found, failure) = with_schema(host, |schema| {
+        let mut found: Vec<MergedByBranch> = Vec::with_capacity(asked.len());
+        let mut failure = None;
+        for (query, chunk) in graphql::merged_by_branches(&asked)
+            .into_iter()
+            .zip(asked.chunks(graphql::MERGED_BRANCHES_CHUNK))
+        {
+            let got = match run_query(runner, host, schema, query) {
+                Ok(got) => got,
+                Err(kind) => {
+                    failure = Some(kind);
+                    break;
+                }
+            };
+            // Teilfehler: fehlt ein Projekt trotz Meldungen, wäre „nichts
+            // gemergt“ falsch (ohne Meldungen heißt es nur: keine Rechte).
+            let lost = (0..chunk.len()).any(|i| {
+                got.data
+                    .get(format!("p{i}"))
+                    .and_then(|p| p.get("mergeRequests"))
+                    .is_none_or(Value::is_null)
+            });
+            if lost && !got.errors.is_empty() {
+                failure = Some(GlabErrorKind::GraphQl(got.errors));
                 break;
             }
-        };
-        // Teilfehler: fehlt ein Projekt trotz Meldungen, wäre „nichts
-        // gemergt“ falsch (ohne Meldungen heißt es nur: keine Rechte).
-        let lost = (0..chunk.len()).any(|i| {
-            got.data
-                .get(format!("p{i}"))
-                .and_then(|p| p.get("mergeRequests"))
-                .is_none_or(Value::is_null)
-        });
-        if lost && !got.errors.is_empty() {
-            failure = Some(GlabErrorKind::GraphQl(got.errors));
-            break;
-        }
-        for mrs in graphql::parse_merged_by_branches(&got.data, chunk.len()) {
-            let mut map = MergedByBranch::new();
-            for (iid, branch, sha) in mrs {
-                if let Some(sha) = sha {
-                    map.entry(branch).or_default().push((iid, sha));
+            for mrs in graphql::parse_merged_by_branches(&got.data, chunk.len()) {
+                let mut map = MergedByBranch::new();
+                for (iid, branch, sha) in mrs {
+                    if let Some(sha) = sha {
+                        map.entry(branch).or_default().push((iid, sha));
+                    }
                 }
+                // mehrere gemergte MRs je Branch: höchste iid zuerst, deterministisch
+                for list in map.values_mut() {
+                    list.sort_by(|a, b| b.cmp(a));
+                }
+                found.push(map);
             }
-            // mehrere gemergte MRs je Branch: höchste iid zuerst, deterministisch
-            for list in map.values_mut() {
-                list.sort_by(|a, b| b.cmp(a));
-            }
-            found.push(map);
         }
-    }
-    store_schema(host, schema);
+        (found, failure)
+    });
     if let Some(kind) = failure {
         return Err(kind);
     }
@@ -1038,10 +1061,9 @@ pub fn fetch_uninvolved_more(
     if pages.is_empty() {
         return Ok(page);
     }
-    let mut schema = schema_for(host);
-    let loaded = load_uninvolved_pages(runner, host, me, &pages, &mut schema, &mut page);
-    store_schema(host, schema);
-    loaded?;
+    with_schema(host, |schema| {
+        load_uninvolved_pages(runner, host, me, &pages, schema, &mut page)
+    })?;
     sort_uninvolved(&mut page.mrs);
     Ok(page)
 }
@@ -1129,7 +1151,7 @@ fn probe_with(
     };
     match version {
         Ok(version) => probe.glab_version = Some(version),
-        Err(kind @ (GlabErrorKind::NotInstalled | GlabErrorKind::TooOld(_))) => {
+        Err(kind) if unusable_glab(&kind) => {
             probe.error = Some(kind);
             return probe;
         }
@@ -1354,6 +1376,32 @@ struct PatInfo {
     granular: bool,
 }
 
+/// `glab api -i <endpoint>`: HTTP-Code und, nur bei 200, das JSON. `Err`
+/// bei Fehlern, nach denen kein Aufruf mehr an den Host geht – außer bei
+/// den Codes in `own`: die deutet der Aufrufer selbst (400 = kein PAT, 404
+/// = kein Zugriff), auch wenn stderr nach einer Fehlerart aussieht.
+fn rest_api(
+    runner: &dyn GlabRunner,
+    host: &str,
+    endpoint: &str,
+    prepare: Prepare<'_>,
+    own: &[u16],
+) -> Result<(Option<u16>, Option<Value>), GlabErrorKind> {
+    let out = runner
+        .run(prepare(GlabRequest::api(host, [endpoint])))
+        .map_err(|e| e.kind())?;
+    let code = out.http.as_ref().map(|h| h.code);
+    if code == Some(200) {
+        return Ok((code, out.json()));
+    }
+    if !code.is_some_and(|c| own.contains(&c)) {
+        if let Some(kind) = classify(&out).filter(ends_host) {
+            return Err(kind);
+        }
+    }
+    Ok((code, None))
+}
+
 /// `glab api -i personal_access_tokens/self`. `Err` bei Anmelde-, Netz-,
 /// TLS- und Timeout-Fehlern (dann keine weiteren Aufrufe).
 fn token_self(
@@ -1361,19 +1409,15 @@ fn token_self(
     host: &str,
     prepare: Prepare<'_>,
 ) -> Result<SelfInfo, GlabErrorKind> {
-    let out = runner
-        .run(prepare(GlabRequest::api(host, [SELF_ENDPOINT])))
-        .map_err(|e| e.kind())?;
-    match out.http.as_ref().map(|h| h.code) {
-        Some(200) => Ok(out.json().map_or(SelfInfo::Unavailable, |json| {
-            SelfInfo::Pat(parse_pat(&json))
-        })),
-        Some(400) => Ok(SelfInfo::NotPat),
-        _ => match classify(&out) {
-            Some(kind) if ends_host(&kind) => Err(kind),
-            _ => Ok(SelfInfo::Unavailable),
+    Ok(
+        match rest_api(runner, host, SELF_ENDPOINT, prepare, &[400])? {
+            (Some(200), json) => json.map_or(SelfInfo::Unavailable, |json| {
+                SelfInfo::Pat(parse_pat(&json))
+            }),
+            (Some(400), _) => SelfInfo::NotPat,
+            _ => SelfInfo::Unavailable,
         },
-    }
+    )
 }
 
 fn parse_pat(json: &Value) -> PatInfo {
@@ -1434,10 +1478,9 @@ fn access_probe(
     paths: &[String],
     prepare: Prepare<'_>,
 ) -> Result<AccessProbe, GlabErrorKind> {
-    let mut schema = schema_for(host);
-    let result = run_access(runner, host, paths, prepare, &mut schema);
-    store_schema(host, schema);
-    result
+    with_schema(host, |schema| {
+        run_access(runner, host, paths, prepare, schema)
+    })
 }
 
 fn run_access(
@@ -1607,20 +1650,13 @@ fn rest_project(
     prepare: Prepare<'_>,
 ) -> Result<AccessState, GlabErrorKind> {
     let endpoint = format!("projects/{}", encode_path(path));
-    let out = runner
-        .run(prepare(GlabRequest::api(host, [endpoint])))
-        .map_err(|e| e.kind())?;
-    match out.http.as_ref().map(|h| h.code) {
-        Some(200) => Ok(out
-            .json()
-            .map_or(AccessState::Unknown, |json| rest_state(&json, path))),
-        Some(301 | 302 | 307 | 308) => Ok(AccessState::Renamed { to: String::new() }),
-        Some(404) => Ok(AccessState::NoAccess),
-        _ => match classify(&out) {
-            Some(kind) if ends_host(&kind) => Err(kind),
-            _ => Ok(AccessState::Unknown),
-        },
-    }
+    const OWN: &[u16] = &[301, 302, 307, 308, 404];
+    Ok(match rest_api(runner, host, &endpoint, prepare, OWN)? {
+        (Some(200), json) => json.map_or(AccessState::Unknown, |json| rest_state(&json, path)),
+        (Some(301 | 302 | 307 | 308), _) => AccessState::Renamed { to: String::new() },
+        (Some(404), _) => AccessState::NoAccess,
+        _ => AccessState::Unknown,
+    })
 }
 
 fn rest_state(json: &Value, requested: &str) -> AccessState {
@@ -1766,18 +1802,8 @@ fn rest_username(
     host: &str,
     prepare: Prepare<'_>,
 ) -> Result<Option<String>, GlabErrorKind> {
-    let out = runner
-        .run(prepare(GlabRequest::api(host, ["user"])))
-        .map_err(|e| e.kind())?;
-    if out.http.as_ref().map(|h| h.code) == Some(200) {
-        return Ok(out
-            .json()
-            .and_then(|json| json.get("username")?.as_str().map(str::to_string)));
-    }
-    match classify(&out) {
-        Some(kind) if ends_host(&kind) => Err(kind),
-        _ => Ok(None),
-    }
+    let (_, json) = rest_api(runner, host, "user", prepare, &[])?;
+    Ok(json.and_then(|json| json.get("username")?.as_str().map(str::to_string)))
 }
 
 /// Hat die bisher gespeicherte Anmeldung (ohne Env-Tokens) `api`? Eine
@@ -1810,7 +1836,7 @@ pub fn save_token(
     protocol: Protocol,
 ) -> Result<SavedWhere, GlabErrorKind> {
     let version = glab_version(runner);
-    if let Err(kind @ (GlabErrorKind::NotInstalled | GlabErrorKind::TooOld(_))) = &version {
+    if let Some(kind) = version.as_ref().err().filter(|kind| unusable_glab(kind)) {
         return Err(kind.clone());
     }
     let check = check_token(runner, host, &token, protocol, &[])?;

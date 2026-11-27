@@ -167,7 +167,7 @@ fn author_png(initials: &str, color: &str) -> Option<Vec<u8>> {
         fontdb: db,
         ..resvg::usvg::Options::default()
     };
-    let svg = author_svg(&xml_text(initials), color);
+    let svg = author_svg(&crate::text::xml_escape(initials), color);
     let tree = resvg::usvg::Tree::from_str(&svg, &options).ok()?;
     // Ohne gefundene Glyphen bliebe nur die Farbfläche
     if !tree.root().has_children() || tree.root().children().len() < 2 {
@@ -176,12 +176,6 @@ fn author_png(initials: &str, color: &str) -> Option<Vec<u8>> {
     let mut pixmap = Pixmap::new(SIZE, SIZE)?;
     resvg::render(&tree, Transform::default(), &mut pixmap.as_mut());
     pixmap.encode_png().ok()
-}
-
-fn xml_text(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 /// `dir/<name>_v<ART_VERSION>.png`, beim ersten Mal mit `render` erzeugt.

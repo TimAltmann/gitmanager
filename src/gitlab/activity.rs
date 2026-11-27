@@ -122,11 +122,21 @@ impl MrActivityStore {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        Self::write_json(path, &self.to_json()?)
+    }
+
+    /// Serialisierter Stand (zum Schreiben in einem anderen Thread).
+    pub fn to_json(&self) -> std::io::Result<String> {
+        serde_json::to_string(self).map_err(std::io::Error::other)
+    }
+
+    /// Schreibt einen Stand aus [`Self::to_json`].
+    pub fn write_json(path: &Path, json: &str) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let json = serde_json::to_string(self).map_err(std::io::Error::other)?;
         // Erst vollständig schreiben, dann ersetzen: kein halbes JSON beim Absturz
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, json)?;
@@ -451,14 +461,17 @@ pub struct NoteInfo {
     pub system: bool,
 }
 
+/// Die `added` neuesten Nutzer-Kommentare (`notes` älteste zuerst).
+fn recent_user_notes(notes: &[NoteInfo], added: u32) -> impl Iterator<Item = &NoteInfo> {
+    let user_notes: Vec<&NoteInfo> = notes.iter().filter(|n| !n.system).collect();
+    let skip = user_notes.len().saturating_sub(added as usize);
+    user_notes.into_iter().skip(skip)
+}
+
 /// Die `added` neuesten Nutzer-Kommentare (`notes` älteste zuerst), die
 /// nicht von `me` stammen.
 pub fn others_notes<'a>(notes: &'a [NoteInfo], added: u32, me: Option<&str>) -> Vec<&'a NoteInfo> {
-    let user_notes: Vec<&NoteInfo> = notes.iter().filter(|n| !n.system).collect();
-    let skip = user_notes.len().saturating_sub(added as usize);
-    user_notes
-        .into_iter()
-        .skip(skip)
+    recent_user_notes(notes, added)
         .filter(|n| me.is_none_or(|me| !n.author_username.eq_ignore_ascii_case(me)))
         .collect()
 }
@@ -469,24 +482,9 @@ pub fn own_notes(notes: &[NoteInfo], added: u32, me: Option<&str>) -> u32 {
     let Some(me) = me.filter(|m| !m.is_empty()) else {
         return 0;
     };
-    let user_notes: Vec<&NoteInfo> = notes.iter().filter(|n| !n.system).collect();
-    let skip = user_notes.len().saturating_sub(added as usize);
-    user_notes
-        .into_iter()
-        .skip(skip)
+    recent_user_notes(notes, added)
         .filter(|n| n.author_username.eq_ignore_ascii_case(me))
         .count() as u32
-}
-
-/// Kommentar einzeilig und gekürzt für die Benachrichtigung.
-pub fn note_snippet(body: &str, max_chars: usize) -> String {
-    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > max_chars {
-        let cut: String = flat.chars().take(max_chars).collect();
-        format!("{}…", cut.trim_end())
-    } else {
-        flat
-    }
 }
 
 #[cfg(test)]
@@ -810,11 +808,5 @@ mod tests {
         assert_eq!(own_notes(&notes, 2, Some("ME")), 1);
         assert_eq!(own_notes(&notes, 3, Some("me")), 2);
         assert_eq!(own_notes(&notes, 2, None), 0);
-    }
-
-    #[test]
-    fn snippet_flattens_and_cuts() {
-        assert_eq!(note_snippet("a\n\n b", 10), "a b");
-        assert_eq!(note_snippet("abcdefghij klm", 5), "abcde…");
     }
 }

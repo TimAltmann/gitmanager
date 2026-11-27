@@ -264,11 +264,12 @@ cargo test
 **Project layout:**
 ```
 src/
-  main.rs       # eframe bootstrap + load_icon (256) + image loaders
-  app.rs        # MyApp, scan thread, branch dialog, top/status bars, language switch
-  i18n.rs       # Language enum (En/De) + tr() translations
+  main.rs       # eframe bootstrap + load_icon (256)
+  app.rs        # MyApp, image loaders, scan thread, branch dialog, top/status bars, language switch
+  i18n.rs       # Language enum (En/De) + TEXTS table + tr() translations
   config.rs     # AppConfig v15 (roots, profiles, agents, terminal, theme, language, repo_state, merge_requests) + migration
-  git.rs        # RepoInfo, branches, checkout (safe/force/stash), fetch, launch_ide/agent, explorer
+  git/          # mod.rs (RepoInfo, branches), fetch.rs, checkout.rs (safe/force/stash), worktree.rs,
+                #   cleanup.rs, launch.rs (IDE/agent/shell/explorer), ide_discovery.rs
   scanner.rs    # WalkDir + rayon, scan_repos + scan_solutions_for_repo (depth 3, cap 20)
   gitlab/       # Merge Requests without UI: remotes/hosts, glab runner, GraphQL, model, service, checkout menu
   cleanup.rs    # Clean-up candidates (merged MR, upstream gone) without UI
@@ -279,10 +280,12 @@ src/
   updater.rs    # Update check against GitHub Releases
   ui/
     merge_requests.rs  # Merge Requests view (two columns, chips, checkout menu)
-    settings/merge_requests.rs  # Settings tab "Merge Requests"
+    settings/     # One file per settings tab (general, profiles, agents, icons, tray_icons, merge_requests)
     repo_list.rs  # Repo card: ☆ + name + branch combo (search+refresh) + solution combo, last commit, Explorer/shell/IDE/agent icons, ⋯ menu
     repo_card_chips.rs  # Status chips (state, ↑/↓, MR, Claude), favorite star, ⋯ menu
-    settings.rs   # Tabbed window: General, Languages/Profiles, AI Agents, Terminal, Appearance, Language, Icons, Tray Icons
+    settings.rs   # Tabbed settings window + state; tabs Terminal, Appearance, Language
+    icons.rs      # All embedded SVG icon constants
+    widgets.rs    # Small shared widgets
     tray_popup.rs # Tray popup (repo cards, branch filter, footer buttons)
     theme.rs      # Light/Dark/Nord/Dracula/Solarized themes
 assets/

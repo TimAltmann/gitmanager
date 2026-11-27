@@ -38,6 +38,21 @@ impl SpawnLocked for Command {
 
 /// Windows: Konsolenprogramm ohne eigenes Konsolenfenster starten.
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Windows: Kind bekommt ein eigenes, neues Konsolenfenster.
+/// Die Terminal-Starts in `git` sind `cfg(not(test))`, daher im Test-Build
+/// ungenutzt.
+#[cfg_attr(test, allow(dead_code))]
+pub const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+
+/// Setzt die Windows-Erzeugungsflags eines `Command`; sonst ohne Wirkung.
+pub(crate) fn set_creation_flags(_cmd: &mut Command, _flags: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        _cmd.creation_flags(_flags);
+    }
+}
+
 /// Abfrageintervall für `try_wait`.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// Nachlauf für die Pipe-Leser nach dem Exit (siehe [`Keep`]).

@@ -4,14 +4,15 @@
 
 use super::merge_requests::MrResult;
 use super::{MainView, MyApp};
-use crate::claude_notify::{show_simple_notification, SimpleToast, ToastClick};
+use crate::claude_notify::{show_simple_notification, SimpleToast, ToastClick, SNIPPET_CHARS};
 use crate::gitlab::activity::{
-    note_snippet, others_notes, own_notes, CommitCheck, CommitInfo, MrActivityStore, MrEvent,
-    MrEventKind, MyIdentity, NoteInfo,
+    others_notes, own_notes, CommitCheck, CommitInfo, MrActivityStore, MrEvent, MrEventKind,
+    MyIdentity, NoteInfo,
 };
 use crate::gitlab::service::{fetch_my_emails, fetch_recent_commits, fetch_recent_notes};
 use crate::gitlab::time::now_unix;
 use crate::i18n::{tr, tr_fmt};
+use crate::text::snippet;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -19,8 +20,6 @@ use std::sync::Arc;
 
 /// Kennung der Kopfzeile der MR-Benachrichtigungen
 const HEADER_ID: &str = "merge-requests";
-/// Zeichen des Kommentars in der Benachrichtigung
-const SNIPPET_CHARS: usize = 160;
 /// Höchstens so viele Benachrichtigungen je Abruf; der Rest als Sammelmeldung
 const MAX_TOASTS: usize = 4;
 
@@ -34,8 +33,10 @@ struct ToastHit {
 
 pub(super) struct MrActivityState {
     pub store: MrActivityStore,
-    /// `None` in Tests: nichts speichern
-    path: Option<PathBuf>,
+    /// Schreib-Thread des Stands (`None` in Tests: nichts speichern). Der
+    /// Stand ändert sich nach jedem Abruf und bei jedem Klick auf einen MR;
+    /// geschrieben wird deshalb nicht im UI-Thread.
+    writer: Option<Sender<String>>,
     click_tx: Sender<ToastHit>,
     click_rx: Receiver<ToastHit>,
     /// Weckt die App beim Klick auf eine Benachrichtigung
@@ -47,7 +48,7 @@ impl Default for MrActivityState {
         let (click_tx, click_rx) = mpsc::channel();
         Self {
             store: MrActivityStore::default(),
-            path: None,
+            writer: None,
             click_tx,
             click_rx,
             ctx: None,
@@ -64,18 +65,38 @@ impl MrActivityState {
                 .as_deref()
                 .map(MrActivityStore::load)
                 .unwrap_or_default(),
-            path,
+            writer: path.map(spawn_activity_writer),
             ..Self::default()
         }
     }
 
     fn save(&self) {
-        if let Some(path) = &self.path {
-            if let Err(e) = self.store.save(path) {
+        let Some(writer) = &self.writer else {
+            return;
+        };
+        match self.store.to_json() {
+            Ok(json) => {
+                let _ = writer.send(json);
+            }
+            Err(e) => eprintln!("MR-Aktivität nicht gespeichert: {e}"),
+        }
+    }
+}
+
+/// Schreibt den jeweils neuesten Stand nach `path`.
+fn spawn_activity_writer(path: PathBuf) -> Sender<String> {
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        while let Ok(mut json) = rx.recv() {
+            while let Ok(newer) = rx.try_recv() {
+                json = newer;
+            }
+            if let Err(e) = MrActivityStore::write_json(&path, &json) {
                 eprintln!("MR-Aktivität nicht gespeichert: {e}");
             }
         }
-    }
+    });
+    tx
 }
 
 /// Neue Kommentare eines MR mit den zuletzt gelesenen Kommentaren.
@@ -127,6 +148,7 @@ impl MyApp {
         for (host, events) in by_host {
             let runner = Arc::clone(&self.glab);
             let tx = self.mr_tx.clone();
+            let ctx = self.ctx.clone();
             let me = me_per_host.get(&host).cloned();
             std::thread::spawn(move || {
                 let mrs: Vec<(String, u64)> = events
@@ -147,6 +169,9 @@ impl MyApp {
                     })
                     .collect();
                 let _ = tx.send(MrResult::Notes { me, jobs });
+                // Sonst käme die Benachrichtigung erst mit dem nächsten
+                // Takt (im Tray bis zu einer Minute später)
+                ctx.request_repaint();
             });
         }
     }
@@ -167,16 +192,17 @@ impl MyApp {
         if by_host.is_empty() {
             return;
         }
-        let git_email = crate::git::global_user_email();
         for (host, checks) in by_host {
             let runner = Arc::clone(&self.glab);
             let tx = self.mr_tx.clone();
+            let ctx = self.ctx.clone();
             let username = me_per_host.get(&host).cloned();
-            let git_email = git_email.clone();
             std::thread::spawn(move || {
                 let work = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut emails = fetch_my_emails(&*runner, &host);
-                    emails.extend(git_email);
+                    // git-Config hier lesen, nicht im UI-Thread (das Home
+                    // kann auf einem Netzlaufwerk liegen)
+                    emails.extend(crate::git::global_user_email());
                     emails.sort();
                     emails.dedup();
                     let me = MyIdentity { username, emails };
@@ -197,6 +223,8 @@ impl MyApp {
                 }));
                 if let Ok((me, results)) = work {
                     let _ = tx.send(MrResult::Commits { me, results });
+                    // Kein Lade-Flag hält die Oberfläche hier wach
+                    ctx.request_repaint();
                 }
             });
         }
@@ -251,16 +279,18 @@ impl MyApp {
             }
             // Bild der Benachrichtigung: wer zuletzt kommentiert hat (nicht
             // der MR-Autor); unbekannt → allgemeiner Avatar
-            event.author = others
-                .last()
-                .map(|n| n.author_name.clone())
-                .unwrap_or_default();
+            match others.last() {
+                Some(last) => event.author = last.author_name.clone(),
+                // Review-Anfrage/Erwähnung behält ihren Autor (steht im Text)
+                None if trigger.is_some() => {}
+                None => event.author.clear(),
+            }
             let line = match others.as_slice() {
                 [] => None,
                 [one] => Some(format!(
                     "{}: {}",
                     one.author_name,
-                    note_snippet(&one.body, SNIPPET_CHARS)
+                    snippet(&one.body, SNIPPET_CHARS)
                 )),
                 [.., last] => Some(tr_fmt(
                     self.config.language,
@@ -268,7 +298,7 @@ impl MyApp {
                     &[
                         &last.author_name,
                         &(others.len() - 1).to_string(),
-                        &note_snippet(&last.body, SNIPPET_CHARS),
+                        &snippet(&last.body, SNIPPET_CHARS),
                     ],
                 )),
             };

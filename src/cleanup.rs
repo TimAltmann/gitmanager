@@ -57,6 +57,31 @@ pub struct CleanupCandidate {
 }
 
 impl CleanupCandidate {
+    /// Neuer Eintrag; was erst die Prüfung im Worker kennt (`branch_safety`,
+    /// `tip`, …), bleibt leer.
+    fn new(
+        target: CleanupTarget,
+        reasons: Vec<CleanupReason>,
+        dirty_files: usize,
+        ahead: usize,
+    ) -> Self {
+        Self {
+            target,
+            reasons,
+            dirty_files,
+            ahead,
+            head_unreachable: false,
+            // Verlustgefahr ist vorab abgewählt
+            selected: dirty_files == 0 && ahead == 0,
+            delete_branch: false,
+            branch_safety: None,
+            tip: None,
+            merged_heads: Vec::new(),
+            open_mr: None,
+            claude_running: false,
+        }
+    }
+
     /// Verlustgefahr: vorab abgewählt, orange markiert; ausgeführt nur mit
     /// ausdrücklichem Haken und dann mit `--force` bzw. `-D`.
     pub fn needs_force(&self) -> bool {
@@ -140,24 +165,16 @@ pub fn collect_candidates(
         if reasons.is_empty() {
             continue;
         }
-        out.push(CleanupCandidate {
-            target: CleanupTarget::Worktree {
+        out.push(CleanupCandidate::new(
+            CleanupTarget::Worktree {
                 path: repo.path.clone(),
                 main: git::main_repo_of(&repo.common_dir),
                 branch,
             },
             reasons,
-            dirty_files: repo.dirty_files,
-            ahead: repo.ahead,
-            head_unreachable: false,
-            selected: repo.dirty_files == 0 && repo.ahead == 0,
-            delete_branch: false,
-            branch_safety: None,
-            tip: None,
-            merged_heads: Vec::new(),
-            open_mr: None,
-            claude_running: false,
-        });
+            repo.dirty_files,
+            repo.ahead,
+        ));
     }
     for repo in repos.iter().filter(|r| !r.is_linked_worktree) {
         let Some(branches) = gone.get(&repo.path) else {
@@ -173,23 +190,15 @@ pub fn collect_candidates(
             if checked_out {
                 continue;
             }
-            out.push(CleanupCandidate {
-                target: CleanupTarget::Branch {
+            out.push(CleanupCandidate::new(
+                CleanupTarget::Branch {
                     repo: repo.path.clone(),
                     branch: branch.clone(),
                 },
-                reasons: vec![CleanupReason::UpstreamGone],
-                dirty_files: 0,
-                ahead: 0,
-                head_unreachable: false,
-                selected: true,
-                delete_branch: false,
-                branch_safety: None,
-                tip: None,
-                merged_heads: Vec::new(),
-                open_mr: None,
-                claude_running: false,
-            });
+                vec![CleanupReason::UpstreamGone],
+                0,
+                0,
+            ));
         }
     }
     out

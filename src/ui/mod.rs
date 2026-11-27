@@ -1,5 +1,6 @@
 pub mod claude_anim;
 pub mod claude_sessions;
+pub mod icons;
 pub mod merge_requests;
 pub mod new_claude_session;
 pub mod repo_card_chips;
@@ -12,3 +13,4 @@ pub mod theme;
 // auf Windows bleibt -D warnings strikt.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod tray_popup;
+pub mod widgets;
