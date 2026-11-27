@@ -264,8 +264,8 @@ cargo test
 **Project layout:**
 ```
 src/
-  main.rs       # eframe bootstrap + load_icon (256) + image loaders
-  app.rs        # MyApp, scan thread, branch dialog, top/status bars, language switch
+  main.rs       # eframe bootstrap + load_icon (256)
+  app.rs        # MyApp, image loaders, scan thread, branch dialog, top/status bars, language switch
   i18n.rs       # Language enum (En/De) + TEXTS table + tr() translations
   config.rs     # AppConfig v15 (roots, profiles, agents, terminal, theme, language, repo_state, merge_requests) + migration
   git/          # mod.rs (RepoInfo, branches), fetch.rs, checkout.rs (safe/force/stash), worktree.rs,

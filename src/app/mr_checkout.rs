@@ -105,7 +105,7 @@ impl MyApp {
                 .merge_requests
                 .remember_after_checkout(&choice.after);
         }
-        if self.git_busy.holds_refs() || self.auto_fetching {
+        if self.git_busy.holds_refs() || self.auto_fetching || self.branch_switch.is_some() {
             self.set_status(tr(lang, "mr_checkout_blocked"));
             return;
         }
@@ -1504,6 +1504,34 @@ mod tests {
         assert!(app.error.is_none(), "{:?}", app.error);
         app.close_branch_dialog();
         settle(&mut app);
+    }
+
+    /// Dialog während „Stash & Switch“ abgebrochen: der Pop-Hinweis steht
+    /// im Banner und überlebt den Rescan nach dem Wechsel.
+    #[test]
+    fn failed_stash_pop_without_dialog_stays_in_banner() {
+        let dir = tempdir().unwrap();
+        let clone = upstream_and_clone(dir.path());
+        std::fs::write(clone.join("a.txt"), "local\n").unwrap();
+        std::fs::create_dir_all(clone.join(".git/logs/refs/stash.lock")).unwrap();
+        let mut info = clone_info(&clone, "main");
+        info.dirty = true;
+        let mut app = app_with(vec![info]);
+        app.start_mr_checkout(switch(&clone, AfterAction::Nothing));
+        settle(&mut app);
+        let dlg = app.branch_dialog.as_ref().expect("Dialog");
+        let (path, branch) = (dlg.repo_path.clone(), dlg.target_branch.clone());
+        app.start_branch_switch(path, branch, crate::app::SwitchMode::Stash);
+        app.close_branch_dialog();
+        settle(&mut app);
+        assert_eq!(head_of(&clone), "feature/x");
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|e| e.contains("Stash bleibt unter stash@{0}")),
+            "{:?}",
+            app.error
+        );
     }
 
     /// Fehler gehen ins Banner (`self.error`, beide Ansichten), ohne Rescan.

@@ -230,7 +230,7 @@ impl MyApp {
         let mut cancel = false;
         // Offene Ordnerprüfung: Vorschlag mit ihrem Ergebnis neu berechnen
         let mut suggestion_dirty = dialog.suggestion_pending;
-        let busy = self.git_busy.holds_refs() || self.auto_fetching;
+        let busy = self.git_busy.holds_refs() || self.auto_fetching || self.branch_switch.is_some();
         let bases: Vec<&RepoInfo> = self
             .repos
             .iter()

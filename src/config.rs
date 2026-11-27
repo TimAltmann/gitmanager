@@ -1234,7 +1234,7 @@ impl AppConfig {
                 eprintln!("Config laden fehlgeschlagen, nutze Default: {e:#}");
                 let mut message = format!("{e:#}");
                 if let Some(path) = Self::config_path().filter(|p| p.exists()) {
-                    let backup = path.with_extension("json.bad");
+                    let backup = Self::free_backup_path(&path);
                     if std::fs::copy(&path, &backup).is_ok() {
                         message.push_str(&format!(" – {}", backup.display()));
                     }
@@ -1242,6 +1242,19 @@ impl AppConfig {
                 (Self::default(), Some(message))
             }
         }
+    }
+
+    /// `config.json.bad`, bei vorhandener Datei `.bad.1`, `.bad.2` …: eine
+    /// frühere Sicherung ist womöglich die einzige Kopie der Einstellungen.
+    fn free_backup_path(path: &Path) -> PathBuf {
+        let first = path.with_extension("json.bad");
+        if !first.exists() {
+            return first;
+        }
+        (1..100)
+            .map(|n| path.with_extension(format!("json.bad.{n}")))
+            .find(|p| !p.exists())
+            .unwrap_or(first)
     }
 
     fn try_load() -> Result<Self> {

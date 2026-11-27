@@ -580,7 +580,10 @@ fn open_buttons(
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &tooltip));
         hover_outline(ui, &resp);
         let popup_id = Popup::default_response_id(&resp);
-        if resp.clicked() && !Popup::is_id_open(ui.ctx(), popup_id) {
+        // Im Frame des Klicks ist das Popup noch nicht offen (es öffnet
+        // weiter unten), die Suche kann aber schon fertig sein
+        let opening = resp.clicked() && !Popup::is_id_open(ui.ctx(), popup_id);
+        if opening {
             ui.ctx().data_mut(|d| d.remove::<SlnMenu>(popup_id));
             if ide.no_args {
                 actions.ide_open = Some((repo.clone(), ide.id.clone(), repo.clone()));
@@ -598,7 +601,10 @@ fn open_buttons(
         let search = ui.ctx().data(|d| d.get_temp::<SlnSearch>(popup_id));
         if let Some(solutions) = search.as_ref().and_then(SlnSearch::take) {
             ui.ctx().data_mut(|d| d.remove::<SlnSearch>(popup_id));
-            if solutions.is_empty() {
+            if !opening && !Popup::is_id_open(ui.ctx(), popup_id) {
+                // Popup inzwischen weggeklickt: das Ergebnis verfällt, die
+                // IDE startet nicht mehr hinterher
+            } else if solutions.is_empty() {
                 actions.ide_open = Some((repo.clone(), ide.id.clone(), repo.clone()));
                 Popup::close_id(ui.ctx(), popup_id);
             } else {

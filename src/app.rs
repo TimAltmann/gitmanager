@@ -731,8 +731,12 @@ impl MyApp {
         // Startup-Sync: Run-Key mit aktueller exe synchronisieren (falls exe verschoben).
         // Best effort — kein Start-Abbruch bei Registry-Fehlern.
         // M1: set() selbst ist idempotent (kein Rewrite wenn Wert identisch).
-        if let Err(e) = crate::autostart::apply_autostart(config.autostart) {
-            eprintln!("Autostart-Sync fehlgeschlagen: {e:#}");
+        // Nicht mit den Defaults einer unlesbaren Config: `autostart = false`
+        // löschte sonst den Run-Key, den der Nutzer gesetzt hat.
+        if load_error.is_none() {
+            if let Err(e) = crate::autostart::apply_autostart(config.autostart) {
+                eprintln!("Autostart-Sync fehlgeschlagen: {e:#}");
+            }
         }
         // M1: --minimized (Autostart) startet versteckt im Tray.
         // N6: gleiche Entscheidung wie main() (Single Source).
@@ -1320,8 +1324,8 @@ impl MyApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
             return;
         }
-        if self.git_busy.holds_refs() {
-            // Manueller Scan/Fetch oder Auschecken läuft: Auto auslassen
+        if self.git_busy.holds_refs() || self.branch_switch.is_some() {
+            // Manueller Scan/Fetch, Auschecken oder Branch-Wechsel läuft: Auto auslassen
             // statt blockieren (Finding D1) — nächster Tick holt es nach.
             ctx.request_repaint_after(std::time::Duration::from_secs(60));
             return;
@@ -2149,11 +2153,18 @@ impl MyApp {
                 // Gewechselt, aber Stash pop gescheitert (Stash bleibt
                 // erhalten): Hinweis im Dialog wie bisher und neu scannen.
                 // Ein MR-Wechsel ist trotzdem erledigt (Meldung, „Danach öffnen“).
+                // Erst scannen: `start_scan` räumt das Banner ab.
+                self.start_scan();
                 match &mut self.branch_dialog {
                     Some(dlg) if own_dialog => dlg.error = Some(pop_failed),
-                    _ => self.error = Some(pop_failed),
+                    // Dialog inzwischen geschlossen: Banner, das den Rescan
+                    // überlebt – die Änderungen liegen sonst unbemerkt im Stash
+                    _ => {
+                        self.error = Some(pop_failed.clone());
+                        self.error_after_scan = Some(pop_failed);
+                        self.reveal_main_on_error(ctx);
+                    }
                 }
-                self.start_scan();
                 self.mr_switch_succeeded(&repo_path, &target_branch);
             }
             SwitchResult::Done(Ok((outcome, None))) => {

@@ -1293,6 +1293,31 @@ fn checkout_force_nonexistent_and_bare_error() {
     assert!(res.is_err());
 }
 
+/// Repo ohne Commit (frisch `git init` + Fetch): libgit2 kann dort nicht
+/// stashen (`UnbornBranch`); der Wechsel läuft trotzdem, die ungetrackte
+/// Datei bleibt liegen.
+#[test]
+fn stash_and_checkout_on_unborn_head_switches_without_stash() {
+    let upstream = tempdir().unwrap();
+    init_repo_with_commit(upstream.path(), "main");
+    let dir = tempdir().unwrap();
+    let mut opts = git2::RepositoryInitOptions::new();
+    opts.initial_head("trunk");
+    let repo = Repository::init_opts(dir.path(), &opts).unwrap();
+    let mut remote = repo
+        .remote("origin", upstream.path().to_str().unwrap())
+        .unwrap();
+    remote
+        .fetch(&["refs/heads/*:refs/remotes/origin/*"], None, None)
+        .unwrap();
+    std::fs::write(dir.path().join("notiz.txt"), "lokal\n").unwrap();
+    let res = stash_and_checkout(dir.path(), "origin/main");
+    assert!(res.is_ok(), "{res:?}");
+    assert!(res.unwrap().pop_failed.is_none());
+    assert_eq!(repo.head().unwrap().shorthand().ok(), Some("main"));
+    assert!(dir.path().join("notiz.txt").exists());
+}
+
 #[test]
 fn stash_and_checkout_clean_warns_nothing_to_stash() {
     let dir = tempdir().unwrap();

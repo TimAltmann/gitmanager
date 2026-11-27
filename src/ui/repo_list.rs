@@ -301,7 +301,11 @@ pub fn show_repo_list(
                             // Nur sichtbare Karten aufbauen; die Zielkarte von
                             // „In Repo-Liste zeigen“ immer (sie wird angesprungen)
                             let id = egui::Id::new(("repo_card", &repo.path));
-                            crate::ui::widgets::culled(ui, id, highlight.is_some(), |ui| {
+                            // Karte mit offenem Dropdown ebenfalls: dessen
+                            // Schließen (Klick daneben, Escape) hängt an der Zeile
+                            let always =
+                                highlight.is_some() || row_dropdown_open(ui.ctx(), repo, config);
+                            crate::ui::widgets::culled(ui, id, always, |ui| {
                                 show_repo_row(ui, repo, config, actions, highlight, cx);
                             });
                             ui.add_space(6.0);
@@ -364,6 +368,19 @@ fn show_list_toolbar(
             }
         });
     });
+}
+
+/// Ist ein Dropdown dieser Karte offen (Branch, Solution, eigene Config)?
+/// Die IDs sind dieselben wie in `show_repo_row`.
+fn row_dropdown_open(ctx: &egui::Context, repo: &RepoInfo, config: &AppConfig) -> bool {
+    let open = |id: egui::Id| ctx.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+    open(egui::Id::new("branch_popup").with(&repo.path))
+        || open(egui::Id::new("sln_popup").with(&repo.path))
+        || config
+            .get_effective_profile_for_repo(&repo.path)
+            .config_selectors
+            .iter()
+            .any(|sel| open(egui::Id::new("custom_popup").with(&repo.path).with(&sel.id)))
 }
 
 fn show_repo_row(

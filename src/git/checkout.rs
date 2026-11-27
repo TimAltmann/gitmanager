@@ -492,8 +492,17 @@ pub fn stash_and_checkout(path: &Path, branch_name: &str) -> anyhow::Result<Stas
     let stashes_before = stash_count(&mut repo);
     let stashed = match repo.stash_save(&sig, &stash_msg, Some(stash_flags)) {
         Ok(_) => true,
-        // „Nichts zu stashen“ (keine Änderungen): trotzdem wechseln
-        Err(e) if e.code() == git2::ErrorCode::NotFound => false,
+        // „Nichts zu stashen“ (keine Änderungen): trotzdem wechseln.
+        // Repo ohne Commit: libgit2 kann nicht stashen, der Checkout
+        // selbst überschreibt keine fremden Dateien
+        Err(e)
+            if matches!(
+                e.code(),
+                git2::ErrorCode::NotFound | git2::ErrorCode::UnbornBranch
+            ) =>
+        {
+            false
+        }
         Err(e) => {
             let hint = if stash_count(&mut repo) > stashes_before {
                 " – ein Teil der Änderungen liegt bereits unter stash@{0}"

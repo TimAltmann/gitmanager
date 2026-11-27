@@ -746,7 +746,6 @@ const TEXTS: &[(&str, &str, &str)] = &[
     ("rel_yesterday", "yesterday", "gestern"),
     ("rel_days", "{} days ago", "vor {} Tagen"),
 
-    // fallback for any missing key -> return key itself
     // ── Repo-Karte: Chips, Stern, ⋯-Menü ──────────────────────────
     ("repo_state_clean", "clean", "sauber"),
     ("repo_state_dirty", "{} changed", "{} geändert"),
