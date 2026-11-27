@@ -995,6 +995,42 @@ fn show_tray_repo_row(ui: &mut egui::Ui, p: TrayRepoRowParams<'_>) {
     });
 }
 
+/// Rechteck in Bildschirm-Pixeln (virtueller Desktop, wie Windows es liefert).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PxRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+/// Linke obere Ecke des Popups in Bildschirm-Pixeln: mittig über dem
+/// Tray-Icon, innerhalb des Arbeitsbereichs (`work`, ohne Taskleiste) des
+/// Monitors, auf dem das Icon liegt. `scale` ist die Skalierung dieses
+/// Monitors (1.0 = 100 %), `popup_size` die Größe in Punkten.
+///
+/// In Pixeln statt Punkten, weil Punkte je Monitor anders skalieren: mit
+/// der Skalierung des Hauptfensters umgerechnet landete das Popup auf dem
+/// falschen Monitor oder unter der Taskleiste.
+pub fn popup_origin_px(
+    icon: PxRect,
+    work: PxRect,
+    scale: f32,
+    popup_size: egui::Vec2,
+) -> (i32, i32) {
+    let px = |points: f32| (points * scale).round() as i32;
+    let (w, h, gap) = (px(popup_size.x), px(popup_size.y), px(4.0));
+    let x = (icon.left + icon.right) / 2 - w / 2;
+    let y = icon.top - h - gap;
+    // Wie `safe_clamp` unten: ein Popup größer als der Arbeitsbereich darf
+    // `clamp` nicht zum Absturz bringen
+    let clamp = |v: i32, lo: i32, hi: i32| v.clamp(lo.min(hi), lo.max(hi));
+    (
+        clamp(x, work.left + gap, work.right - w - gap),
+        clamp(y, work.top + gap, work.bottom - h - gap),
+    )
+}
+
 /// Calculates popup position directly above the tray icon rect.
 /// `tray_rect` is in screen coordinates (physical pixels converted to points).
 /// `popup_size` is the viewport inner size.
@@ -1118,6 +1154,61 @@ pub fn sorted_visible_repos(repos: &[RepoInfo], config: &AppConfig, limit: usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Zwei Monitore: links 2560×1440 bei 100 %, rechts (Taskleiste, Icon)
+    /// 3840×2160 bei 150 %. Das Popup bleibt auf dem rechten Monitor und
+    /// endet über der Taskleiste.
+    #[test]
+    fn popup_origin_px_uses_icon_monitor_and_work_area() {
+        let icon = PxRect {
+            left: 6200,
+            top: 2100,
+            right: 6236,
+            bottom: 2136,
+        };
+        // Arbeitsbereich ohne die 72 px hohe Taskleiste
+        let work = PxRect {
+            left: 2560,
+            top: 0,
+            right: 6400,
+            bottom: 2088,
+        };
+        let size = egui::vec2(360.0, 480.0);
+        let (x, y) = popup_origin_px(icon, work, 1.5, size);
+        let (w, h) = (540, 720);
+        assert!(x >= work.left && x + w <= work.right, "x={x}");
+        assert_eq!(y + h, work.bottom - 6, "Unterkante über der Taskleiste");
+        // Icon weit genug vom Rand: mittig darüber
+        let icon = PxRect {
+            left: 4000,
+            top: 2100,
+            right: 4036,
+            bottom: 2136,
+        };
+        assert_eq!(popup_origin_px(icon, work, 1.5, size).0, 4018 - w / 2);
+    }
+
+    /// Taskleiste oben oder Popup höher als der Bildschirm: kein Panic,
+    /// das Popup beginnt im Arbeitsbereich.
+    #[test]
+    fn popup_origin_px_clamps_into_work_area() {
+        let work = PxRect {
+            left: 0,
+            top: 48,
+            right: 1920,
+            bottom: 1080,
+        };
+        let icon = PxRect {
+            left: 1800,
+            top: 8,
+            right: 1832,
+            bottom: 40,
+        };
+        let (x, y) = popup_origin_px(icon, work, 1.0, egui::vec2(360.0, 480.0));
+        assert_eq!((x, y), (1920 - 360 - 4, 52));
+        let (_, y) = popup_origin_px(icon, work, 1.0, egui::vec2(360.0, 2000.0));
+        assert!(y <= 52);
+    }
 
     #[test]
     fn popup_position_above_tray() {

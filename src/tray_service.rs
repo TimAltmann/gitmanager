@@ -42,6 +42,11 @@ mod imp {
         pub popup_open: bool,
         pub popup_rect: Option<Rect>,
         pub popup_opened_at: Option<Instant>,
+        /// Tray-Icon in Bildschirm-Pixeln, wie Windows es beim Klick meldet
+        pub popup_icon_px: Option<tray_popup::PxRect>,
+        /// So oft darf das offene Popup noch an seine Zielposition gesetzt
+        /// werden (siehe `show_tray_popup_viewport`)
+        pub popup_moves_left: u8,
         /// pixels_per_point of the ROOT (main) viewport, synced from main thread.
         /// Service viewport lives off-screen and may report a different DPI,
         /// so tray-rect conversion must not use the service ppp (M3).
@@ -71,6 +76,8 @@ mod imp {
                 popup_open: false,
                 popup_rect: None,
                 popup_opened_at: None,
+                popup_icon_px: None,
+                popup_moves_left: 0,
                 root_ppp: 1.0,
                 last_toggle_at: None,
                 action_tx,
@@ -161,6 +168,47 @@ mod imp {
         }
     }
 
+    /// Korrekturen der Popup-Position je Öffnen: das Fenster entsteht auf
+    /// irgendeinem Monitor und wechselt beim ersten Setzen die Skalierung;
+    /// die Grenze verhindert ein Dauerfeuer, falls Windows die Position
+    /// nicht annimmt.
+    const POPUP_MOVES: u8 = 8;
+
+    /// Arbeitsbereich (ohne Taskleiste) und Skalierung des Monitors, auf dem
+    /// der Punkt liegt.
+    fn monitor_at(x: i32, y: i32) -> Option<(tray_popup::PxRect, f32)> {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        };
+        use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+        // SAFETY: reine Abfragen; `info` ist initialisiert und trägt seine Größe.
+        unsafe {
+            let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+            if monitor.is_null() {
+                return None;
+            }
+            let mut info: MONITORINFO = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(monitor, &mut info) == 0 {
+                return None;
+            }
+            let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
+            if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) != 0
+                || dpi_x == 0
+            {
+                return None;
+            }
+            let work = tray_popup::PxRect {
+                left: info.rcWork.left,
+                top: info.rcWork.top,
+                right: info.rcWork.right,
+                bottom: info.rcWork.bottom,
+            };
+            Some((work, dpi_x as f32 / 96.0))
+        }
+    }
+
     fn toggle_popup(shared: &Arc<Mutex<TrayShared>>, ctx: &Context, rect: tray_icon::Rect) {
         let mut guard = lock_shared(shared);
         // M3/#9: ROOT-ppp bevorzugen (vom Main-Thread synchronisiert), Service-Viewport
@@ -176,6 +224,17 @@ mod imp {
         } else {
             guard.popup_open = true;
             guard.popup_rect = Some(tray_rect);
+            let (left, top) = (
+                rect.position.x.round() as i32,
+                rect.position.y.round() as i32,
+            );
+            guard.popup_icon_px = Some(tray_popup::PxRect {
+                left,
+                top,
+                right: left + rect.size.width as i32,
+                bottom: top + rect.size.height as i32,
+            });
+            guard.popup_moves_left = POPUP_MOVES;
             guard.popup_opened_at = Some(Instant::now());
         }
         ctx.request_repaint();
@@ -296,7 +355,7 @@ mod imp {
 
     fn show_tray_popup_viewport(shared: &Arc<Mutex<TrayShared>>, ctx: &Context) {
         // Clone needed data (Arc clones are cheap; deep-clone only visible Top-N below)
-        let (tray_rect, popup_opened_at) = {
+        let (tray_rect, popup_opened_at, icon_px, moves_left) = {
             let guard = lock_shared(shared);
             let rect = guard.popup_rect.unwrap_or_else(|| {
                 let screen = ctx.input(|i| {
@@ -309,7 +368,12 @@ mod imp {
                     egui::vec2(20.0, 20.0),
                 )
             });
-            (rect, guard.popup_opened_at)
+            (
+                rect,
+                guard.popup_opened_at,
+                guard.popup_icon_px,
+                guard.popup_moves_left,
+            )
         };
 
         let (repos_arc, config_arc) = {
@@ -370,7 +434,27 @@ mod imp {
                 monitor_offset_y + monitor_size.y,
             ),
         );
-        let popup_pos = tray_popup::calculate_popup_position(tray_rect, popup_size, screen_rect);
+        let fallback_pos = tray_popup::calculate_popup_position(tray_rect, popup_size, screen_rect);
+        // Ziel in Bildschirm-Pixeln, aus Monitor und Skalierung am Tray-Icon
+        // (nicht am Hauptfenster). Die Punkte für egui gelten, sobald das
+        // Popup auf diesem Monitor liegt; bis dahin korrigiert der Block im
+        // Viewport unten.
+        let target_px = icon_px.and_then(|icon| {
+            let (work, scale) =
+                monitor_at((icon.left + icon.right) / 2, (icon.top + icon.bottom) / 2)?;
+            Some((
+                tray_popup::popup_origin_px(icon, work, scale, popup_size),
+                scale,
+            ))
+        });
+        let popup_pos = match target_px {
+            Some(((x, y), scale)) => {
+                let ppp = scale * ctx.zoom_factor();
+                egui::pos2(x as f32 / ppp, y as f32 / ppp)
+            }
+            None => fallback_pos,
+        };
+        let mut moved = false;
 
         let mut close_popup = false;
         // Geschlossen, weil das Popup den Fokus verlor
@@ -400,6 +484,25 @@ mod imp {
                         }
                     });
                     return;
+                }
+                // Liegt das Fenster (noch) nicht am Ziel, in Pixeln nachsetzen:
+                // egui rechnet Positionen mit der Skalierung des Monitors um,
+                // auf dem das Fenster gerade liegt – beim Anlegen ist das
+                // nicht unbedingt der mit dem Tray-Icon.
+                if let (Some(((x, y), _)), true) = (target_px, moves_left > 0) {
+                    let ppp = ctx.pixels_per_point();
+                    let at = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min * ppp);
+                    let off = at.is_none_or(|p| {
+                        (p.x - x as f32).abs() > 1.5 || (p.y - y as f32).abs() > 1.5
+                    });
+                    if off && ppp > 0.0 {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                            x as f32 / ppp,
+                            y as f32 / ppp,
+                        )));
+                        ctx.request_repaint();
+                        moved = true;
+                    }
                 }
                 // Der Stil gilt für den ganzen Context (gesetzt in `MyApp::new`
                 // und beim Speichern der Einstellungen): hier nur nach einem
@@ -462,6 +565,11 @@ mod imp {
             eprintln!("Tray popup viewport panicked, closing popup");
             lock_shared(shared).close_popup();
             return;
+        }
+
+        if moved {
+            let mut guard = lock_shared(shared);
+            guard.popup_moves_left = guard.popup_moves_left.saturating_sub(1);
         }
 
         // Handle close (Task 6: leert auch die Branch-Filter)
